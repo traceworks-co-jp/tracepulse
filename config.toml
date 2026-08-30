@@ -1,0 +1,14 @@
+[polling]
+interval_seconds = 30
+
+[snmp]
+default_community = "public"
+
+[alert]
+error_rate_threshold = 0.05
+spike_threshold = 10
+health_warning_threshold = 80
+health_critical_threshold = 60
+
+[retention]
+history_days = 7

@@ -1,0 +1,15 @@
+[package]
+name = "trace-pulse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.53.1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+thiserror = "2.0"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+snmp = "0.2.2"
