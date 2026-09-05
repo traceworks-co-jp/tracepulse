@@ -533,7 +533,7 @@ fn api_device_detail(
         let unit = s.unit.as_deref().unwrap_or("");
         let status = s.status.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
         format!(
-            r#"{{"index":{},"name":"{}","sensor_type":"{}","source":"{}","oid":"{}","value":{},"unit":"{}","status":{},"is_alarm":{}}}"#,
+            r#"{{"index":{},"name":"{}","sensor_type":"{}","source":"{}","oid":"{}","value":{},"unit":"{}","status":{},"status_text":"{}","is_alarm":{}}}"#,
             s.index,
             escape_json(&s.name),
             escape_json(&s.sensor_type),
@@ -542,6 +542,7 @@ fn api_device_detail(
             value,
             escape_json(unit),
             status,
+            escape_json(s.status_text.as_deref().unwrap_or("")),
             s.is_alarm,
         )
     }).collect();
@@ -3643,7 +3644,8 @@ function renderHardwareStatus(sensors) {
   if (!box) return;
   var visible = (sensors || []).filter(function(s) {
     var type = (s.sensor_type || '').toLowerCase();
-    return type === 'temperature' || type === 'power' || type === 'fan';
+    var hasValue = (s.value !== null && s.value !== undefined) || (s.status !== null && s.status !== undefined);
+    return (type === 'temperature' || type === 'power' || type === 'fan') && hasValue;
   });
   if (visible.length === 0) {
     box.innerHTML = '<span class=no-data>No Sensors Detected</span>';
@@ -3652,11 +3654,12 @@ function renderHardwareStatus(sensors) {
   box.innerHTML = visible.map(function(s) {
     var cls = s.is_alarm ? 'hardware-card crit' : (s.status !== null && s.status !== undefined && s.status !== 0 ? 'hardware-card warn' : 'hardware-card');
     var label = s.name || (s.source === 'entity-physical' ? ('component ' + s.index) : ('sensor ' + s.index));
-    var value = (s.value !== null && s.value !== undefined) ? s.value : ((s.status !== null && s.status !== undefined) ? s.status : 'N/A');
-    var unit = s.unit ? (' ' + s.unit) : '';
+    var displayVal = s.status_text 
+      ? s.status_text 
+      : ((s.value !== null && s.value !== undefined) ? (s.value + (s.unit ? ' ' + s.unit : '')) : ((s.status !== null && s.status !== undefined) ? s.status : 'N/A'));
     return '<div class=\'' + cls + '\'>' +
       '<div class=\'label\'>' + label + '</div>' +
-      '<div class=\'value\'>' + value + unit + '</div>' +
+      '<div class=\'value\'>' + displayVal + '</div>' +
       '</div>';
   }).join('');
 }

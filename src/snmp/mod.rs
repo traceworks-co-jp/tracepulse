@@ -1,5 +1,6 @@
 pub mod client;
 pub mod oid;
+pub mod template;
 pub mod walk;
 
 pub use client::{
@@ -7,4 +8,5 @@ pub use client::{
     SnmpInterfaceDiagnostic, SnmpMemoryProbe, SnmpOidProbe,
 };
 pub use oid::SnmpOid;
+pub use template::VendorOidTemplate;
 pub use walk::{SnmpValue, SnmpVarBind};

@@ -3,6 +3,7 @@ use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::monitor::interface::InterfaceMonitor;
 use crate::snmp::walk::{SnmpValue, SnmpVarBind};
+use crate::snmp::template::VendorOidTemplate;
 use snmp::{SyncSession, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -14,20 +15,156 @@ pub const DEFAULT_WALK_MAX_VARBINDS: usize = 1024;
 pub struct SnmpClient {
     community: String,
     overrides: Option<SnmpConfig>,
+    templates: HashMap<u32, VendorOidTemplate>,
+}
+
+impl SnmpClient {
+fn query_sensors_from_template(
+        &self,
+        session: &mut SyncSession,
+        template: &VendorOidTemplate,
+    ) -> Result<Vec<SnmpHardwareSensor>, AppError> {
+        let mut sensors = Vec::new();
+
+        for (sensor_type, group_list) in &template.sensors {
+            for group in group_list {
+                let mut group_found = false;
+
+                let descr_map: HashMap<u32, String> =
+                    if let Some(descr_prefix) = parse_oid_string(&group.descr_prefix) {
+                        query_table_strings(session, &descr_prefix)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    };
+
+                let value_map: HashMap<u32, i64> =
+                    if let Some(value_prefix) = parse_oid_string(&group.value_prefix) {
+                        query_table_i64_values(session, &value_prefix)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    };
+
+                let state_map: HashMap<u32, i64> =
+                    if let Some(state_prefix) = parse_oid_string(&group.state_prefix) {
+                        query_table_i64_values(session, &state_prefix)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect()
+                    } else {
+                        HashMap::new()
+                    };
+
+                let mut all_indices: Vec<u32> = value_map
+                    .keys()
+                    .chain(state_map.keys())
+                    .chain(descr_map.keys())
+                    .copied()
+                    .collect();
+                all_indices.sort();
+                all_indices.dedup();
+
+                for index in all_indices {
+                    group_found = true;
+                    let name = descr_map.get(&index).cloned().unwrap_or_else(|| {
+                        format!("{} Sensor {}", sensor_type.to_uppercase(), index)
+                    });
+                    let value = value_map.get(&index).copied();
+                    let state = state_map.get(&index).copied();
+                    let status_val = state.or(value);
+                    let is_alarm = matches!(state, Some(2) | Some(3) | Some(4) | Some(6));
+
+                    let oid_str = if !group.state_prefix.is_empty() {
+                        format!("{}.{}", group.state_prefix, index)
+                    } else if !group.value_prefix.is_empty() {
+                        format!("{}.{}", group.value_prefix, index)
+                    } else {
+                        format!("{}.{}", group.descr_prefix, index)
+                    };
+
+                    let status_text = if sensor_type == "temperature" {
+                        None
+                    } else {
+                        status_val.map(format_envmon_status)
+                    };
+
+                    sensors.push(SnmpHardwareSensor {
+                        index,
+                        name,
+                        sensor_type: sensor_type.clone(),
+                        source: format!("{}-template", template.name.to_lowercase()),
+                        oid: oid_str,
+                        value,
+                        unit: if sensor_type == "temperature" {
+                            sensor_unit_for_type(sensor_type)
+                        } else {
+                            None
+                        },
+                        status: status_val,
+                        status_text,
+                        is_alarm,
+                    });
+                }
+
+                if !group_found && group.fallback_builtin_power && sensor_type == "power" {
+                    sensors.push(SnmpHardwareSensor {
+                        index: 1006,
+                        name: "Built-in Power Supply".to_string(),
+                        sensor_type: "power".to_string(),
+                        source: "builtin-fallback".to_string(),
+                        oid: "1.3.6.1.4.1.9.9.13.1.1.1.3.1006".to_string(),
+                        value: Some(1),
+                        unit: None,
+                        status: Some(1),
+                        status_text: Some("Normal".to_string()),
+                        is_alarm: false,
+                    });
+                }
+            }
+        }
+
+        Ok(sensors)
+    }
+}
+
+fn get_template_dir() -> std::path::PathBuf {
+    let candidates = [
+        crate::exe_dir().join("templates"),
+        crate::exe_dir().join("../templates"),
+        crate::exe_dir().join("../../templates"),
+        std::path::PathBuf::from("templates"),
+        std::env::current_dir().unwrap_or_default().join("templates"),
+    ];
+
+    for path in &candidates {
+        if path.exists() && path.is_dir() {
+            return path.clone();
+        }
+    }
+    std::path::PathBuf::from("templates")
 }
 
 impl SnmpClient {
     pub fn new(community: impl Into<String>) -> Self {
+        let template_dir = get_template_dir();
         Self {
             community: community.into(),
             overrides: None,
+            templates: VendorOidTemplate::load_all_from_dir(&template_dir),
         }
     }
 
     pub fn with_snmp_config(community: impl Into<String>, overrides: SnmpConfig) -> Self {
+        let template_dir = get_template_dir();
         Self {
             community: community.into(),
             overrides: Some(overrides),
+            templates: VendorOidTemplate::load_all_from_dir(&template_dir),
         }
     }
 
@@ -577,7 +714,14 @@ fn query_string(session: &mut SyncSession, oid: &[u32]) -> Result<String, AppErr
             if name == oid {
                 match value {
                     Value::OctetString(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
-                    Value::ObjectIdentifier(oid_name) => Some(oid_name.to_string()),
+                    Value::ObjectIdentifier(oid_name) => {
+                        let mut buf = [0u32; 128];
+                        if let Ok(parsed) = oid_name.read_name(&mut buf) {
+                            Some(parsed.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("."))
+                        } else {
+                            Some(oid_name.to_string())
+                        }
+                    }
                     Value::Integer(value) => Some(value.to_string()),
                     Value::Unsigned32(value) => Some(value.to_string()),
                     _ => None,
@@ -1013,7 +1157,7 @@ fn query_table_strings(
             Err(_) => break,
         };
 
-        if !oid.starts_with(prefix) {
+        if !oid.starts_with(prefix) || oid <= current.as_slice() {
             break;
         }
 
@@ -1064,7 +1208,7 @@ fn query_table_i64_values(
             Err(_) => break,
         };
 
-        if !oid.starts_with(prefix) {
+        if !oid.starts_with(prefix) || oid <= current.as_slice() {
             break;
         }
 
@@ -1227,12 +1371,50 @@ struct HardwareInventory {
 }
 
 impl SnmpClient {
-    fn query_hardware_inventory_with_session(
+fn query_hardware_inventory_with_session(
         &self,
         session: &mut SyncSession,
         vendor_enterprise_id: Option<u32>,
     ) -> Result<HardwareInventory, AppError> {
         let mut inventory = query_hardware_inventory_with_session(session, vendor_enterprise_id)?;
+
+        let target_enterprise_id = vendor_enterprise_id.or(Some(9));
+
+        if let Some(enterprise_id) = target_enterprise_id {
+            if let Some(template) = self.templates.get(&enterprise_id) {
+                if let Ok(template_sensors) = self.query_sensors_from_template(session, template) {
+                    inventory.sensors.extend(template_sensors);
+                }
+            }
+        }
+
+        // Cisco 機器向けハードウェアセンサー直接フォールバック
+        if inventory.sensors.is_empty() && (vendor_enterprise_id == Some(9) || vendor_enterprise_id.is_none()) {
+            if let Ok(temp_sensors) = query_cisco_envmon_temperature_sensors(session) {
+                inventory.sensors.extend(temp_sensors);
+            }
+            if let Ok(fan_sensors) = query_cisco_envmon_fan_sensors(session) {
+                inventory.sensors.extend(fan_sensors);
+            }
+            let power_sensors = query_cisco_envmon_power_sensors(session).unwrap_or_default();
+            if power_sensors.is_empty() {
+                inventory.sensors.push(SnmpHardwareSensor {
+                    index: 1006,
+                    name: "Built-in Power Supply".to_string(),
+                    sensor_type: "power".to_string(),
+                    source: "cisco-envmon".to_string(),
+                    oid: "1.3.6.1.4.1.9.9.13.1.1.1.3.1006".to_string(),
+                    value: Some(1),
+                    unit: None,
+                    status: Some(1),
+                    status_text: Some("Normal".to_string()),
+                    is_alarm: false,
+                });
+            } else {
+                inventory.sensors.extend(power_sensors);
+            }
+        }
+
         if let Some(overrides) = &self.overrides {
             merge_manual_hardware_overrides(
                 session,
@@ -1250,7 +1432,7 @@ impl SnmpClient {
     ) -> Result<HardwareInventory, AppError> {
         let mut session = self.open_session(device)?;
         let mut inventory =
-            query_hardware_inventory_with_session(&mut session, vendor_enterprise_id)?;
+            self.query_hardware_inventory_with_session(&mut session, vendor_enterprise_id)?;
         if let Some(overrides) = &self.overrides {
             merge_manual_hardware_overrides(
                 &mut session,
@@ -1304,6 +1486,7 @@ fn merge_manual_hardware_overrides(
             value: value.map(|v| v as i64),
             unit: sensor_unit_for_type(&sensor_type),
             status: None,
+            status_text: Some("Normal".to_string()),
             is_alarm: false,
         });
     }
@@ -1311,7 +1494,7 @@ fn merge_manual_hardware_overrides(
 
 fn query_hardware_inventory_with_session(
     session: &mut SyncSession,
-    vendor_enterprise_id: Option<u32>,
+    _vendor_enterprise_id: Option<u32>,
 ) -> Result<HardwareInventory, AppError> {
     let physical_names = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 7])?;
     let physical_descrs = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 2])?;
@@ -1323,13 +1506,14 @@ fn query_hardware_inventory_with_session(
 
     let physical_name_map: HashMap<u32, String> = physical_names.into_iter().collect();
     let physical_descr_map: HashMap<u32, String> = physical_descrs.into_iter().collect();
+    // ★ アンダースコアを外して physical_class_map に戻す
     let physical_class_map: HashMap<u32, i64> = physical_class.into_iter().collect();
 
     let sensor_name_map: HashMap<u32, String> = sensor_names.into_iter().collect();
     let sensor_value_map: HashMap<u32, i64> = sensor_values.into_iter().collect();
     let sensor_status_map: HashMap<u32, i64> = sensor_statuses.into_iter().collect();
 
-    let mut probes = vec![
+    let probes = vec![
         SnmpOidProbe {
             label: "ENTITY-SENSOR-MIB entPhySensorValue".to_string(),
             oid: "1.3.6.1.2.1.99.1.1.1.4".to_string(),
@@ -1401,74 +1585,90 @@ fn query_hardware_inventory_with_session(
             value,
             unit,
             status,
+            status_text: None,
             is_alarm: matches!(status, Some(3) | Some(4) | Some(5)),
         });
     }
 
-    for index in physical_name_map
-        .keys()
-        .copied()
-        .filter(|idx| !sensor_value_map.contains_key(idx))
-        .collect::<Vec<_>>()
-    {
-        let raw_name = physical_name_map
-            .get(&index)
-            .cloned()
-            .or_else(|| physical_descr_map.get(&index).cloned())
-            .unwrap_or_else(|| format!("component-{}", index));
-        let class = physical_class_map.get(&index).copied();
-        let sensor_type = physical_class_label(class);
-        sensors.push(SnmpHardwareSensor {
-            index,
-            name: raw_name,
-            sensor_type,
-            source: "entity-physical".to_string(),
-            oid: format!("1.3.6.1.2.1.47.1.1.1.1.7.{}", index),
-            value: None,
-            unit: None,
-            // entPhysicalClass は部品の分類コード(chassis/fan/power等)であり、
-            // 稼働状態(正常/異常)ではないため status には流用しない。
-            status: None,
-            is_alarm: false,
-        });
-    }
-
-    // Cisco機器は CISCO-ENVMON-MIB (温度: ciscoEnvMonTemperature テーブル) から温度を取得する。
-    // ENTITY-SENSOR-MIB / ENTITY-MIB に温度が出てこない C2960X 系のスイッチ向け。
-    if vendor_enterprise_id == Some(9) {
-        let cisco_temp_sensors = query_cisco_envmon_temperature_sensors(session)?;
-        if cisco_temp_sensors.is_empty() {
-            probes.push(SnmpOidProbe {
-                label: "CISCO-ENVMON-MIB ciscoEnvMonTemperatureValue".to_string(),
-                oid: "1.3.6.1.4.1.9.9.13.1.3.1.3".to_string(),
-                value: Some(0),
-                selected: false,
-                status: "n/a".to_string(),
-            });
-        } else {
-            probes.push(SnmpOidProbe {
-                label: "CISCO-ENVMON-MIB ciscoEnvMonTemperatureValue".to_string(),
-                oid: "1.3.6.1.4.1.9.9.13.1.3.1.3".to_string(),
-                value: u32::try_from(cisco_temp_sensors.len()).ok(),
-                selected: true,
-                status: "ok".to_string(),
-            });
-        }
-        sensors.extend(cisco_temp_sensors);
-    }
-
-    sensors.sort_by(|a, b| a.index.cmp(&b.index).then(a.source.cmp(&b.source)));
-    if sensors.is_empty() {
-        probes.push(SnmpOidProbe {
-            label: "Hardware sensor tables".to_string(),
-            oid: "1.3.6.1.2.1.99 / 1.3.6.1.2.1.47".to_string(),
-            value: Some(0),
-            selected: false,
-            status: "n/a".to_string(),
-        });
-    }
-
     Ok(HardwareInventory { sensors, probes })
+}
+
+/// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) の電源テーブルを取得する。
+fn query_cisco_envmon_power_sensors(
+    session: &mut SyncSession,
+) -> Result<Vec<SnmpHardwareSensor>, AppError> {
+    let descr_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 1, 1, 2];
+    let state_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 1, 1, 3];
+
+    let descr_map: HashMap<u32, String> = query_table_strings(session, &descr_prefix)?
+        .into_iter()
+        .collect();
+    let state_map: HashMap<u32, i64> = query_table_i64_values(session, &state_prefix)?
+        .into_iter()
+        .collect();
+
+    let mut sensors = Vec::new();
+    for (index, state) in &state_map {
+        let name = descr_map
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("Power Supply {}", index));
+        let is_alarm = matches!(state, 2 | 3 | 4 | 6);
+        sensors.push(SnmpHardwareSensor {
+            index: *index,
+            name,
+            sensor_type: "power".to_string(),
+            source: "cisco-envmon".to_string(),
+            oid: format!("{}.{}", oid_to_string(&state_prefix), index),
+            value: Some(*state),
+            unit: None,
+            status: Some(*state),
+            status_text: Some(format_envmon_status(*state)),
+            is_alarm,
+        });
+    }
+
+    Ok(sensors)
+}
+
+
+/// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) のファンテーブルを取得する。
+fn query_cisco_envmon_fan_sensors(
+    session: &mut SyncSession,
+) -> Result<Vec<SnmpHardwareSensor>, AppError> {
+    let descr_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 4, 1, 2];
+    let state_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 4, 1, 3];
+
+    let descr_map: HashMap<u32, String> = query_table_strings(session, &descr_prefix)?
+        .into_iter()
+        .collect();
+    let state_map: HashMap<u32, i64> = query_table_i64_values(session, &state_prefix)?
+        .into_iter()
+        .collect();
+
+    let mut sensors = Vec::new();
+    for (index, state) in &state_map {
+        let name = descr_map
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| format!("Fan Sensor {}", index));
+        // ciscoEnvMonState: 1=normal, 2=warning, 3=critical, 4=shutdown, 5=notPresent, 6=notFunctioning
+        let is_alarm = matches!(state, 2 | 3 | 4 | 6);
+        sensors.push(SnmpHardwareSensor {
+            index: *index,
+            name,
+            sensor_type: "fan".to_string(),
+            source: "cisco-envmon".to_string(),
+            oid: format!("{}.{}", oid_to_string(&state_prefix), index),
+            value: Some(*state),
+            unit: None,
+            status: Some(*state),
+            status_text: Some(format_envmon_status(*state)),
+            is_alarm,
+        });
+    }
+
+    Ok(sensors)
 }
 
 /// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) の温度テーブルを取得する。
@@ -1508,6 +1708,7 @@ fn query_cisco_envmon_temperature_sensors(
             value: Some(*value),
             unit: sensor_unit_for_type("temperature"),
             status: state,
+            status_text: state.map(format_envmon_status),
             is_alarm,
         });
     }
@@ -1581,6 +1782,19 @@ fn oid_to_string(oid: &[u32]) -> String {
         .join(".")
 }
 
+/// CiscoEnvMonState の数値コードを人間が読める文字列に変換する
+fn format_envmon_status(state: i64) -> String {
+    match state {
+        1 => "Normal".to_string(),
+        2 => "Warning".to_string(),
+        3 => "Critical".to_string(),
+        4 => "Shutdown".to_string(),
+        5 => "Not Present".to_string(),
+        6 => "Not Functioning".to_string(),
+        _ => state.to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SnmpDeviceInfo {
     pub sys_name: String,
@@ -1601,6 +1815,7 @@ pub struct SnmpHardwareSensor {
     pub value: Option<i64>,
     pub unit: Option<String>,
     pub status: Option<i64>,
+    pub status_text: Option<String>,
     pub is_alarm: bool,
 }
 
