@@ -31,6 +31,7 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             out_errors INTEGER NOT NULL DEFAULT 0,
             in_discards INTEGER NOT NULL DEFAULT 0,
             out_discards INTEGER NOT NULL DEFAULT 0,
+            late_collisions INTEGER NOT NULL DEFAULT 0,
             in_octets INTEGER NOT NULL DEFAULT 0,
             out_octets INTEGER NOT NULL DEFAULT 0,
             bandwidth_utilization REAL NOT NULL DEFAULT 0.0,
@@ -53,6 +54,7 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             device_id INTEGER NOT NULL,
             cpu_usage INTEGER,
             memory_usage INTEGER,
+            memory_used_bytes INTEGER,
             sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(device_id) REFERENCES devices(id)
         );
@@ -68,6 +70,7 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
 
     ensure_interface_sample_columns(&connection)?;
     ensure_device_metrics_nullable(&connection)?;
+    ensure_device_metrics_columns(&connection)?;
 
     Ok(connection)
 }
@@ -80,10 +83,22 @@ fn ensure_interface_sample_columns(connection: &Connection) -> Result<(), AppErr
         .collect();
 
     if !columns.iter().any(|c| c == "in_octets") {
-        connection.execute("ALTER TABLE interface_samples ADD COLUMN in_octets INTEGER NOT NULL DEFAULT 0", [])?;
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN in_octets INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
     if !columns.iter().any(|c| c == "out_octets") {
-        connection.execute("ALTER TABLE interface_samples ADD COLUMN out_octets INTEGER NOT NULL DEFAULT 0", [])?;
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN out_octets INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "late_collisions") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN late_collisions INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
     }
 
     Ok(())
@@ -92,12 +107,22 @@ fn ensure_interface_sample_columns(connection: &Connection) -> Result<(), AppErr
 fn ensure_device_metrics_nullable(connection: &Connection) -> Result<(), AppError> {
     let mut stmt = connection.prepare("PRAGMA table_info(device_metrics)")?;
     let columns: Vec<(String, i64)> = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?)))?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })?
         .filter_map(|r| r.ok())
         .collect();
 
-    let cpu_not_null = columns.iter().find(|(name, _)| name == "cpu_usage").map(|(_, notnull)| *notnull).unwrap_or(0);
-    let mem_not_null = columns.iter().find(|(name, _)| name == "memory_usage").map(|(_, notnull)| *notnull).unwrap_or(0);
+    let cpu_not_null = columns
+        .iter()
+        .find(|(name, _)| name == "cpu_usage")
+        .map(|(_, notnull)| *notnull)
+        .unwrap_or(0);
+    let mem_not_null = columns
+        .iter()
+        .find(|(name, _)| name == "memory_usage")
+        .map(|(_, notnull)| *notnull)
+        .unwrap_or(0);
 
     if cpu_not_null == 0 && mem_not_null == 0 {
         return Ok(());
@@ -112,11 +137,12 @@ fn ensure_device_metrics_nullable(connection: &Connection) -> Result<(), AppErro
             device_id INTEGER NOT NULL,
             cpu_usage INTEGER,
             memory_usage INTEGER,
+            memory_used_bytes INTEGER,
             sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(device_id) REFERENCES devices(id)
         );
-        INSERT INTO device_metrics (id, device_id, cpu_usage, memory_usage, sampled_at)
-            SELECT id, device_id, cpu_usage, memory_usage, sampled_at
+        INSERT INTO device_metrics (id, device_id, cpu_usage, memory_usage, memory_used_bytes, sampled_at)
+            SELECT id, device_id, cpu_usage, memory_usage, NULL, sampled_at
             FROM device_metrics_legacy;
         DROP TABLE device_metrics_legacy;
         CREATE INDEX IF NOT EXISTS idx_device_metrics_device_sampled
@@ -124,6 +150,23 @@ fn ensure_device_metrics_nullable(connection: &Connection) -> Result<(), AppErro
         COMMIT;
         "#,
     )?;
+
+    Ok(())
+}
+
+fn ensure_device_metrics_columns(connection: &Connection) -> Result<(), AppError> {
+    let mut stmt = connection.prepare("PRAGMA table_info(device_metrics)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if !columns.iter().any(|c| c == "memory_used_bytes") {
+        connection.execute(
+            "ALTER TABLE device_metrics ADD COLUMN memory_used_bytes INTEGER",
+            [],
+        )?;
+    }
 
     Ok(())
 }

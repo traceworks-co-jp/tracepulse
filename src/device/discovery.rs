@@ -16,15 +16,37 @@ pub fn parse_cidr(cidr: &str) -> Result<(Ipv4Addr, u8), AppError> {
         .map_err(|_| AppError::Validation(format!("invalid prefix length: {prefix}")))?;
 
     if prefix > 32 {
-        return Err(AppError::Validation(format!("prefix out of range: {prefix}")));
+        return Err(AppError::Validation(format!(
+            "prefix out of range: {prefix}"
+        )));
     }
 
     Ok((network_ip, prefix))
 }
 
+/// Community版: CIDR Discovery は単一サブネット（/24 以上に絞った範囲）のみ許可する。
+/// IP Sweep 方式の走査対象を1サブネット分に限定するための制約。
+/// 有償版では別リポジトリでこの制限を解放する想定。
+pub const COMMUNITY_MIN_SCAN_PREFIX: u8 = 24;
+
+pub fn validate_community_scan_range(cidr: &str) -> Result<(), AppError> {
+    let (_, prefix) = parse_cidr(cidr)?;
+    if prefix < COMMUNITY_MIN_SCAN_PREFIX {
+        return Err(AppError::Validation(format!(
+            "Community版では CIDR /{} 以上（単一サブネット、最大 /{}）のみスキャン可能です",
+            COMMUNITY_MIN_SCAN_PREFIX, COMMUNITY_MIN_SCAN_PREFIX
+        )));
+    }
+    Ok(())
+}
+
 pub fn enumerate_cidr_hosts(cidr: &str) -> Result<Vec<Ipv4Addr>, AppError> {
     let (network_ip, prefix) = parse_cidr(cidr)?;
-    let mask = if prefix == 0 { 0u32 } else { u32::MAX << (32 - prefix) };
+    let mask = if prefix == 0 {
+        0u32
+    } else {
+        u32::MAX << (32 - prefix)
+    };
     let network = u32::from(network_ip) & mask;
     let max_hosts = 1u32 << (32 - prefix);
     let mut hosts = Vec::new();

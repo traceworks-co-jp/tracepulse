@@ -14,6 +14,10 @@ pub fn default_memory_oid_override() -> String {
     String::new()
 }
 
+pub fn default_hardware_oid_overrides() -> Vec<String> {
+    Vec::new()
+}
+
 pub fn default_error_rate_threshold() -> f64 {
     0.05
 }

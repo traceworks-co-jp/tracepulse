@@ -36,10 +36,10 @@ pub fn run() -> Result<(), AppError> {
 }
 
 fn parse_mode(args: &[String]) -> AppMode {
-    if args.iter().any(|arg| arg == "--web") {
-        AppMode::Web
-    } else {
+    if args.iter().any(|arg| arg == "--cli") {
         AppMode::Cli
+    } else {
+        AppMode::Web
     }
 }
 

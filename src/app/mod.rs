@@ -1,27 +1,58 @@
+use crate::alert::broadcaster::AlertBroadcaster;
+use crate::alert::event::AlertEvent;
 use crate::config::AppConfig;
 use crate::db::models::DeviceMetrics;
 use crate::db::repository::Repository;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
-use crate::monitor::{calculate_bandwidth_utilization_from_delta, PollingEngine};
+use crate::monitor::{PollingEngine, calculate_bandwidth_utilization_from_delta};
 use crate::ui::TuiRenderer;
 use crate::web::server::WebServer;
 use rusqlite::Connection;
+use tokio::sync::broadcast;
 
 pub struct AppRunner {
     pub config: AppConfig,
     pub connection: Connection,
+    alerts: AlertBroadcaster,
 }
 
 impl AppRunner {
     pub fn new(config: AppConfig, connection: Connection) -> Self {
-        Self { config, connection }
+        Self::with_broadcaster(config, connection, AlertBroadcaster::new())
+    }
+
+    pub fn with_broadcaster(
+        config: AppConfig,
+        connection: Connection,
+        alerts: AlertBroadcaster,
+    ) -> Self {
+        Self {
+            config,
+            connection,
+            alerts,
+        }
+    }
+
+    /// 外部モジュールがアラートイベントを購読するためのレシーバーを返す。
+    pub fn subscribe_alerts(&self) -> broadcast::Receiver<AlertEvent> {
+        self.alerts.subscribe()
+    }
+
+    pub fn alert_broadcaster(&self) -> AlertBroadcaster {
+        self.alerts.clone()
     }
 
     pub fn run_cli(self) -> Result<(), AppError> {
         println!("TracePulse CLI mode started");
-        println!("Polling interval: {}s", self.config.polling.interval_seconds);
-        println!("Default SNMP community: {}", self.config.snmp.default_community);
+        println!(
+            "Polling interval: {}s",
+            self.config.polling.interval_seconds
+        );
+        println!(
+            "Default SNMP community: {}",
+            self.config.snmp.default_community
+        );
         println!("Database ready at: data.db");
 
         let repository = Repository::new(self.connection);
@@ -43,7 +74,11 @@ impl AppRunner {
             println!("No devices registered yet.");
             println!("Use auto-discovery or add devices manually before starting monitoring.");
         } else {
-            let engine = PollingEngine::new(self.config.clone(), repository);
+            let engine = PollingEngine::with_broadcaster(
+                self.config.clone(),
+                repository,
+                self.alerts.clone(),
+            );
             for device in &renderer_devices {
                 match engine.poll_device(device) {
                     Ok((system, interfaces)) => {
@@ -54,43 +89,49 @@ impl AppRunner {
                                 device_id,
                                 cpu_usage: system.cpu_usage,
                                 memory_usage: system.memory_usage,
+                                memory_used_bytes: system.memory_used_bytes,
                                 sampled_at: now,
                             };
                             let _ = engine.repository.save_device_metrics(&metrics);
 
                             for iface in &interfaces {
                                 let mut sample = iface.clone();
-                                if let Ok(Some(prev)) = engine.repository.get_latest_interface_sample(device_id, sample.if_index) {
-                                    sample.bandwidth_utilization = calculate_bandwidth_utilization_from_delta(
-                                        prev.in_octets.saturating_add(prev.out_octets),
-                                        sample.in_octets.saturating_add(sample.out_octets),
-                                        self.config.polling.interval_seconds,
-                                        1_000_000_000,
-                                    );
+                                if let Ok(Some(prev)) = engine
+                                    .repository
+                                    .get_latest_interface_sample(device_id, sample.if_index)
+                                {
+                                    sample.bandwidth_utilization =
+                                        calculate_bandwidth_utilization_from_delta(
+                                            prev.in_octets.saturating_add(prev.out_octets),
+                                            sample.in_octets.saturating_add(sample.out_octets),
+                                            self.config.polling.interval_seconds,
+                                            1_000_000_000,
+                                        );
                                 }
                                 let _ = engine.repository.save_sample(&sample);
                             }
 
                             let spike_threshold = self.config.alert.spike_threshold;
-                            match engine.repository.check_interface_spikes(device_id, spike_threshold) {
+                            match engine
+                                .repository
+                                .check_interface_spikes(device_id, spike_threshold)
+                            {
                                 Ok(spikes) if !spikes.is_empty() => {
                                     for spike in spikes {
-                                        println!(
-                                            "SPIKE {} ({}) {} (if-{}) total_delta={} in_errors={} out_errors={} in_discards={} out_discards={}",
-                                            device.name,
-                                            device.ip,
-                                            spike.if_name,
-                                            spike.if_index,
-                                            spike.total_delta,
-                                            spike.in_errors_delta,
-                                            spike.out_errors_delta,
-                                            spike.in_discards_delta,
-                                            spike.out_discards_delta
+                                        let event = AlertEvent::from_interface_spike(
+                                            device,
+                                            &spike,
+                                            spike_threshold,
                                         );
+                                        println!("{}", event.message);
+                                        engine.publish_alert(event);
                                     }
                                 }
                                 Ok(_) => {}
-                                Err(err) => println!("{} ({}) -> spike check failed: {}", device.name, device.ip, err),
+                                Err(err) => println!(
+                                    "{} ({}) -> spike check failed: {}",
+                                    device.name, device.ip, err
+                                ),
                             }
                         }
                         let cpu_text = system
@@ -106,7 +147,9 @@ impl AppRunner {
                         );
                     }
                     Err(err) => {
-                        println!("{} ({}) -> {}", device.name, device.ip, err);
+                        let event = AlertEvent::device_offline(device, &err);
+                        println!("{}", event.message);
+                        engine.publish_alert(event);
                     }
                 }
             }

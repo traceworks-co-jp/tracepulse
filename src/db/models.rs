@@ -24,6 +24,7 @@ pub struct InterfaceSample {
     pub out_errors: u64,
     pub in_discards: u64,
     pub out_discards: u64,
+    pub late_collisions: u64,
     pub in_octets: u64,
     pub out_octets: u64,
     pub bandwidth_utilization: f64,
@@ -58,6 +59,7 @@ pub struct DeviceMetrics {
     pub device_id: i64,
     pub cpu_usage: Option<u32>,
     pub memory_usage: Option<u32>,
+    pub memory_used_bytes: Option<u64>,
     pub sampled_at: String,
 }
 
@@ -70,7 +72,18 @@ pub struct InterfaceSpike {
     pub out_errors_delta: u64,
     pub in_discards_delta: u64,
     pub out_discards_delta: u64,
+    pub late_collisions_delta: u64,
     pub total_delta: u64,
     pub latest_sampled_at: String,
     pub previous_sampled_at: String,
+}
+
+/// L1/L2 障害検知用のポート単位カウンタ差分（Counter32 ラップアラウンド考慮済み）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterfacePortDelta {
+    pub in_errors_delta: u64,
+    pub out_errors_delta: u64,
+    pub in_discards_delta: u64,
+    pub out_discards_delta: u64,
+    pub late_collisions_delta: u64,
 }

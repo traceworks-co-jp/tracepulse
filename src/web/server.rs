@@ -1,13 +1,39 @@
 use crate::config::AppConfig;
-use crate::db::repository::Repository;
+use crate::db::models::InterfacePortDelta;
+use crate::db::repository::{counter32_delta, Repository};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::snmp::SnmpClient;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+// ─── Community版 制限値 ────────────────────────────────────────────────────
+// 最大登録ノード数（Community版）。有償版では別リポジトリで解放する。
+const COMMUNITY_MAX_DEVICES: usize = 25;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebEdition {
+    Community,
+    Enterprise,
+}
+
+impl WebEdition {
+    pub fn is_enterprise(self) -> bool {
+        matches!(self, Self::Enterprise)
+    }
+
+    pub fn node_limit(self) -> Option<usize> {
+        if self.is_enterprise() {
+            None
+        } else {
+            Some(COMMUNITY_MAX_DEVICES)
+        }
+    }
+}
 
 // ─── Scan job state ───────────────────────────────────────────────────────────
 
@@ -48,10 +74,26 @@ pub struct WebServer {
     config_path: std::path::PathBuf,
     repository: Arc<Mutex<Repository>>,
     jobs: JobStore,
+    edition: WebEdition,
 }
 
 impl WebServer {
-    pub fn new(host: impl Into<String>, port: u16, config: AppConfig, repository: Repository) -> Self {
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        config: AppConfig,
+        repository: Repository,
+    ) -> Self {
+        Self::with_edition(host, port, config, repository, WebEdition::Community)
+    }
+
+    pub fn with_edition(
+        host: impl Into<String>,
+        port: u16,
+        config: AppConfig,
+        repository: Repository,
+        edition: WebEdition,
+    ) -> Self {
         let config_path = crate::config_path();
         Self {
             host: host.into(),
@@ -60,6 +102,7 @@ impl WebServer {
             config_path,
             repository: Arc::new(Mutex::new(repository)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            edition,
         }
     }
 
@@ -68,6 +111,7 @@ impl WebServer {
         let listener = TcpListener::bind(&addr).map_err(|err| AppError::Io(err.to_string()))?;
 
         println!("Web dashboard started on http://{}/", addr);
+        open_browser(&format!("http://{}/", addr));
 
         // バックグラウンドポーリングスレッドを起動
         {
@@ -85,7 +129,9 @@ impl WebServer {
                     let jobs = Arc::clone(&self.jobs);
                     let cfg = Arc::clone(&self.config);
                     let cfg_path = self.config_path.clone();
-                    if let Err(err) = handle_connection(stream, repo, jobs, cfg, cfg_path) {
+                    let edition = self.edition;
+                    if let Err(err) = handle_connection(stream, repo, jobs, cfg, cfg_path, edition)
+                    {
                         eprintln!("web request failed: {err}");
                     }
                 }
@@ -96,6 +142,21 @@ impl WebServer {
         }
 
         Ok(())
+    }
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    let result = Command::new("cmd").args(["/C", "start", "", url]).spawn();
+
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(url).spawn();
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let result = Command::new("xdg-open").arg(url).spawn();
+
+    if let Err(err) = result {
+        eprintln!("failed to open browser: {err}");
     }
 }
 
@@ -141,7 +202,12 @@ fn parse_request(stream: &TcpStream) -> Result<Request, AppError> {
     })
 }
 
-fn respond(mut stream: TcpStream, status: &str, content_type: &str, body: String) -> Result<(), AppError> {
+fn respond(
+    mut stream: TcpStream,
+    status: &str,
+    content_type: &str,
+    body: String,
+) -> Result<(), AppError> {
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
         body.len(),
@@ -168,12 +234,16 @@ fn handle_connection(
     jobs: JobStore,
     cfg: Arc<Mutex<AppConfig>>,
     cfg_path: std::path::PathBuf,
+    edition: WebEdition,
 ) -> Result<(), AppError> {
     let req = parse_request(&stream)?;
 
     // Route: GET /api/discovery/scan/<job_id>
     if req.method == "GET" && req.path.starts_with("/api/discovery/scan/") {
-        let job_id = req.path.trim_start_matches("/api/discovery/scan/").to_string();
+        let job_id = req
+            .path
+            .trim_start_matches("/api/discovery/scan/")
+            .to_string();
         let body = api_scan_status(&job_id, &jobs);
         return respond_json(stream, "200 OK", body);
     }
@@ -202,42 +272,39 @@ fn handle_connection(
     }
 
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") | ("GET", "/dashboard") => {
-            respond_html(stream, page_dashboard(&repo, &cfg))
-        }
-        ("GET", "/discovery") => {
-            respond_html(stream, page_discovery(&repo))
-        }
-        ("GET", "/diagnostics") => {
-            respond_html(stream, page_diagnostics("/diagnostics", &cfg))
-        }
-        ("GET", "/settings") => {
-            respond_html(stream, page_settings(&cfg))
-        }
-        ("GET", "/api/summary") => {
-            respond_json(stream, "200 OK", api_summary(&repo))
-        }
-        ("GET", "/api/devices") => {
-            respond_json(stream, "200 OK", api_devices(&repo, &cfg))
-        }
-        ("GET", "/api/settings") => {
-            respond_json(stream, "200 OK", api_get_settings(&cfg))
-        }
-        ("POST", "/api/settings") => {
-            respond_json(stream, "200 OK", api_post_settings(&req.body, &cfg, &cfg_path))
-        }
-        ("POST", "/api/diagnostics/oids") => {
-            respond_json(stream, "200 OK", api_post_oid_overrides(&req.body, &cfg, &cfg_path))
-        }
+        ("GET", "/") | ("GET", "/dashboard") => respond_html(stream, page_dashboard(&repo, &cfg)),
+        ("GET", "/discovery") => respond_html(stream, page_discovery(&repo, edition)),
+        ("GET", "/diagnostics") => respond_html(stream, page_diagnostics("/diagnostics", &cfg)),
+        ("GET", "/settings") => respond_html(stream, page_settings(&cfg)),
+        ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
+        ("GET", "/api/devices") => respond_json(stream, "200 OK", api_devices(&repo, &cfg)),
+        ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
+        ("POST", "/api/settings") => respond_json(
+            stream,
+            "200 OK",
+            api_post_settings(&req.body, &cfg, &cfg_path),
+        ),
+        ("POST", "/api/diagnostics/oids") => respond_json(
+            stream,
+            "200 OK",
+            api_post_oid_overrides(&req.body, &cfg, &cfg_path),
+        ),
         ("POST", "/api/discovery/scan") => {
-            respond_json(stream, "200 OK", api_scan_start(&req.body, jobs))
+            respond_json(stream, "200 OK", api_scan_start(&req.body, jobs, edition))
         }
+        ("POST", "/api/discovery/topology") => respond_json(
+            stream,
+            "200 OK",
+            api_discovery_topology(&req.body, &cfg, &repo, edition),
+        ),
         ("POST", "/api/discovery/register") => {
-            respond_json(stream, "200 OK", api_register(&req.body, &repo))
+            respond_json(stream, "200 OK", api_register(&req.body, &repo, edition))
         }
-        _ => {
-            respond_json(stream, "404 Not Found", r#"{"error":"not found"}"#.to_string())
-        }
+        _ => respond_json(
+            stream,
+            "404 Not Found",
+            r#"{"error":"not found"}"#.to_string(),
+        ),
     }
 }
 
@@ -284,7 +351,10 @@ fn api_devices(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> St
 
 fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String) {
     let Ok(repo) = repo.lock() else {
-        return ("500 Internal Server Error".to_string(), r#"{"error":"repository lock failed"}"#.to_string());
+        return (
+            "500 Internal Server Error".to_string(),
+            r#"{"error":"repository lock failed"}"#.to_string(),
+        );
     };
 
     match repo.remove_device_by_ip(ip) {
@@ -292,15 +362,25 @@ fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String
         Err(err) => {
             let msg = err.to_string();
             if msg.contains("was not found") {
-                ("404 Not Found".to_string(), format!(r#"{{"error":"{}"}}"#, escape_json(&msg)))
+                (
+                    "404 Not Found".to_string(),
+                    format!(r#"{{"error":"{}"}}"#, escape_json(&msg)),
+                )
             } else {
-                ("400 Bad Request".to_string(), format!(r#"{{"error":"{}"}}"#, escape_json(&msg)))
+                (
+                    "400 Bad Request".to_string(),
+                    format!(r#"{{"error":"{}"}}"#, escape_json(&msg)),
+                )
             }
         }
     }
 }
 
-fn api_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>, _cfg: &Arc<Mutex<AppConfig>>) -> String {
+fn api_device_detail(
+    ip: &str,
+    repo: &Arc<Mutex<Repository>>,
+    _cfg: &Arc<Mutex<AppConfig>>,
+) -> String {
     let Ok(r) = repo.lock() else {
         return r#"{"error":"lock failed"}"#.to_string();
     };
@@ -315,7 +395,9 @@ fn api_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>, _cfg: &Arc<Mutex<A
         None => return r#"{"error":"device has no id"}"#.to_string(),
     };
 
-    let interface_spikes = r.get_recent_interface_spikes(device_id, 30).unwrap_or_default();
+    let interface_spikes = r
+        .get_recent_interface_spikes(device_id, 30)
+        .unwrap_or_default();
     let hardware_sensors = SnmpClient::new(device.community.clone())
         .query_hardware_sensors(&DeviceConfig {
             id: device.id,
@@ -333,15 +415,28 @@ fn api_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>, _cfg: &Arc<Mutex<A
     let ifaces_json: Vec<String> = latest_ifaces.iter().map(|s| {
         let recent = r.get_recent_interface_samples(device_id, s.if_index, 2).unwrap_or_default();
         let prev = recent.get(1);
-        let in_errors_delta = prev.map(|p| s.in_errors.saturating_sub(p.in_errors)).unwrap_or(0);
-        let out_errors_delta = prev.map(|p| s.out_errors.saturating_sub(p.out_errors)).unwrap_or(0);
-        let in_discards_delta = prev.map(|p| s.in_discards.saturating_sub(p.in_discards)).unwrap_or(0);
-        let out_discards_delta = prev.map(|p| s.out_discards.saturating_sub(p.out_discards)).unwrap_or(0);
+        let in_errors_delta = prev.map(|p| counter32_delta(p.in_errors, s.in_errors)).unwrap_or(0);
+        let out_errors_delta = prev.map(|p| counter32_delta(p.out_errors, s.out_errors)).unwrap_or(0);
+        let in_discards_delta = prev.map(|p| counter32_delta(p.in_discards, s.in_discards)).unwrap_or(0);
+        let out_discards_delta = prev.map(|p| counter32_delta(p.out_discards, s.out_discards)).unwrap_or(0);
+        let late_collisions_delta = prev.map(|p| counter32_delta(p.late_collisions, s.late_collisions)).unwrap_or(0);
+        let link_status = effective_interface_link_status(&device.status, &s.link_status);
+        let health_status = classify_interface_diagnostic(
+            &link_status,
+            in_errors_delta,
+            out_errors_delta,
+            in_discards_delta,
+            out_discards_delta,
+            late_collisions_delta,
+        );
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","in_errors":{},"out_errors":{},"in_discards":{},"out_discards":{},"in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"bandwidth":{:.2},"sampled_at":"{}"}}"#,
-            s.if_index, escape_json(&s.if_name), escape_json(&s.link_status),
-            s.in_errors, s.out_errors, s.in_discards, s.out_discards,
-            in_errors_delta, out_errors_delta, in_discards_delta, out_discards_delta,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"sampled_at":"{}"}}"#,
+            s.if_index, escape_json(&s.if_name), escape_json(&link_status), health_status,
+            s.in_errors, in_errors_delta,
+            s.out_errors, out_errors_delta,
+            s.in_discards, in_discards_delta,
+            s.out_discards, out_discards_delta,
+            s.late_collisions, late_collisions_delta,
             s.bandwidth_utilization, escape_json(&s.sampled_at),
         )
     }).collect();
@@ -349,46 +444,80 @@ fn api_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>, _cfg: &Arc<Mutex<A
     // インターフェース時系列（直近 48 件 = 約24時間 / 30秒ポーリング → 実際は1440件/24hだが表示は間引き）
     let if_history = r.get_interface_history(device_id, 288).unwrap_or_default();
     // if_index ごとに分けてグラフデータにする
-    let mut if_series: std::collections::HashMap<i32, Vec<String>> = std::collections::HashMap::new();
+    let mut if_series: std::collections::HashMap<i32, Vec<String>> =
+        std::collections::HashMap::new();
     for s in &if_history {
         let entry = if_series.entry(s.if_index).or_default();
         entry.push(format!(
             r#"{{"t":"{}","in_err":{},"out_err":{},"in_dis":{},"out_dis":{},"bw":{:.2}}}"#,
-            escape_json(&s.sampled_at), s.in_errors, s.out_errors, s.in_discards, s.out_discards, s.bandwidth_utilization
+            escape_json(&s.sampled_at),
+            s.in_errors,
+            s.out_errors,
+            s.in_discards,
+            s.out_discards,
+            s.bandwidth_utilization
         ));
     }
-    let mut if_series_json: Vec<(i32, String)> = if_series.iter().map(|(idx, pts)| {
-        (*idx, format!(r#"{{"if_index":{},"points":[{}]}}"#, idx, pts.join(",")))
-    }).collect();
+    let mut if_series_json: Vec<(i32, String)> = if_series
+        .iter()
+        .map(|(idx, pts)| {
+            (
+                *idx,
+                format!(r#"{{"if_index":{},"points":[{}]}}"#, idx, pts.join(",")),
+            )
+        })
+        .collect();
     if_series_json.sort_by_key(|(idx, _)| *idx);
 
     // CPU履歴（直近 288 件 = 約2.4時間 @ 30s）
-    let metrics = r.get_device_metrics_history(device_id, 288).unwrap_or_default();
-    let metrics_json: Vec<String> = metrics.iter().map(|m| {
-        let cpu = m.cpu_usage.filter(|v| *v <= 100).map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
-        format!(r#"{{"t":"{}","cpu":{}}}"#, escape_json(&m.sampled_at), cpu)
-    }).collect();
+    let metrics = r
+        .get_device_metrics_history(device_id, 288)
+        .unwrap_or_default();
+    let metrics_json: Vec<String> = metrics
+        .iter()
+        .map(|m| {
+            let cpu = m
+                .cpu_usage
+                .filter(|v| *v <= 100)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            let memory_bytes = m
+                .memory_used_bytes
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string());
+            format!(
+                r#"{{"t":"{}","cpu":{},"memory_bytes":{}}}"#,
+                escape_json(&m.sampled_at),
+                cpu,
+                memory_bytes
+            )
+        })
+        .collect();
 
     // アラート履歴（直近 30 件）
     let alerts = r.get_alert_history(device_id, 30).unwrap_or_default();
-    let alerts_json: Vec<String> = alerts.iter().map(|a| {
-        let interface = extract_interface_from_alert(&a.alert_type, &a.details);
-        format!(
-            r#"{{"type":"{}","severity":"{}","details":"{}","interface":"{}","at":"{}"}}"#,
-            escape_json(&a.alert_type),
-            escape_json(&a.severity),
-            escape_json(&a.details),
-            escape_json(&interface),
-            escape_json(a.created_at.as_deref().unwrap_or("")),
-        )
-    }).collect();
+    let alerts_json: Vec<String> = alerts
+        .iter()
+        .map(|a| {
+            let interface = extract_interface_from_alert(&a.alert_type, &a.details);
+            format!(
+                r#"{{"type":"{}","severity":"{}","details":"{}","interface":"{}","at":"{}"}}"#,
+                escape_json(&a.alert_type),
+                escape_json(&a.severity),
+                escape_json(&a.details),
+                escape_json(&interface),
+                escape_json(a.created_at.as_deref().unwrap_or("")),
+            )
+        })
+        .collect();
 
     let spikes_json: Vec<String> = interface_spikes.iter().map(|s| {
+        let link_status = effective_interface_link_status(&device.status, &s.link_status);
         format!(
             r#"{{"if_index":{},"if_name":"{}","link_status":"{}","in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"total_delta":{},"latest_sampled_at":"{}","previous_sampled_at":"{}"}}"#,
             s.if_index,
             escape_json(&s.if_name),
-            escape_json(&s.link_status),
+            escape_json(&link_status),
             s.in_errors_delta,
             s.out_errors_delta,
             s.in_discards_delta,
@@ -419,9 +548,21 @@ fn api_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>, _cfg: &Arc<Mutex<A
 
     format!(
         r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}]}}"#,
-        escape_json(&device.ip), escape_json(&device.name), escape_json(&device.status),
-        escape_json(&device.community), escape_json(device.last_seen_at.as_deref().unwrap_or("")),
-        ifaces_json.join(","), if_series_json.into_iter().map(|(_, s)| s).collect::<Vec<_>>().join(","), metrics_json.join(","), alerts_json.join(","), spikes_json.join(","), sensors_json.join(","),
+        escape_json(&device.ip),
+        escape_json(&device.name),
+        escape_json(&device.status),
+        escape_json(&device.community),
+        escape_json(device.last_seen_at.as_deref().unwrap_or("")),
+        ifaces_json.join(","),
+        if_series_json
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect::<Vec<_>>()
+            .join(","),
+        metrics_json.join(","),
+        alerts_json.join(","),
+        spikes_json.join(","),
+        sensors_json.join(","),
     )
 }
 
@@ -442,7 +583,11 @@ fn api_get_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
     )
 }
 
-fn api_post_settings(body: &str, cfg: &Arc<Mutex<AppConfig>>, cfg_path: &std::path::Path) -> String {
+fn api_post_settings(
+    body: &str,
+    cfg: &Arc<Mutex<AppConfig>>,
+    cfg_path: &std::path::Path,
+) -> String {
     // JSON フィールドを手動パース（依存追加なし）
     fn parse_u64(body: &str, key: &str) -> Option<u64> {
         let pat = format!("\"{}\":", key);
@@ -480,7 +625,9 @@ fn api_post_settings(body: &str, cfg: &Arc<Mutex<AppConfig>>, cfg_path: &std::pa
         c.polling.interval_seconds = v;
     }
     if let Some(v) = parse_str_field(body, "default_community") {
-        if !v.is_empty() { c.snmp.default_community = v; }
+        if !v.is_empty() {
+            c.snmp.default_community = v;
+        }
     }
     if let Some(v) = parse_str_field(body, "timezone") {
         let tz = v.to_lowercase();
@@ -522,22 +669,52 @@ fn api_post_settings(body: &str, cfg: &Arc<Mutex<AppConfig>>, cfg_path: &std::pa
 
     // Warning >= Critical の整合性チェック
     if c.alert.health_warning_threshold <= c.alert.health_critical_threshold {
-        return r#"{"error":"warning threshold must be greater than critical threshold"}"#.to_string();
+        return r#"{"error":"warning threshold must be greater than critical threshold"}"#
+            .to_string();
     }
 
     if let Err(e) = persist_config(&c, cfg_path) {
-        return format!(r#"{{"error":"failed to write config: {}"}}"#, escape_json(&e));
+        return format!(
+            r#"{{"error":"failed to write config: {}"}}"#,
+            escape_json(&e)
+        );
     }
 
     r#"{"ok":true}"#.to_string()
 }
 
-fn api_post_oid_overrides(body: &str, cfg: &Arc<Mutex<AppConfig>>, cfg_path: &std::path::Path) -> String {
+fn api_post_oid_overrides(
+    body: &str,
+    cfg: &Arc<Mutex<AppConfig>>,
+    cfg_path: &std::path::Path,
+) -> String {
     fn parse_str_field(body: &str, key: &str) -> Option<String> {
         let pat = format!("\"{}\":\"", key);
         let start = body.find(&pat)? + pat.len();
         let end = body[start..].find('"')?;
         Some(body[start..start + end].to_string())
+    }
+
+    // "hardware_oid_overrides":["1.2.3","4.5.6"] のような文字列配列を抽出する簡易パーサ。
+    fn parse_str_array_field(body: &str, key: &str) -> Option<Vec<String>> {
+        let pat = format!("\"{}\":[", key);
+        let start = body.find(&pat)? + pat.len();
+        let end = body[start..].find(']')?;
+        let inner = &body[start..start + end];
+        let items: Vec<String> = inner
+            .split(',')
+            .filter_map(|part| {
+                let trimmed = part.trim();
+                let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+                let value = unquoted.trim();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(value.to_string())
+                }
+            })
+            .collect();
+        Some(items)
     }
 
     let Ok(mut c) = cfg.lock() else {
@@ -550,21 +727,37 @@ fn api_post_oid_overrides(body: &str, cfg: &Arc<Mutex<AppConfig>>, cfg_path: &st
     if let Some(v) = parse_str_field(body, "memory_oid_override") {
         c.snmp.memory_oid_override = v.trim().to_string();
     }
+    if let Some(v) = parse_str_array_field(body, "hardware_oid_overrides") {
+        c.snmp.hardware_oid_overrides = v;
+    }
 
     if let Err(e) = persist_config(&c, cfg_path) {
-        return format!(r#"{{"error":"failed to write config: {}"}}"#, escape_json(&e));
+        return format!(
+            r#"{{"error":"failed to write config: {}"}}"#,
+            escape_json(&e)
+        );
     }
 
     r#"{"ok":true}"#.to_string()
 }
 
 fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), String> {
+    let hardware_oid_overrides_toml = format!(
+        "[{}]",
+        c.snmp
+            .hardware_oid_overrides
+            .iter()
+            .map(|v| format!("\"{}\"", v.replace('"', "")))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     let toml_content = format!(
-        "[polling]\ninterval_seconds = {}\n\n[snmp]\ndefault_community = \"{}\"\ncpu_oid_override = \"{}\"\nmemory_oid_override = \"{}\"\n\n[display]\ntimezone = \"{}\"\n\n[alert]\nerror_rate_threshold = {}\nspike_threshold = {}\nhealth_warning_threshold = {}\nhealth_critical_threshold = {}\n\n[retention]\nhistory_days = {}\n",
+        "[polling]\ninterval_seconds = {}\n\n[snmp]\ndefault_community = \"{}\"\ncpu_oid_override = \"{}\"\nmemory_oid_override = \"{}\"\nhardware_oid_overrides = {}\n\n[display]\ntimezone = \"{}\"\n\n[alert]\nerror_rate_threshold = {}\nspike_threshold = {}\nhealth_warning_threshold = {}\nhealth_critical_threshold = {}\n\n[retention]\nhistory_days = {}\n",
         c.polling.interval_seconds,
         c.snmp.default_community,
         c.snmp.cpu_oid_override,
         c.snmp.memory_oid_override,
+        hardware_oid_overrides_toml,
         c.display.timezone,
         c.alert.error_rate_threshold,
         c.alert.spike_threshold,
@@ -593,27 +786,36 @@ fn extract_interface_from_alert(alert_type: &str, details: &str) -> String {
 /// POST /api/discovery/scan
 /// Body: cidr=...&community=...&max_hosts=...
 /// Returns immediately with {"job_id":"..."} then caller polls GET /api/discovery/scan/<id>
-fn api_scan_start(body: &str, jobs: JobStore) -> String {
+fn api_scan_start(body: &str, jobs: JobStore, edition: WebEdition) -> String {
     let params = parse_form(body);
     let cidr = params.get("cidr").cloned().unwrap_or_default();
-    let community = params.get("community").cloned().unwrap_or_else(|| "public".to_string());
-    // max_hosts はクライアントが CIDR から計算して送る実際のホスト数。上限なし（/8 チェックはクライアント側で実施）
-    let max_hosts: usize = params.get("max_hosts").and_then(|s| s.parse().ok()).unwrap_or(65534);
+    let community = params
+        .get("community")
+        .cloned()
+        .unwrap_or_else(|| "public".to_string());
+    // max_hosts はクライアントが CIDR から計算して送る実際のホスト数。Community版は単一サブネット(/24以上)に限定。
+    let max_hosts: usize = params
+        .get("max_hosts")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(65534);
 
     if cidr.is_empty() {
         return r#"{"error":"cidr is required"}"#.to_string();
     }
 
-    // Pre-validate and count hosts (サーバー側は max_hosts をそのまま使う)
-    let host_count = match crate::device::discovery::enumerate_cidr_hosts(&cidr) {
-        Ok(hosts) => hosts.len().min(max_hosts),
+    let hosts = match enumerate_discovery_hosts(&cidr, edition) {
+        Ok(hosts) => hosts,
         Err(err) => return format!(r#"{{"error":"{}"}}"#, escape_json(&err.to_string())),
     };
+    let host_count = hosts.len().min(max_hosts);
 
-    let job_id = format!("{:x}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
+    let job_id = format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
 
     // Register job as Running
     {
@@ -621,10 +823,7 @@ fn api_scan_start(body: &str, jobs: JobStore) -> String {
         store.insert(job_id.clone(), ScanJob::new(host_count));
         // Evict old jobs (keep at most 16)
         if store.len() > 16 {
-            if let Some(oldest) = store.keys()
-                .min_by_key(|k| store[*k].started_at)
-                .cloned()
-            {
+            if let Some(oldest) = store.keys().min_by_key(|k| store[*k].started_at).cloned() {
                 store.remove(&oldest);
             }
         }
@@ -633,20 +832,26 @@ fn api_scan_start(body: &str, jobs: JobStore) -> String {
     // Spawn background scan thread
     let job_id_thread = job_id.clone();
     std::thread::spawn(move || {
-        run_scan_job(job_id_thread, cidr, community, max_hosts, jobs);
+        run_scan_job(job_id_thread, cidr, community, max_hosts, jobs, edition);
     });
 
     format!(r#"{{"job_id":"{job_id}","total":{host_count}}}"#)
 }
 
-fn run_scan_job(job_id: String, cidr: String, community: String, max_hosts: usize, jobs: JobStore) {
-    use crate::device::discovery::enumerate_cidr_hosts;
+fn run_scan_job(
+    job_id: String,
+    cidr: String,
+    community: String,
+    max_hosts: usize,
+    jobs: JobStore,
+    edition: WebEdition,
+) {
     use crate::snmp::SnmpClient;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const CONCURRENCY: usize = 256;
 
-    let hosts = match enumerate_cidr_hosts(&cidr) {
+    let hosts = match enumerate_discovery_hosts(&cidr, edition) {
         Ok(h) => h,
         Err(err) => {
             if let Ok(mut store) = jobs.lock() {
@@ -714,6 +919,38 @@ fn run_scan_job(job_id: String, cidr: String, community: String, max_hosts: usiz
     }
 }
 
+fn enumerate_discovery_hosts(
+    cidr_input: &str,
+    edition: WebEdition,
+) -> Result<Vec<std::net::Ipv4Addr>, AppError> {
+    let cidrs = cidr_input
+        .split(',')
+        .map(str::trim)
+        .filter(|cidr| !cidr.is_empty())
+        .collect::<Vec<_>>();
+
+    if cidrs.is_empty() {
+        return Err(AppError::Validation("cidr is required".to_string()));
+    }
+    if !edition.is_enterprise() && cidrs.len() > 1 {
+        return Err(AppError::Validation(
+            "Community版では CIDR を1つだけ指定してください".to_string(),
+        ));
+    }
+
+    let mut hosts = Vec::new();
+    for cidr in cidrs {
+        if !edition.is_enterprise() {
+            crate::device::discovery::validate_community_scan_range(cidr)?;
+        }
+        hosts.extend(crate::device::discovery::enumerate_cidr_hosts(cidr)?);
+    }
+
+    hosts.sort();
+    hosts.dedup();
+    Ok(hosts)
+}
+
 /// GET /api/discovery/scan/<job_id>
 fn api_scan_status(job_id: &str, jobs: &JobStore) -> String {
     let store = match jobs.lock() {
@@ -735,18 +972,24 @@ fn api_scan_status(job_id: &str, jobs: &JobStore) -> String {
             )
         }
         ScanState::Done => {
-            let items: Vec<String> = job.found.iter().map(|d| {
-                format!(
-                    r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}"}}"#,
-                    escape_json(&d.ip),
-                    escape_json(&d.name),
-                    escape_json(&d.status),
-                    escape_json(&d.community),
-                )
-            }).collect();
+            let items: Vec<String> = job
+                .found
+                .iter()
+                .map(|d| {
+                    format!(
+                        r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}"}}"#,
+                        escape_json(&d.ip),
+                        escape_json(&d.name),
+                        escape_json(&d.status),
+                        escape_json(&d.community),
+                    )
+                })
+                .collect();
             format!(
                 r#"{{"status":"done","scanned":{},"total":{},"elapsed":{elapsed},"devices":[{}]}}"#,
-                job.scanned, job.total, items.join(",")
+                job.scanned,
+                job.total,
+                items.join(",")
             )
         }
         ScanState::Error(msg) => {
@@ -758,8 +1001,673 @@ fn api_scan_status(job_id: &str, jobs: &JobStore) -> String {
     }
 }
 
+fn api_discovery_topology(
+    body: &str,
+    cfg: &Arc<Mutex<AppConfig>>,
+    repo: &Arc<Mutex<Repository>>,
+    edition: WebEdition,
+) -> String {
+    let params = parse_form(body);
+    let seed_ip = params.get("seed_ip").cloned().unwrap_or_default();
+    if seed_ip.trim().is_empty() {
+        return r#"{"error":"seed_ip is required"}"#.to_string();
+    }
+
+    let default_community = cfg
+        .lock()
+        .map(|c| c.snmp.default_community.clone())
+        .unwrap_or_else(|_| "public".to_string());
+    let community = params
+        .get("community")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_community);
+
+    match discover_topology_once(&seed_ip, &community) {
+        Ok(mut report) => {
+            enrich_topology_nodes(&mut report, repo);
+            annotate_edge_health(&mut report);
+            report.apply_node_limit(edition);
+            report.to_json()
+        }
+        Err(err) => format!(r#"{{"error":"{}"}}"#, escape_json(&err.to_string())),
+    }
+}
+
+/// LLDP と CDP が同一物理リンクを重複検知した場合、対向ポート名が一致するものを1本へ統合する。
+/// 統合しないと同一座標に2本の線・ラベルが重なって描画され、文字が二重に潰れて見える。
+fn merge_duplicate_edges(edges: Vec<WebTopologyEdge>) -> Vec<WebTopologyEdge> {
+    let mut merged: Vec<WebTopologyEdge> = Vec::new();
+    for edge in edges {
+        let remote_port = edge
+            .remote_port
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let duplicate = if remote_port.is_empty() {
+            None
+        } else {
+            merged.iter_mut().find(|candidate| {
+                candidate.target == edge.target
+                    && candidate.remote_port.as_deref().unwrap_or("").trim() == remote_port
+            })
+        };
+
+        match duplicate {
+            Some(candidate) => {
+                if !candidate.protocol.split('+').any(|p| p == edge.protocol) {
+                    candidate.protocol = format!("{}+{}", candidate.protocol, edge.protocol);
+                }
+                candidate.local_if_index = candidate.local_if_index.or(edge.local_if_index);
+                candidate.local_port = candidate.local_port.clone().or(edge.local_port);
+                candidate.remote_ip = candidate.remote_ip.clone().or(edge.remote_ip);
+                candidate.remote_hostname =
+                    candidate.remote_hostname.clone().or(edge.remote_hostname);
+            }
+            None => merged.push(edge),
+        }
+    }
+    merged
+}
+
+fn discover_topology_once(seed_ip: &str, community: &str) -> Result<WebTopologyReport, AppError> {
+    let client = SnmpClient::new(community);
+    let device = DeviceConfig::new(seed_ip.to_string(), community.to_string());
+    let mut warnings = Vec::new();
+    let mut edges = Vec::new();
+
+    let local_if_names = match client.walk_oid(&device, &IF_NAME_OID) {
+        Ok(varbinds) => parse_if_names(&varbinds),
+        Err(err) => {
+            warnings.push(format!("ifName walk failed: {err}"));
+            BTreeMap::new()
+        }
+    };
+
+    match client.walk_oid(&device, &LLDP_REMOTE_SYSTEMS_DATA_OID) {
+        Ok(varbinds) => edges.extend(parse_lldp_edges(seed_ip, &varbinds)),
+        Err(err) => warnings.push(format!("LLDP walk failed: {err}")),
+    }
+    match client.walk_oid(&device, &LLDP_REM_MAN_ADDR_OID) {
+        Ok(varbinds) => merge_lldp_management_addresses(&mut edges, &varbinds),
+        Err(err) => warnings.push(format!("LLDP management address walk failed: {err}")),
+    }
+    match client.walk_oid(&device, &CDP_CACHE_TABLE_OID) {
+        Ok(varbinds) => edges.extend(parse_cdp_edges(seed_ip, &varbinds)),
+        Err(err) => warnings.push(format!("CDP walk failed: {err}")),
+    }
+
+    for (position, edge) in edges.iter_mut().enumerate() {
+        edge.id = format!("e{}", position);
+        edge.local_port = edge
+            .local_if_index
+            .and_then(|if_index| local_if_names.get(&if_index).cloned());
+        edge.target = remote_node_id(edge, position);
+    }
+    let edges = merge_duplicate_edges(edges);
+
+    let mut report = WebTopologyReport {
+        seed_ip: seed_ip.to_string(),
+        nodes: Vec::new(),
+        edges,
+        warnings,
+        total_nodes: 0,
+        hidden_nodes: 0,
+        node_limit: None,
+    };
+    report.rebuild_nodes(&local_if_names);
+    Ok(report)
+}
+
+/// LLDP/CDP で対向 IP が取れない隣接も 1 ノードとして描画できるよう ID を割り当てる。
+fn remote_node_id(edge: &WebTopologyEdge, position: usize) -> String {
+    if let Some(ip) = edge.remote_ip.as_ref().filter(|ip| !ip.trim().is_empty()) {
+        return ip.clone();
+    }
+    if let Some(hostname) = edge
+        .remote_hostname
+        .as_ref()
+        .filter(|name| !name.trim().is_empty())
+    {
+        return format!("name:{hostname}");
+    }
+    format!("unknown:{position}")
+}
+
+fn parse_if_names(varbinds: &[crate::snmp::SnmpVarBind]) -> BTreeMap<i64, String> {
+    let mut names = BTreeMap::new();
+    for varbind in varbinds {
+        let Some(suffix) = varbind.index_suffix(&IF_NAME_OID) else {
+            continue;
+        };
+        let Some(if_index) = suffix.first().map(|value| i64::from(*value)) else {
+            continue;
+        };
+        if let Some(name) = varbind.value.as_string() {
+            names.insert(if_index, name);
+        }
+    }
+    names
+}
+
+/// 登録済みデバイスの状態と最新インターフェース情報をノードへ反映する。
+fn enrich_topology_nodes(report: &mut WebTopologyReport, repo: &Arc<Mutex<Repository>>) {
+    let Ok(repo) = repo.lock() else {
+        return;
+    };
+
+    for node in report.nodes.iter_mut() {
+        let Ok(Some(device)) = repo.find_device_by_ip(&node.ip) else {
+            continue;
+        };
+        node.status = device.status.clone();
+        if node.hostname.is_none() && !device.name.trim().is_empty() {
+            node.hostname = Some(device.name.clone());
+        }
+        if matches!(
+            device.device_type.to_ascii_lowercase().as_str(),
+            "switch" | "router" | "firewall"
+        ) {
+            node.kind = "switch";
+        }
+        if let Some(device_id) = device.id {
+            if let Ok(samples) = repo.get_latest_interfaces(device_id) {
+                let deltas = repo.get_interface_port_deltas(device_id).unwrap_or_default();
+                node.interfaces = samples
+                    .into_iter()
+                    .map(|sample| {
+                        let delta = deltas
+                            .get(&sample.if_index)
+                            .copied()
+                            .unwrap_or_default();
+                        let (health_status, alerts) = evaluate_port_health(&delta);
+                        WebTopologyInterface {
+                            if_index: Some(i64::from(sample.if_index)),
+                            if_name: sample.if_name,
+                            link_status: sample.link_status,
+                            metrics: delta,
+                            health_status,
+                            alerts,
+                        }
+                    })
+                    .collect();
+            }
+        }
+    }
+}
+
+/// エラー種別ごとの障害判定しきい値（CRC エラーはこの件数以上で Critical）。
+const PORT_ERROR_CRITICAL_THRESHOLD: u64 = 50;
+
+/// SNMP エラーカウンター差分から3パターンの障害を判定する。
+/// 1) L1 物理障害（CRC/フレームエラー） 2) L2 Duplex ミスマッチ（Late Collision） 3) 輻輳（バッファ溢れ）
+fn evaluate_port_health(delta: &InterfacePortDelta) -> (String, Vec<String>) {
+    let mut alerts = Vec::new();
+    let mut critical = false;
+
+    if delta.in_errors_delta > 0 {
+        alerts.push("L1 Physical Error (CRC/Frame Error)".to_string());
+        if delta.in_errors_delta >= PORT_ERROR_CRITICAL_THRESHOLD {
+            critical = true;
+        }
+    }
+    if delta.late_collisions_delta > 0 {
+        alerts.push("Duplex Mismatch / Late Collision".to_string());
+    }
+    if delta.in_discards_delta > 0 || delta.out_discards_delta > 0 {
+        alerts.push("Buffer Overflow / Congestion (Packet Discards)".to_string());
+    }
+
+    let status = if critical {
+        "Critical"
+    } else if !alerts.is_empty() {
+        "Warning"
+    } else {
+        "Healthy"
+    };
+
+    (status.to_string(), alerts)
+}
+
+/// エッジのローカル側ポートの健全性を、対応するソースノードのインターフェース情報から反映する。
+fn annotate_edge_health(report: &mut WebTopologyReport) {
+    for edge in report.edges.iter_mut() {
+        let Some(local_if_index) = edge.local_if_index else {
+            continue;
+        };
+        let Some(source_node) = report.nodes.iter().find(|node| node.id == edge.source) else {
+            continue;
+        };
+        let Some(iface) = source_node
+            .interfaces
+            .iter()
+            .find(|iface| iface.if_index == Some(local_if_index))
+        else {
+            continue;
+        };
+        if iface.health_status != "Healthy" {
+            edge.health_status = Some(iface.health_status.clone());
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebTopologyReport {
+    seed_ip: String,
+    nodes: Vec<WebTopologyNode>,
+    edges: Vec<WebTopologyEdge>,
+    warnings: Vec<String>,
+    total_nodes: usize,
+    hidden_nodes: usize,
+    node_limit: Option<usize>,
+}
+
+impl WebTopologyReport {
+    /// エッジ集合からノード一覧を再構築する。シード機器を先頭に固定する。
+    fn rebuild_nodes(&mut self, local_if_names: &BTreeMap<i64, String>) {
+        let mut nodes: Vec<WebTopologyNode> = vec![WebTopologyNode {
+            id: self.seed_ip.clone(),
+            ip: self.seed_ip.clone(),
+            hostname: None,
+            kind: "switch",
+            status: "unknown".to_string(),
+            is_seed: true,
+            interfaces: local_if_names
+                .iter()
+                .map(|(if_index, if_name)| WebTopologyInterface {
+                    if_index: Some(*if_index),
+                    if_name: if_name.clone(),
+                    link_status: "unknown".to_string(),
+                    metrics: InterfacePortDelta::default(),
+                    health_status: "Healthy".to_string(),
+                    alerts: Vec::new(),
+                })
+                .collect(),
+        }];
+
+        let mut degrees: HashMap<String, usize> = HashMap::new();
+        for edge in &self.edges {
+            *degrees.entry(edge.target.clone()).or_insert(0) += 1;
+            if !nodes.iter().any(|node| node.id == edge.target) {
+                nodes.push(WebTopologyNode {
+                    id: edge.target.clone(),
+                    ip: edge.remote_ip.clone().unwrap_or_default(),
+                    hostname: edge.remote_hostname.clone(),
+                    kind: "endpoint",
+                    status: "unknown".to_string(),
+                    is_seed: false,
+                    interfaces: Vec::new(),
+                });
+            }
+        }
+
+        for node in nodes.iter_mut().filter(|node| !node.is_seed) {
+            if degrees.get(&node.id).copied().unwrap_or(0) >= 2 {
+                node.kind = "switch";
+            }
+        }
+
+        self.total_nodes = nodes.len();
+        self.nodes = nodes;
+    }
+
+    /// Community 版のノード上限を適用する。Enterprise 版では無制限。
+    fn apply_node_limit(&mut self, edition: WebEdition) {
+        self.node_limit = edition.node_limit();
+        let Some(limit) = self.node_limit else {
+            self.hidden_nodes = 0;
+            return;
+        };
+        if self.nodes.len() <= limit {
+            self.hidden_nodes = 0;
+            return;
+        }
+
+        self.hidden_nodes = self.nodes.len() - limit;
+        self.nodes.truncate(limit);
+        let visible: std::collections::HashSet<String> =
+            self.nodes.iter().map(|node| node.id.clone()).collect();
+        self.edges
+            .retain(|edge| visible.contains(&edge.source) && visible.contains(&edge.target));
+    }
+
+    fn to_json(&self) -> String {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(WebTopologyNode::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        let edges = self
+            .edges
+            .iter()
+            .map(WebTopologyEdge::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        let warnings = self
+            .warnings
+            .iter()
+            .map(|warning| format!(r#""{}""#, escape_json(warning)))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            r#"{{"seed_ip":"{}","edition":"{}","node_limit":{},"total_nodes":{},"hidden_nodes":{},"nodes":[{}],"edges":[{}],"warnings":[{}]}}"#,
+            escape_json(&self.seed_ip),
+            if self.node_limit.is_none() {
+                "enterprise"
+            } else {
+                "community"
+            },
+            self.node_limit
+                .map(|limit| limit.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            self.total_nodes,
+            self.hidden_nodes,
+            nodes,
+            edges,
+            warnings
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebTopologyInterface {
+    if_index: Option<i64>,
+    if_name: String,
+    link_status: String,
+    metrics: InterfacePortDelta,
+    health_status: String,
+    alerts: Vec<String>,
+}
+
+impl WebTopologyInterface {
+    fn to_json(&self) -> String {
+        let alerts = self
+            .alerts
+            .iter()
+            .map(|alert| format!(r#""{}""#, escape_json(alert)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","metrics":{{"in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"late_collisions_delta":{}}},"health_status":"{}","alerts":[{}]}}"#,
+            json_opt_i64(self.if_index),
+            escape_json(&self.if_name),
+            escape_json(&self.link_status),
+            self.metrics.in_errors_delta,
+            self.metrics.out_errors_delta,
+            self.metrics.in_discards_delta,
+            self.metrics.out_discards_delta,
+            self.metrics.late_collisions_delta,
+            escape_json(&self.health_status),
+            alerts
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebTopologyNode {
+    id: String,
+    ip: String,
+    hostname: Option<String>,
+    kind: &'static str,
+    status: String,
+    is_seed: bool,
+    interfaces: Vec<WebTopologyInterface>,
+}
+
+impl WebTopologyNode {
+    fn to_json(&self) -> String {
+        let interfaces = self
+            .interfaces
+            .iter()
+            .map(WebTopologyInterface::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            r#"{{"id":"{}","ip":"{}","hostname":"{}","label":"{}","kind":"{}","status":"{}","seed":{},"interfaces":[{}]}}"#,
+            escape_json(&self.id),
+            escape_json(&self.ip),
+            escape_json(self.hostname.as_deref().unwrap_or("")),
+            escape_json(self.label()),
+            self.kind,
+            escape_json(&self.status),
+            self.is_seed,
+            interfaces
+        )
+    }
+
+    fn label(&self) -> &str {
+        self.hostname
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .or(Some(self.ip.as_str()))
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(self.id.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WebTopologyEdge {
+    id: String,
+    protocol: String,
+    source: String,
+    target: String,
+    local_ip: String,
+    local_if_index: Option<i64>,
+    local_port: Option<String>,
+    remote_ip: Option<String>,
+    remote_hostname: Option<String>,
+    remote_port: Option<String>,
+    health_status: Option<String>,
+}
+
+impl WebTopologyEdge {
+    fn to_json(&self) -> String {
+        format!(
+            r#"{{"id":"{}","protocol":"{}","source":"{}","target":"{}","label":"{}","local_ip":"{}","local_if_index":{},"local_port":"{}","remote_ip":"{}","remote_hostname":"{}","remote_port":"{}","health_status":"{}"}}"#,
+            escape_json(&self.id),
+            escape_json(&self.protocol),
+            escape_json(&self.source),
+            escape_json(&self.target),
+            escape_json(&self.label()),
+            escape_json(&self.local_ip),
+            json_opt_i64(self.local_if_index),
+            escape_json(self.local_port.as_deref().unwrap_or("")),
+            escape_json(self.remote_ip.as_deref().unwrap_or("")),
+            escape_json(self.remote_hostname.as_deref().unwrap_or("")),
+            escape_json(self.remote_port.as_deref().unwrap_or("")),
+            escape_json(self.health_status.as_deref().unwrap_or("Healthy")),
+        )
+    }
+
+    /// 例: `Gi1/0/11 \u{2194} Gi1/0/23`
+    fn label(&self) -> String {
+        let local = self
+            .local_port
+            .clone()
+            .or_else(|| self.local_if_index.map(|index| format!("if-{index}")))
+            .unwrap_or_else(|| "?".to_string());
+        let remote = self
+            .remote_port
+            .clone()
+            .filter(|port| !port.trim().is_empty())
+            .unwrap_or_else(|| "?".to_string());
+        format!("{local} \u{2194} {remote}")
+    }
+}
+
+fn json_opt_i64(value: Option<i64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+#[derive(Debug, Clone, Default)]
+struct NeighborRow {
+    local_if_index: Option<i64>,
+    remote_ip: Option<String>,
+    remote_hostname: Option<String>,
+    remote_port: Option<String>,
+}
+
+const LLDP_REMOTE_SYSTEMS_DATA_OID: [u32; 10] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1];
+const LLDP_REM_CHASSIS_ID_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 5];
+const LLDP_REM_PORT_ID_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 7];
+const LLDP_REM_SYS_NAME_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9];
+const LLDP_REM_MAN_ADDR_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 2, 1, 4];
+const CDP_CACHE_TABLE_OID: [u32; 13] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1];
+const CDP_CACHE_ADDRESS_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 4];
+const CDP_CACHE_DEVICE_ID_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 6];
+const CDP_CACHE_DEVICE_PORT_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 7];
+const IF_NAME_OID: [u32; 11] = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1];
+
+fn parse_lldp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec<WebTopologyEdge> {
+    let mut rows: BTreeMap<String, NeighborRow> = BTreeMap::new();
+    for varbind in varbinds {
+        if let Some(suffix) = varbind.index_suffix(&LLDP_REM_SYS_NAME_OID) {
+            // lldpRemEntry の index は [timeMark, localPortNum, index] の3要素
+            let row = neighbor_row(&mut rows, suffix, 1);
+            row.remote_hostname = varbind.value.as_string();
+        } else if let Some(suffix) = varbind.index_suffix(&LLDP_REM_PORT_ID_OID) {
+            let row = neighbor_row(&mut rows, suffix, 1);
+            row.remote_port = varbind.value.as_string();
+        } else if let Some(suffix) = varbind.index_suffix(&LLDP_REM_CHASSIS_ID_OID) {
+            let row = neighbor_row(&mut rows, suffix, 1);
+            if row.remote_hostname.is_none() {
+                row.remote_hostname = varbind.value.as_string();
+            }
+        }
+    }
+
+    rows.into_values()
+        .map(|row| WebTopologyEdge {
+            id: String::new(),
+            protocol: "LLDP".to_string(),
+            source: seed_ip.to_string(),
+            target: String::new(),
+            local_ip: seed_ip.to_string(),
+            local_if_index: row.local_if_index,
+            local_port: None,
+            remote_ip: row.remote_ip,
+            remote_hostname: row.remote_hostname,
+            remote_port: row.remote_port,
+            health_status: None,
+        })
+        .collect()
+}
+
+fn merge_lldp_management_addresses(
+    edges: &mut [WebTopologyEdge],
+    varbinds: &[crate::snmp::SnmpVarBind],
+) {
+    let mut addresses = BTreeMap::new();
+    for varbind in varbinds {
+        if let Some(suffix) = varbind.index_suffix(&LLDP_REM_MAN_ADDR_OID) {
+            let key = lldp_remote_row_key(suffix).unwrap_or_else(|| suffix_to_key(suffix));
+            if let Some(ip) = snmp_value_to_ip(&varbind.value) {
+                addresses.insert(key, ip);
+            }
+        }
+    }
+
+    for edge in edges.iter_mut().filter(|edge| edge.protocol == "LLDP") {
+        if edge.remote_ip.is_none() {
+            if let Some(local_if_index) = edge.local_if_index {
+                if let Some((_, ip)) = addresses
+                    .iter()
+                    .find(|(key, _)| key.split('.').nth(1) == Some(&local_if_index.to_string()))
+                {
+                    edge.remote_ip = Some(ip.clone());
+                }
+            }
+        }
+    }
+}
+
+fn parse_cdp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec<WebTopologyEdge> {
+    let mut rows: BTreeMap<String, NeighborRow> = BTreeMap::new();
+    for varbind in varbinds {
+        if let Some(suffix) = varbind.index_suffix(&CDP_CACHE_DEVICE_ID_OID) {
+            // cdpCacheEntry の index は [ifIndex, deviceIndex] の2要素（LLDPとは位置が違う）
+            let row = neighbor_row(&mut rows, suffix, 0);
+            row.remote_hostname = varbind.value.as_string();
+        } else if let Some(suffix) = varbind.index_suffix(&CDP_CACHE_DEVICE_PORT_OID) {
+            let row = neighbor_row(&mut rows, suffix, 0);
+            row.remote_port = varbind.value.as_string();
+        } else if let Some(suffix) = varbind.index_suffix(&CDP_CACHE_ADDRESS_OID) {
+            let row = neighbor_row(&mut rows, suffix, 0);
+            row.remote_ip = snmp_value_to_ip(&varbind.value);
+        }
+    }
+
+    rows.into_values()
+        .map(|row| WebTopologyEdge {
+            id: String::new(),
+            protocol: "CDP".to_string(),
+            source: seed_ip.to_string(),
+            target: String::new(),
+            local_ip: seed_ip.to_string(),
+            local_if_index: row.local_if_index,
+            local_port: None,
+            remote_ip: row.remote_ip,
+            remote_hostname: row.remote_hostname,
+            remote_port: row.remote_port,
+            health_status: None,
+        })
+        .collect()
+}
+
+fn neighbor_row<'a>(
+    rows: &'a mut BTreeMap<String, NeighborRow>,
+    suffix: &[u32],
+    local_index_pos: usize,
+) -> &'a mut NeighborRow {
+    let key = suffix_to_key(suffix);
+    rows.entry(key).or_insert_with(|| NeighborRow {
+        local_if_index: suffix
+            .get(local_index_pos)
+            .or_else(|| suffix.first())
+            .map(|value| i64::from(*value)),
+        ..NeighborRow::default()
+    })
+}
+
+fn lldp_remote_row_key(suffix: &[u32]) -> Option<String> {
+    (suffix.len() >= 3).then(|| suffix_to_key(&suffix[..3]))
+}
+
+fn suffix_to_key(suffix: &[u32]) -> String {
+    suffix
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn snmp_value_to_ip(value: &crate::snmp::SnmpValue) -> Option<String> {
+    if let crate::snmp::SnmpValue::IpAddress(addr) = value {
+        return Some(format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]));
+    }
+
+    if let Some(bytes) = value.as_bytes() {
+        if bytes.len() >= 4 {
+            return Some(format!(
+                "{}.{}.{}.{}",
+                bytes[0], bytes[1], bytes[2], bytes[3]
+            ));
+        }
+    }
+
+    value
+        .as_string()
+        .filter(|text| text.parse::<std::net::Ipv4Addr>().is_ok())
+}
+
 /// POST /api/discovery/register
-fn api_register(body: &str, repo: &Arc<Mutex<Repository>>) -> String {
+fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String {
     let devices = parse_register_body(body);
     if devices.is_empty() {
         return r#"{"error":"no devices provided"}"#.to_string();
@@ -768,6 +1676,11 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>) -> String {
     let Ok(repo) = repo.lock() else {
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
+
+    let current_count = repo.list_devices().map(|d| d.len()).unwrap_or(0);
+    let mut remaining_slots = edition
+        .node_limit()
+        .map(|limit| limit.saturating_sub(current_count));
 
     let mut registered = Vec::new();
     let mut skipped = Vec::new();
@@ -785,8 +1698,20 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>) -> String {
         match repo.find_device_by_ip(&device.ip) {
             Ok(Some(_)) => skipped.push(device.ip.clone()),
             Ok(None) => {
+                if remaining_slots == Some(0) {
+                    errors.push(format!(
+                        "{}: Community版の登録上限（{}台）に達しています",
+                        device.ip, COMMUNITY_MAX_DEVICES
+                    ));
+                    continue;
+                }
                 match repo.save_device_config(&device) {
-                    Ok(_) => registered.push(device.ip.clone()),
+                    Ok(_) => {
+                        registered.push(device.ip.clone());
+                        if let Some(slots) = remaining_slots.as_mut() {
+                            *slots = slots.saturating_sub(1);
+                        }
+                    }
                     Err(err) => errors.push(format!("{}: {}", device.ip, err)),
                 }
             }
@@ -794,9 +1719,18 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>) -> String {
         }
     }
 
-    let reg_json: Vec<String> = registered.iter().map(|s| format!("\"{}\"", escape_json(s))).collect();
-    let skip_json: Vec<String> = skipped.iter().map(|s| format!("\"{}\"", escape_json(s))).collect();
-    let err_json: Vec<String> = errors.iter().map(|s| format!("\"{}\"", escape_json(s))).collect();
+    let reg_json: Vec<String> = registered
+        .iter()
+        .map(|s| format!("\"{}\"", escape_json(s)))
+        .collect();
+    let skip_json: Vec<String> = skipped
+        .iter()
+        .map(|s| format!("\"{}\"", escape_json(s)))
+        .collect();
+    let err_json: Vec<String> = errors
+        .iter()
+        .map(|s| format!("\"{}\"", escape_json(s)))
+        .collect();
 
     format!(
         r#"{{"registered":[{}],"skipped":[{}],"errors":[{}]}}"#,
@@ -841,7 +1775,11 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     let offline = devices.iter().filter(|d| d.status == "offline").count();
     let warning = devices.iter().filter(|d| d.status == "warning").count();
     let total = devices.len();
-    let spike_card_cls = if spikes_count > 0 { "card card-spike" } else { "card" };
+    let spike_card_cls = if spikes_count > 0 {
+        "card card-spike"
+    } else {
+        "card"
+    };
 
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
@@ -948,20 +1886,27 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
     html.push_str(THEME_BOOTSTRAP_JS);
-    html.push_str(&format!("<title>TracePulse \u{2013} {}</title>", escape_json(ip)));
+    html.push_str(&format!(
+        "<title>TracePulse \u{2013} {}</title>",
+        escape_json(ip)
+    ));
     html.push_str(COMMON_CSS);
     html.push_str(DEVICE_DETAIL_CSS);
     html.push_str("</head><body data-title-key='device_title_prefix'>");
     html.push_str(NAV_HTML);
 
     // 404 check
-    let exists = repo.lock().ok()
+    let exists = repo
+        .lock()
+        .ok()
         .and_then(|r| r.find_device_by_ip(ip).ok())
         .flatten()
         .is_some();
 
     if !exists {
-        html.push_str("<main><p style='color:#f87171;margin-top:2rem'>Device not found.</p></main>");
+        html.push_str(
+            "<main><p style='color:#f87171;margin-top:2rem'>Device not found.</p></main>",
+        );
         html.push_str("</body></html>");
         return html;
     }
@@ -980,10 +1925,12 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("<h2 data-i18n='interface_status'>Interface Status</h2>");
     html.push_str("<div class='table-scroll'><table id='if-table'><thead><tr>\
         <th>#</th><th data-i18n='interface'>Interface</th><th data-i18n='status'>Link</th>\
+        <th data-i18n='diagnostic_status'>Diagnostic Status</th>\
         <th data-i18n='in_errors'>In Errors</th><th data-i18n='out_errors'>Out Errors</th>\
         <th data-i18n='in_discards'>In Discards</th><th data-i18n='out_discards'>Out Discards</th>\
+        <th data-i18n='late_collisions'>Late Collisions</th>\
         <th><span data-i18n='bandwidth_line1'>Bandwidth</span><br><span data-i18n='bandwidth_line2'>Utilization (%)</span></th><th data-i18n='time'>Sampled At</th>\
-        </tr></thead><tbody id='if-tbody'><tr><td colspan=9>Loading...</td></tr></tbody></table></div>");
+        </tr></thead><tbody id='if-tbody'><tr><td colspan=11>Loading...</td></tr></tbody></table></div>");
     html.push_str("</section>");
 
     html.push_str("<section class='detail-section'>");
@@ -1015,6 +1962,11 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("</section>");
 
     html.push_str("<section class='detail-section'>");
+    html.push_str("<h2 data-i18n='memory_used_title'>Memory Used</h2>");
+    html.push_str("<div class='chart-wrap'><svg id='memory-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
+    html.push_str("</section>");
+
+    html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='hardware_status_title'>Hardware Status</h2>");
     html.push_str("<div id='hardware-status' class='hardware-status'>Loading...</div>");
     html.push_str("</section>");
@@ -1034,22 +1986,28 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("</section>");
 
     html.push_str("</main>");
-    html.push_str(&format!("<script>\nvar DEVICE_IP = '{}';\n", escape_json(ip)));
+    html.push_str(&format!(
+        "<script>\nvar DEVICE_IP = '{}';\n",
+        escape_json(ip)
+    ));
     html.push_str(I18N_JS);
     html.push_str(DEVICE_DETAIL_JS);
     html.push_str("</script></body></html>");
     html
 }
 
-fn page_discovery(repo: &Arc<Mutex<Repository>>) -> String {
-    let existing_ips: Vec<String> = repo.lock().ok()
+fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String {
+    let existing_ips: Vec<String> = repo
+        .lock()
+        .ok()
         .and_then(|r| r.list_devices().ok())
         .unwrap_or_default()
         .into_iter()
         .map(|d| d.ip)
         .collect();
 
-    let existing_json: Vec<String> = existing_ips.iter()
+    let existing_json: Vec<String> = existing_ips
+        .iter()
         .map(|ip| format!("\"{}\"", escape_json(ip)))
         .collect();
 
@@ -1070,6 +2028,14 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("<script>\nconst EXISTING = new Set(");
     html.push_str(&existing_set);
     html.push_str(");\n");
+    html.push_str(&format!(
+        "window.TRACEPULSE_WEB_EDITION = {{enterprise:{},nodeLimit:{}}};\n",
+        edition.is_enterprise(),
+        edition
+            .node_limit()
+            .map(|limit| limit.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    ));
     html.push_str(I18N_JS);
     html.push_str(DISCOVERY_JS);
     html.push_str("</script></body></html>");
@@ -1089,11 +2055,28 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
         .lock()
         .map(|c| c.snmp.cpu_oid_override.clone())
         .unwrap_or_else(|_| String::new());
+    let saved_memory_oid = cfg
+        .lock()
+        .map(|c| c.snmp.memory_oid_override.clone())
+        .unwrap_or_else(|_| String::new());
+    let saved_hardware_oids = cfg
+        .lock()
+        .map(|c| c.snmp.hardware_oid_overrides.clone())
+        .unwrap_or_default();
     let ip = params.get("ip").cloned().unwrap_or_default();
-    let community = params.get("community").cloned().unwrap_or_else(|| default_community.clone());
+    let community = params
+        .get("community")
+        .cloned()
+        .unwrap_or_else(|| default_community.clone());
 
     fn fmt_opt(value: Option<u32>) -> String {
-        value.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string())
+        value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "N/A".to_string())
+    }
+
+    fn fmt_bytes_opt(value: Option<u64>) -> String {
+        value.map(format_bytes).unwrap_or_else(|| "N/A".to_string())
     }
 
     fn render_probe_rows(probes: &[crate::snmp::SnmpOidProbe]) -> String {
@@ -1115,9 +2098,33 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
         }).collect()
     }
 
+    fn render_memory_probe_rows(probes: &[crate::snmp::SnmpMemoryProbe]) -> String {
+        if probes.is_empty() {
+            return "<tr><td colspan='4' class='diag-empty'>No memory candidates</td></tr>"
+                .to_string();
+        }
+        probes.iter().map(|probe| {
+            let class = if probe.selected { " class='selected'" } else { "" };
+            let status_class = match probe.status.as_str() {
+                "ok" => "ok",
+                "n/a" => "na",
+                _ => "err",
+            };
+            format!(
+                "<tr{class}><td>{}</td><td><code>{}</code></td><td>{}</td><td><span class='diag-pill {}'>{}</span></td></tr>",
+                escape_html(&probe.label),
+                escape_html(&probe.oid),
+                fmt_bytes_opt(probe.value),
+                status_class,
+                escape_html(&probe.status),
+            )
+        }).collect()
+    }
+
     fn render_hardware_sensors(sensors: &[crate::snmp::SnmpHardwareSensor]) -> String {
         if sensors.is_empty() {
-            return "<tr><td colspan='6' class='diag-empty'>No Sensors Detected</td></tr>".to_string();
+            return "<tr><td colspan='6' class='diag-empty'>No Sensors Detected</td></tr>"
+                .to_string();
         }
         sensors.iter().map(|sensor| {
             let status = sensor.status.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string());
@@ -1138,7 +2145,8 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
 
     fn render_hardware_probes(probes: &[crate::snmp::SnmpOidProbe]) -> String {
         if probes.is_empty() {
-            return "<tr><td colspan='4' class='diag-empty'>No hardware candidates</td></tr>".to_string();
+            return "<tr><td colspan='4' class='diag-empty'>No hardware candidates</td></tr>"
+                .to_string();
         }
         probes.iter().map(|probe| {
             let class = if probe.selected { " class='selected'" } else { "" };
@@ -1172,9 +2180,19 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
         match client.diagnose_device(&device) {
             Ok(report) => {
                 let cpu_value = fmt_opt(report.cpu_usage);
-                let vendor = report.vendor_name.clone().unwrap_or_else(|| "Unknown".to_string());
-                let enterprise = report.enterprise_id.map(|v| v.to_string()).unwrap_or_else(|| "N/A".to_string());
-                let sys_object_id = report.sys_object_id.clone().unwrap_or_else(|| "N/A".to_string());
+                let memory_bytes_value = fmt_bytes_opt(report.memory_used_bytes);
+                let vendor = report
+                    .vendor_name
+                    .clone()
+                    .unwrap_or_else(|| "Unknown".to_string());
+                let enterprise = report
+                    .enterprise_id
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "N/A".to_string());
+                let sys_object_id = report
+                    .sys_object_id
+                    .clone()
+                    .unwrap_or_else(|| "N/A".to_string());
 
                 result_html.push_str("<section class='settings-section'>");
                 result_html.push_str("<h2 data-i18n='diagnostics_title'>SNMP Diagnostics</h2>");
@@ -1182,19 +2200,47 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
                 result_html.push_str("<div class='diag-card'>");
                 result_html.push_str("<h3 data-i18n='target_device'>Target Device</h3>");
                 result_html.push_str("<dl class='diag-kv'>");
-                result_html.push_str(&format!("<dt data-i18n='ip_address'>IP</dt><dd>{}</dd>", escape_html(&ip)));
-                result_html.push_str(&format!("<dt data-i18n='hostname'>sysName</dt><dd>{}</dd>", escape_html(&report.sys_name)));
-                result_html.push_str(&format!("<dt>sysDescr</dt><dd>{}</dd>", escape_html(&report.sys_descr)));
-                result_html.push_str(&format!("<dt data-i18n='sys_object_id'>sysObjectID</dt><dd><code>{}</code></dd>", escape_html(&sys_object_id)));
-                result_html.push_str(&format!("<dt data-i18n='enterprise_id'>Enterprise ID</dt><dd>{}</dd>", escape_html(&enterprise)));
-                result_html.push_str(&format!("<dt data-i18n='vendor'>Vendor</dt><dd>{}</dd>", escape_html(&vendor)));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='ip_address'>IP</dt><dd>{}</dd>",
+                    escape_html(&ip)
+                ));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='hostname'>sysName</dt><dd>{}</dd>",
+                    escape_html(&report.sys_name)
+                ));
+                result_html.push_str(&format!(
+                    "<dt>sysDescr</dt><dd>{}</dd>",
+                    escape_html(&report.sys_descr)
+                ));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='sys_object_id'>sysObjectID</dt><dd><code>{}</code></dd>",
+                    escape_html(&sys_object_id)
+                ));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='enterprise_id'>Enterprise ID</dt><dd>{}</dd>",
+                    escape_html(&enterprise)
+                ));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='vendor'>Vendor</dt><dd>{}</dd>",
+                    escape_html(&vendor)
+                ));
                 result_html.push_str("</dl>");
                 result_html.push_str("</div>");
                 result_html.push_str("<div class='diag-card'>");
                 result_html.push_str("<h3>Summary</h3>");
                 result_html.push_str("<dl class='diag-kv'>");
-                result_html.push_str(&format!("<dt data-i18n='cpu_usage_title'>CPU Usage (%)</dt><dd>{}</dd>", cpu_value));
-                result_html.push_str(&format!("<dt data-i18n='if_index_list'>ifIndex Count</dt><dd>{}</dd>", report.interfaces.len()));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='cpu_usage_title'>CPU Usage (%)</dt><dd>{}</dd>",
+                    cpu_value
+                ));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='memory_used_title'>Memory Used</dt><dd>{}</dd>",
+                    memory_bytes_value
+                ));
+                result_html.push_str(&format!(
+                    "<dt data-i18n='if_index_list'>ifIndex Count</dt><dd>{}</dd>",
+                    report.interfaces.len()
+                ));
                 result_html.push_str("</dl>");
                 result_html.push_str("</div>");
                 result_html.push_str("</div>");
@@ -1207,7 +2253,15 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
                 result_html.push_str("</div>");
 
                 result_html.push_str("<div class='diag-card' style='margin-top:1rem'>");
-                result_html.push_str("<h3 data-i18n='hardware_candidates'>Hardware Candidates</h3>");
+                result_html.push_str("<h3 data-i18n='memory_candidates'>Memory Candidates</h3>");
+                result_html.push_str("<table class='probe-table'><thead><tr><th data-i18n='probe'>Probe</th><th>OID</th><th data-i18n='value'>Value</th><th data-i18n='status'>Status</th></tr></thead><tbody>");
+                result_html.push_str(&render_memory_probe_rows(&report.memory_byte_probes));
+                result_html.push_str("</tbody></table>");
+                result_html.push_str("</div>");
+
+                result_html.push_str("<div class='diag-card' style='margin-top:1rem'>");
+                result_html
+                    .push_str("<h3 data-i18n='hardware_candidates'>Hardware Candidates</h3>");
                 result_html.push_str("<table class='probe-table'><thead><tr><th>Probe</th><th>OID</th><th>Value</th><th>Status</th></tr></thead><tbody>");
                 result_html.push_str(&render_hardware_probes(&report.hardware_probes));
                 result_html.push_str("</tbody></table>");
@@ -1250,15 +2304,23 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
     html.push_str("<h1 data-i18n='diagnostics_title'>SNMP Diagnostics</h1>");
     html.push_str("<div class='settings-section'>");
     html.push_str("<h2 data-i18n='target_device'>Target Device</h2>");
-    html.push_str("<form method='GET' action='/diagnostics' onsubmit='return startDiagnostics(event)'>");
+    html.push_str(
+        "<form method='GET' action='/diagnostics' onsubmit='return startDiagnostics(event)'>",
+    );
     html.push_str("<div class='field-row'>");
     html.push_str("<div class='field-group'>");
     html.push_str("<label data-i18n='ip_address'>IP Address</label>");
-    html.push_str(&format!("<input type='text' name='ip' value='{}' placeholder='192.168.1.1'>", escape_html(&ip)));
+    html.push_str(&format!(
+        "<input type='text' name='ip' value='{}' placeholder='192.168.1.1'>",
+        escape_html(&ip)
+    ));
     html.push_str("</div>");
     html.push_str("<div class='field-group'>");
     html.push_str("<label data-i18n='community'>Community</label>");
-    html.push_str(&format!("<input type='text' name='community' value='{}' placeholder='public'>", escape_html(&community)));
+    html.push_str(&format!(
+        "<input type='text' name='community' value='{}' placeholder='public'>",
+        escape_html(&community)
+    ));
     html.push_str("</div>");
     html.push_str("</div>");
     html.push_str("<div class='actions'>");
@@ -1273,8 +2335,56 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
     html.push_str("<div class='field-row'>");
     html.push_str("<div class='field-group'>");
     html.push_str("<label data-i18n='cpu_oid_override'>CPU OID</label>");
-    html.push_str(&format!("<input type='text' id='cpu-oid-override' value='{}' placeholder='1.3.6.1.4.1....'>", escape_html(&saved_cpu_oid)));
+    html.push_str(&format!(
+        "<input type='text' id='cpu-oid-override' value='{}' placeholder='1.3.6.1.4.1....'>",
+        escape_html(&saved_cpu_oid)
+    ));
     html.push_str("</div>");
+    html.push_str("<div class='field-group'>");
+    html.push_str("<label data-i18n='memory_oid_override'>Memory OID</label>");
+    html.push_str(&format!(
+        "<input type='text' id='memory-oid-override' value='{}' placeholder='1.3.6.1.4.1....'>",
+        escape_html(&saved_memory_oid)
+    ));
+    html.push_str("</div>");
+    html.push_str("</div>");
+    html.push_str("<div class='hardware-oid-fields'>");
+    fn hardware_oid_field_html(
+        sensor_type: &str,
+        label_key: &str,
+        label_text: &str,
+        oid: &str,
+    ) -> String {
+        format!(
+            "<div class='field-group'><label data-i18n='{}'>{}</label><input type='text' class='hardware-oid-input' data-sensor-type='{}' value='{}' placeholder='1.3.6.1.4.1....'></div>",
+            label_key,
+            label_text,
+            sensor_type,
+            escape_html(oid),
+        )
+    }
+    let hardware_oid_map: std::collections::HashMap<&str, &str> = saved_hardware_oids
+        .iter()
+        .filter_map(|entry| entry.split_once('|'))
+        .collect();
+    html.push_str(&hardware_oid_field_html(
+        "temperature",
+        "hardware_oid_temperature",
+        "Temperature OID",
+        hardware_oid_map.get("temperature").copied().unwrap_or(""),
+    ));
+    html.push_str(&hardware_oid_field_html(
+        "power",
+        "hardware_oid_power",
+        "Power OID",
+        hardware_oid_map.get("power").copied().unwrap_or(""),
+    ));
+    html.push_str(&hardware_oid_field_html(
+        "fan",
+        "hardware_oid_fan",
+        "Fan OID",
+        hardware_oid_map.get("fan").copied().unwrap_or(""),
+    ));
     html.push_str("</div>");
     html.push_str("<div class='actions'>");
     html.push_str("<button class='btn btn-primary' type='button' onclick='saveOidOverrides()' data-i18n='save_oid_overrides'>OID の手動保存</button>");
@@ -1395,6 +2505,7 @@ const COMMON_CSS: &str = "<style>
   html[data-theme='light'] .counter-delta.none { color:#64748b; }
   html[data-theme='light'] .counter-delta.warn { color:#b45309; }
   html[data-theme='light'] .counter-delta.crit { color:#b91c1c; }
+  html[data-theme='light'] .counter-delta.duplex { color:#6d28d9; }
 </style>";
 
 const NAV_HTML: &str = "<nav>
@@ -1448,6 +2559,7 @@ var I18N = {
     error_discard_title: 'Error & Discard Counters',
     cpu_memory_title: 'CPU & Memory Usage (%)',
     cpu_usage_title: 'CPU Usage (%)',
+    memory_used_title: 'Memory Used',
     memory_usage_title: 'Memory Usage (%)',
     recent_spikes_title: 'Recent Interface Spikes',
     alert_history: 'Alert History',
@@ -1483,6 +2595,7 @@ var I18N = {
     device_discovery: 'Device Discovery',
     cidr_range: 'CIDR Range',
     cidr_range_placeholder: '192.168.1.0/24',
+    cidr_range_placeholder_enterprise: 'Example: 192.168.11.0/24, 10.0.0.0/24 (comma-separated)',
     community: 'Community',
     public_placeholder: 'public',
     scan: 'Scan',
@@ -1501,6 +2614,13 @@ var I18N = {
     out_errors: 'Out Errors',
     in_discards: 'In Discards',
     out_discards: 'Out Discards',
+    late_collisions: 'Late Collisions',
+    diagnostic_status: 'Diagnostic Status',
+    diagnostic_healthy: 'Healthy',
+    diagnostic_l1_error: '\u26a0 L1 Error',
+    diagnostic_duplex_mismatch: '\u26a0 Duplex Mismatch',
+    diagnostic_congestion: '\u26a0 Congestion',
+    diagnostic_down: 'Down',
     registered: 'Registered',
     select_all: 'Select all',
     scanning: 'Scanning…',
@@ -1534,6 +2654,9 @@ var I18N = {
     oid_overrides: 'OID Overrides',
     cpu_oid_override: 'CPU OID Override',
     memory_oid_override: 'Memory OID Override',
+    hardware_oid_temperature: 'Temperature OID',
+    hardware_oid_power: 'Power OID',
+    hardware_oid_fan: 'Fan OID',
     save_oid_overrides: 'Save OID Overrides',
     unregister: 'Unregister',
     unregistering: 'Unregistering…',
@@ -1556,7 +2679,41 @@ var I18N = {
     registering: 'Registering…',
     select_at_least_one_device: 'Select at least one device.',
     request_failed: 'Request failed',
-    register_selected: 'Register Selected'
+    register_selected: 'Register Selected',
+    seed_device_ip: 'Seed Device IP (LLDP/CDP)',
+    draw_topology: 'Draw Topology',
+    topology_map: 'Topology Map',
+    topology_zoom_in: 'Zoom in',
+    topology_zoom_out: 'Zoom out',
+    topology_fit: 'Fit',
+    topology_auto_layout: 'Auto layout',
+    topology_export_json: 'Export JSON',
+    topology_export_csv: 'Export CSV',
+    topology_details: 'Details',
+    topology_close: 'Close',
+    topology_empty_hint: 'Enter a seed device IP and run discovery to draw the network map.',
+    topology_running: 'Topology discovery running from {ip}…',
+    topology_no_neighbors: 'No LLDP/CDP neighbors found from {ip}',
+    topology_summary: '{nodes} nodes / {edges} links discovered from {ip}',
+    topology_seed_required: 'Seed device IP is required to draw the topology map.',
+    topology_export_empty: 'Run topology discovery before exporting.',
+    topology_hidden_nodes: '+ {count} nodes hidden (Enterprise Edition for unlimited)',
+    topology_protocol: 'Protocol',
+    topology_local_side: 'Local side',
+    topology_remote_side: 'Remote side',
+    topology_device: 'Device',
+    topology_port: 'Port',
+    topology_link: 'Link',
+    topology_interfaces: 'Interfaces',
+    topology_no_interface_data: 'No interface data',
+    node_type_switch: 'Switch / Router',
+    node_type_endpoint: 'Endpoint',
+    edition_community: 'Community Edition ({limit} Node Limit)',
+    edition_enterprise: 'Enterprise Edition (Unlimited Nodes)',
+    port_health: 'Port Health',
+    port_health_crc: 'CRC Errors',
+    port_health_late_collisions: 'Late Collisions',
+    port_health_discards: 'Discards'
   },
   ja: {
     nav_dashboard: 'ダッシュボード',
@@ -1584,6 +2741,7 @@ var I18N = {
     error_discard_title: 'エラー / ディスカード',
     cpu_memory_title: 'CPU / メモリ使用率 (%)',
     cpu_usage_title: 'CPU 使用率 (%)',
+    memory_used_title: 'メモリ使用量',
     memory_usage_title: 'メモリ使用率 (%)',
     recent_spikes_title: '最近のインターフェーススパイク',
     alert_history: 'アラート履歴',
@@ -1619,6 +2777,7 @@ var I18N = {
     device_discovery: 'デバイス探索',
     cidr_range: 'CIDR 範囲',
     cidr_range_placeholder: '192.168.1.0/24',
+    cidr_range_placeholder_enterprise: '例: 192.168.11.0/24, 10.0.0.0/24 (カンマ区切りで複数指定可)',
     community: 'コミュニティ',
     public_placeholder: 'public',
     scan: 'スキャン',
@@ -1637,6 +2796,13 @@ var I18N = {
     out_errors: '出力エラー',
     in_discards: '入力ディスカード',
     out_discards: '出力ディスカード',
+    late_collisions: '遅延衝突',
+    diagnostic_status: '診断ステータス',
+    diagnostic_healthy: '正常',
+    diagnostic_l1_error: '\u26a0 L1エラー',
+    diagnostic_duplex_mismatch: '\u26a0 Duplex不整合',
+    diagnostic_congestion: '\u26a0 帯域逼迫',
+    diagnostic_down: 'Down',
     registered: '登録済み',
     select_all: '全選択',
     scanning: 'スキャン中…',
@@ -1670,6 +2836,9 @@ var I18N = {
     oid_overrides: 'OID 上書き',
     cpu_oid_override: 'CPU OID 上書き',
     memory_oid_override: 'メモリ OID 上書き',
+    hardware_oid_temperature: '温度 OID 上書き',
+    hardware_oid_power: '電源 OID 上書き',
+    hardware_oid_fan: 'ファン OID 上書き',
     save_oid_overrides: 'OID の手動保存',
     unregister: '登録解除',
     unregistering: '解除中…',
@@ -1692,13 +2861,56 @@ var I18N = {
     registering: '登録中…',
     select_at_least_one_device: '少なくとも1台の機器を選択してください。',
     request_failed: 'リクエストに失敗しました',
-    register_selected: '選択した機器を登録'
+    register_selected: '選択した機器を登録',
+    seed_device_ip: 'シード機器 IP (LLDP/CDP)',
+    draw_topology: 'トポロジー描画',
+    topology_map: 'トポロジーマップ',
+    topology_zoom_in: '拡大',
+    topology_zoom_out: '縮小',
+    topology_fit: '全体表示',
+    topology_auto_layout: '自動整列',
+    topology_export_json: 'JSON で出力',
+    topology_export_csv: 'CSV で出力',
+    topology_details: '詳細',
+    topology_close: '閉じる',
+    topology_empty_hint: 'シード機器の IP を入力して探索を実行すると構成図を描画します。',
+    topology_running: '{ip} を起点にトポロジーを探索中…',
+    topology_no_neighbors: '{ip} から LLDP/CDP 隣接機器は検出されませんでした',
+    topology_summary: '{ip} から {nodes} ノード / {edges} リンクを検出しました',
+    topology_seed_required: 'トポロジー描画にはシード機器の IP が必要です。',
+    topology_export_empty: 'エクスポート前にトポロジー探索を実行してください。',
+    topology_hidden_nodes: '+ {count} ノードを非表示中（無制限は Enterprise Edition）',
+    topology_protocol: 'プロトコル',
+    topology_local_side: '接続元',
+    topology_remote_side: '接続先',
+    topology_device: '機器名',
+    topology_port: 'ポート',
+    topology_link: 'リンク',
+    topology_interfaces: 'インターフェース',
+    topology_no_interface_data: 'インターフェース情報はありません',
+    node_type_switch: 'スイッチ / ルーター',
+    node_type_endpoint: '端末・その他',
+    edition_community: 'Community Edition（上限 {limit} ノード）',
+    edition_enterprise: 'Enterprise Edition（ノード数無制限）',
+    port_health: 'ポート健全性',
+    port_health_crc: 'CRC エラー',
+    port_health_late_collisions: 'Late Collision',
+    port_health_discards: 'ディスカード'
   }
 };
 
 function t(key, lang) {
   lang = lang || currentLanguage();
   return (I18N[lang] && I18N[lang][key]) || (I18N.en && I18N.en[key]) || key;
+}
+
+// {name} 形式のプレースホルダを差し替える
+function tf(key, params, lang) {
+  var text = t(key, lang);
+  Object.keys(params || {}).forEach(function(name) {
+    text = text.split('{' + name + '}').join(params[name]);
+  });
+  return text;
 }
 
 function currentLanguage() {
@@ -1809,6 +3021,7 @@ const SETTINGS_CSS: &str = "<style>
   .settings-section { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1.5rem; margin-bottom:1.5rem; }
   .settings-section h2 { margin-bottom:1rem; font-size:1rem; color:#38bdf8; border-bottom:1px solid #334155; padding-bottom:.5rem; }
   .field-row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem; }
+  .hardware-oid-fields { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; margin-top:.75rem; margin-bottom:1rem; }
   .field-group { display:flex; flex-direction:column; gap:.3rem; }
   .field-group label { font-size:.82rem; color:#94a3b8; }
   .field-group input, .field-group select { background:#0f172a; border:1px solid #334155; color:#f1f5f9; padding:.45rem .7rem; border-radius:.375rem; font-size:.95rem; }
@@ -2014,9 +3227,22 @@ function startDiagnostics(event) {
   return false;
 }
 
+function collectHardwareOids() {
+  var inputs = document.querySelectorAll('.hardware-oid-input');
+  var values = [];
+  inputs.forEach(function(input) {
+    var oid = (input.value || '').trim();
+    var type = input.getAttribute('data-sensor-type') || 'temperature';
+    if (oid) values.push(type + '|' + oid);
+  });
+  return values;
+}
+
 function saveOidOverrides() {
   var body = JSON.stringify({
-    cpu_oid_override: document.getElementById('cpu-oid-override').value || ''
+    cpu_oid_override: document.getElementById('cpu-oid-override').value || '',
+    memory_oid_override: document.getElementById('memory-oid-override').value || '',
+    hardware_oid_overrides: collectHardwareOids()
   });
   fetch('/api/diagnostics/oids', {
     method: 'POST',
@@ -2074,6 +3300,8 @@ const DIAGNOSTICS_CSS: &str = "<style>
 </style>";
 
 const DEVICE_DETAIL_CSS: &str = "<style>
+  /* このページはテーブル・グラフの情報量が多いため、共通レイアウトより幅広く画面幅に追従させる */
+  body[data-title-key='device_title_prefix'] main { max-width: min(1800px, 96vw); width: 100%; }
   .detail-section { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1.25rem 1.5rem; margin-bottom:1.5rem; }
   .detail-section h2 { font-size:.95rem; color:#38bdf8; margin-bottom:.85rem; border-bottom:1px solid #334155; padding-bottom:.4rem; }
   .hardware-status { display:flex; flex-wrap:wrap; gap:.75rem; }
@@ -2104,6 +3332,13 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .counter-delta.none { color:#64748b; }
   .counter-delta.warn { color:#fbbf24; }
   .counter-delta.crit { color:#f87171; }
+  .counter-delta.duplex { color:#a78bfa; }
+  .diagnostic-badge { display:inline-block; padding:.2rem .55rem; border-radius:9999px; font-size:.76rem; font-weight:700; white-space:nowrap; }
+  .diagnostic-badge.healthy { background:rgba(16,185,129,.15); color:#10b981; }
+  .diagnostic-badge.l1_error { background:rgba(239,68,68,.15); color:#ef4444; }
+  .diagnostic-badge.duplex_mismatch { background:rgba(139,92,246,.18); color:#8b5cf6; }
+  .diagnostic-badge.congestion { background:rgba(245,158,11,.15); color:#f59e0b; }
+  .diagnostic-badge.down { background:rgba(107,114,128,.2); color:#9ca3af; }
   .row-warn td { background: rgba(245, 158, 11, .08); }
   .row-crit td { background: rgba(248, 113, 113, .10); }
   .link-up { color:#4ade80; font-weight:600; }
@@ -2270,13 +3505,29 @@ function formatCounter(total, delta) {
   if (!delta) return totalText;
   return totalText + '<span class=\'counter-delta ' + counterClass(delta, (window.TRACEPULSE_SPIKE_THRESHOLD || 10)) + '\'> (+' + fmtNum(delta) + ')</span>';
 }
+function formatLateCollisions(total, delta) {
+  var totalText = '<span class=\'counter-total\'>' + fmtNum(total) + '</span>';
+  if (!delta) return totalText;
+  return totalText + '<span class=\'counter-delta duplex\'> (+' + fmtNum(delta) + ')</span>';
+}
+function diagnosticBadge(status) {
+  var key = status || 'healthy';
+  return '<span class=\'diagnostic-badge ' + key + '\'>' + t('diagnostic_' + key) + '</span>';
+}
 
 // ── SVG sparkline ────────────────────────────────────────────────────────────
 function sparkline(svgId, series, yLabel) {
   // series: [{label, color, points:[{t,v}]}]
   var svg = document.getElementById(svgId);
   if (!svg) return;
-  var W = 800, H = 140, PL = 40, PR = 8, PT = 8, PB = 20;
+  // コンテナの実描画サイズを viewBox にそのまま反映し、preserveAspectRatio='none' による
+  // 文字・線の引き伸ばしを防ぐ（viewBox 1ユニット = 実ピクセル1px にする）
+  var rect = svg.getBoundingClientRect();
+  var W = Math.max(200, Math.round(rect.width) || 800);
+  var H = Math.max(80, Math.round(rect.height) || 160);
+  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+  var fontSize = W < 420 ? 8 : 9;
+  var PL = W < 420 ? 30 : 40, PR = 8, PT = 8, PB = 20;
   var cW = W - PL - PR, cH = H - PT - PB;
 
   // flatten all points to find x/y range
@@ -2290,7 +3541,7 @@ function sparkline(svgId, series, yLabel) {
   });
   if (allPts.length === 0) {
     svg.classList.add('chart-empty');
-    svg.innerHTML = '<text x=\'400\' y=\'80\' text-anchor=\'middle\' fill=\'#64748b\' font-size=\'13\'>N/A</text>';
+    svg.innerHTML = '<text x=\''+(W/2)+'\' y=\''+(H/2)+'\' text-anchor=\'middle\' fill=\'#64748b\' font-size=\'13\'>N/A</text>';
     return;
   }
   svg.classList.remove('chart-empty');
@@ -2304,6 +3555,16 @@ function sparkline(svgId, series, yLabel) {
   function tx(t) { return PL + (parseTracePulseTime(t).getTime() - tMin) / (tMax - tMin) * cW; }
   function ty(v) { return PT + cH - (v - vMin) / (vMax - vMin) * cH; }
   function formatAxisValue(v) {
+    if (yLabel === 'bytes') {
+      var units = ['B','KB','MB','GB','TB'];
+      var value = v;
+      var idx = 0;
+      while (value >= 1024 && idx + 1 < units.length) {
+        value = value / 1024;
+        idx++;
+      }
+      return (idx === 0 ? Math.round(value) : value.toFixed(1)) + ' ' + units[idx];
+    }
     if (yLabel === '%') {
       if (v < 1) return v.toFixed(2);
       if (v < 10) return v.toFixed(1);
@@ -2317,7 +3578,7 @@ function sparkline(svgId, series, yLabel) {
     var gy = PT + gi * cH / 4;
     var gv = (vMax - vMin) * (1 - gi/4) + vMin;
     out += '<line x1=\''+PL+'\' y1=\''+gy+'\' x2=\''+(W-PR)+'\' y2=\''+gy+'\' stroke=\'#1e293b\' stroke-width=\'1\'/>';
-    out += '<text x=\''+(PL-4)+'\' y=\''+(gy+4)+'\' text-anchor=\'end\' fill=\'#64748b\' font-size=\'9\'>'+formatAxisValue(gv)+'</text>';
+    out += '<text x=\''+(PL-4)+'\' y=\''+(gy+4)+'\' text-anchor=\'end\' fill=\'#64748b\' font-size=\''+fontSize+'\'>'+formatAxisValue(gv)+'</text>';
   }
   // x-axis labels (4 points)
   for (var xi = 0; xi <= 3; xi++) {
@@ -2333,7 +3594,7 @@ function sparkline(svgId, series, yLabel) {
       anchor = 'end';
       labelX = W - PR - 2;
     }
-    out += '<text x=\''+labelX+'\' y=\''+(H-4)+'\' text-anchor=\''+anchor+'\' fill=\'#475569\' font-size=\'9\'>'+xl+'</text>';
+    out += '<text x=\''+labelX+'\' y=\''+(H-4)+'\' text-anchor=\''+anchor+'\' fill=\'#475569\' font-size=\''+fontSize+'\'>'+xl+'</text>';
   }
   // series lines
   series.forEach(function(s) {
@@ -2351,24 +3612,27 @@ function renderInterfaces(ifaces) {
   var tbody = document.getElementById('if-tbody');
   if (!tbody) return;
   if (ifaces.length === 0) {
-    tbody.innerHTML = '<tr><td colspan=9 class=no-data>' + t('no_interface_data') + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan=11 class=no-data>' + t('no_interface_data') + '</td></tr>';
     return;
   }
   var spikeThreshold = (window.TRACEPULSE_SPIKE_THRESHOLD || 10);
   tbody.innerHTML = ifaces.map(function(f) {
+    var m = f.metrics || {};
     var lc = f.link_status === 'up' ? 'link-up' : 'link-down';
-    var errorDelta = Math.max(f.in_errors_delta || 0, f.out_errors_delta || 0);
-    var discardDelta = Math.max(f.in_discards_delta || 0, f.out_discards_delta || 0);
+    var errorDelta = Math.max(m.in_errors_delta || 0, m.out_errors_delta || 0);
+    var discardDelta = Math.max(m.in_discards_delta || 0, m.out_discards_delta || 0);
     var rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? ' row-crit' : (errorDelta > 0 || discardDelta > 0 ? ' row-warn' : '');
     return '<tr class=\'' + rowClass.trim() + '\'>' +
       '<td>'+f.if_index+'</td>' +
       '<td>'+f.if_name+'</td>' +
       '<td><span class='+lc+'>'+f.link_status+'</span></td>' +
-      '<td>'+formatCounter(f.in_errors, f.in_errors_delta)+'</td>' +
-      '<td>'+formatCounter(f.out_errors, f.out_errors_delta)+'</td>' +
-      '<td>'+formatCounter(f.in_discards, f.in_discards_delta)+'</td>' +
-      '<td>'+formatCounter(f.out_discards, f.out_discards_delta)+'</td>' +
-      '<td>'+(f.bandwidth*100).toFixed(1)+'%</td>' +
+      '<td>'+diagnosticBadge(f.health_status)+'</td>' +
+      '<td>'+formatCounter(m.in_errors, m.in_errors_delta)+'</td>' +
+      '<td>'+formatCounter(m.out_errors, m.out_errors_delta)+'</td>' +
+      '<td>'+formatCounter(m.in_discards, m.in_discards_delta)+'</td>' +
+      '<td>'+formatCounter(m.out_discards, m.out_discards_delta)+'</td>' +
+      '<td>'+formatLateCollisions(m.late_collisions, m.late_collisions_delta)+'</td>' +
+      '<td>'+(m.bandwidth_utilization*100).toFixed(1)+'%</td>' +
       '<td>'+fmtTime(f.sampled_at)+'</td>' +
       '</tr>';
   }).join('');
@@ -2428,12 +3692,13 @@ function renderErrChart(ifSeries) {
 
 function renderSysChart(metrics) {
   renderCpuChart(metrics);
+  renderMemoryChart(metrics);
 }
 
 function renderDetail(d) {
   LAST_DEVICE_DETAIL = d;
   renderHeader(d);
-  var ifaces = (d.interfaces || []).map(function(f) { f.bandwidth = f.bandwidth || f.bandwidth_utilization || 0; return f; });
+  var ifaces = d.interfaces || [];
   IFACE_LABELS = {};
   ifaces.forEach(function(f) { IFACE_LABELS[String(f.if_index)] = f.if_name || ('if-' + f.if_index); });
   syncSelectedInterfaces(ifaces);
@@ -2455,6 +3720,15 @@ function renderCpuChart(metrics) {
     points: metrics.filter(function(m) { return m.cpu !== null && m.cpu !== undefined && m.cpu > 0; }).map(function(m) { return {t:m.t, v:m.cpu}; })
   };
   sparkline('cpu-chart', [cpuSeries], '%');
+}
+
+function renderMemoryChart(metrics) {
+  var memSeries = {
+    label:'Memory Used',
+    color:'#a78bfa',
+    points: metrics.filter(function(m) { return m.memory_bytes !== null && m.memory_bytes !== undefined && m.memory_bytes > 0; }).map(function(m) { return {t:m.t, v:m.memory_bytes}; })
+  };
+  sparkline('memory-chart', [memSeries], 'bytes');
 }
 
 function renderSpikes(spikes) {
@@ -2535,6 +3809,15 @@ function load() {
 
 load();
 setInterval(load, REFRESH_MS);
+
+// ウィンドウ幅変更時にグラフを実サイズへ合わせて再描画する
+var resizeTimer = null;
+window.addEventListener('resize', function() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(function() {
+    if (LAST_DEVICE_DETAIL) renderDetail(LAST_DEVICE_DETAIL);
+  }, 200);
+});
 ";
 
 const DASHBOARD_CSS: &str = "<style>
@@ -2719,6 +4002,54 @@ const DISCOVERY_CSS: &str = "<style>
   .manual-box { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1rem; margin-bottom:1.5rem; }
   .host-hint { font-size:.78rem; color:#64748b; margin-top:.25rem; line-height:1.5; }
   .host-hint.warn { color:#fbbf24; }
+  #topology-section { display:none; margin-top:1.25rem; }
+  .topology-header { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-bottom:.6rem; }
+  .topology-toolbar { margin-left:auto; display:flex; flex-wrap:wrap; gap:.35rem; }
+  .btn-xs { padding:.3rem .6rem; font-size:.78rem; }
+  .topology-badge { font-size:.72rem; font-weight:600; letter-spacing:.02em; padding:.2rem .55rem; border-radius:9999px; background:#1e3a5f; color:#93c5fd; border:1px solid #1d4ed8; }
+  .topology-badge.enterprise { background:#052e16; color:#86efac; border-color:#166534; }
+  #topology-canvas-wrap { position:relative; overflow:hidden; background:#0b1220; border:1px solid #334155; border-radius:.5rem; height:520px; }
+  html[data-theme='light'] #topology-canvas-wrap { background:#f8fafc; border-color:#cbd5e1; }
+  #topology-canvas { width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
+  #topology-canvas.panning { cursor:grabbing; }
+  .topo-node-shape { fill:#1e293b; stroke:#38bdf8; stroke-width:2; }
+  html[data-theme='light'] .topo-node-shape { fill:#ffffff; stroke:#0284c7; }
+  .topo-node.endpoint .topo-node-shape { stroke:#94a3b8; }
+  .topo-node.seed .topo-node-shape { stroke:#fbbf24; stroke-width:3; }
+  .topo-node.offline .topo-node-shape { stroke:#f87171; }
+  .topo-node.selected .topo-node-shape { stroke:#f472b6; stroke-width:3; }
+  .topo-node { cursor:pointer; }
+  .topo-node-label { fill:#e2e8f0; font-size:12px; font-weight:600; text-anchor:middle; dominant-baseline:middle; pointer-events:none; }
+  .topo-node-sub { fill:#94a3b8; font-size:10px; text-anchor:middle; dominant-baseline:middle; pointer-events:none; }
+  html[data-theme='light'] .topo-node-label { fill:#0f172a; }
+  html[data-theme='light'] .topo-node-sub { fill:#64748b; }
+  .topo-edge-line { stroke:#475569; stroke-width:2; }
+  .topo-edge-line.cdp { stroke-dasharray:6 4; }
+  .topo-edge-line.warn { stroke:#f59e0b; stroke-dasharray:6 4; }
+  .topo-edge-line.crit { stroke:#ef4444; stroke-width:4; }
+  .topo-edge-hit { stroke:transparent; stroke-width:14; cursor:pointer; }
+  .topo-edge.selected .topo-edge-line { stroke:#f472b6; stroke-width:3; }
+  .topo-edge-label { fill:#94a3b8; font-size:10px; text-anchor:middle; dominant-baseline:middle; pointer-events:none; }
+  html[data-theme='light'] .topo-edge-label { fill:#475569; }
+  .topology-hidden-indicator { position:absolute; right:.75rem; bottom:.75rem; background:rgba(251,191,36,.14); border:1px solid #b45309; color:#fbbf24; font-size:.78rem; padding:.35rem .7rem; border-radius:.375rem; }
+  .topology-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:.9rem; text-align:center; padding:1rem; }
+  .topology-inspector { position:absolute; top:0; right:0; width:min(320px,80%); height:100%; background:#111c30; border-left:1px solid #334155; transform:translateX(100%); transition:transform .25s ease; overflow-y:auto; }
+  html[data-theme='light'] .topology-inspector { background:#ffffff; border-left-color:#cbd5e1; }
+  .topology-inspector.open { transform:translateX(0); }
+  .inspector-head { display:flex; align-items:center; gap:.5rem; padding:.7rem .9rem; border-bottom:1px solid #334155; font-size:.95rem; }
+  html[data-theme='light'] .inspector-head { border-bottom-color:#e2e8f0; }
+  .inspector-close { margin-left:auto; background:none; border:none; color:#94a3b8; font-size:1.1rem; cursor:pointer; line-height:1; }
+  .inspector-body { padding:.8rem .9rem; font-size:.85rem; color:#cbd5e1; }
+  html[data-theme='light'] .inspector-body { color:#334155; }
+  .inspector-row { display:flex; gap:.5rem; padding:.25rem 0; border-bottom:1px solid rgba(148,163,184,.15); }
+  .inspector-row span:first-child { color:#94a3b8; min-width:96px; }
+  .inspector-body h4 { font-size:.8rem; color:#94a3b8; margin:.9rem 0 .35rem; text-transform:uppercase; letter-spacing:.05em; }
+  .inspector-if { display:flex; justify-content:space-between; gap:.5rem; padding:.2rem 0; font-size:.8rem; }
+  .inspector-if.warn { color:#f59e0b; }
+  .inspector-if.crit { color:#ef4444; font-weight:600; }
+  .inspector-if-icon { margin-right:.25rem; }
+  .topology-list { margin-top:.5rem; display:grid; gap:.4rem; }
+  .topology-edge { background:#1e293b; border:1px solid #334155; border-radius:.375rem; padding:.55rem .7rem; font-size:.85rem; color:#cbd5e1; }
 </style>";
 
 const DISCOVERY_HTML: &str = "<main>
@@ -2734,7 +4065,12 @@ const DISCOVERY_HTML: &str = "<main>
       <label for='community' data-i18n='community'>Community</label>
       <input id='community' type='text' value='public' data-i18n-placeholder='public_placeholder'>
     </div>
+    <div class='form-group' style='flex:1;min-width:160px'>
+      <label for='seed-ip' data-i18n='seed_device_ip'>Seed Device IP (LLDP/CDP)</label>
+      <input id='seed-ip' type='text' placeholder='192.168.11.23'>
+    </div>
     <button class='btn' id='scan-btn' onclick='startScan()' data-i18n='scan'>Scan</button>
+    <button class='btn btn-secondary' id='topology-btn' onclick='runTopologyOnly()' data-i18n='draw_topology'>Draw Topology</button>
     <button class='btn btn-secondary' id='cancel-btn' style='display:none' onclick='cancelScan()' data-i18n='cancel'>Cancel</button>
     <span class='manual-link'><a href='#' onclick='showManual();return false;' data-i18n='add_manually'>+ Add manually</a></span>
   </div>
@@ -2773,6 +4109,34 @@ const DISCOVERY_HTML: &str = "<main>
 
   <div id='scan-error'></div>
 
+  <div id='topology-section'>
+    <div class='topology-header'>
+      <h2 style='margin:0' data-i18n='topology_map'>Topology Map</h2>
+      <span id='edition-badge' class='topology-badge'></span>
+      <div class='topology-toolbar'>
+        <button class='btn btn-secondary btn-xs' onclick='topoZoom(1.2)' data-i18n-title='topology_zoom_in' title='Zoom in'>+</button>
+        <button class='btn btn-secondary btn-xs' onclick='topoZoom(0.8)' data-i18n-title='topology_zoom_out' title='Zoom out'>&#8722;</button>
+        <button class='btn btn-secondary btn-xs' onclick='topoFit()' data-i18n='topology_fit'>Fit</button>
+        <button class='btn btn-secondary btn-xs' onclick='topoRelayout()' data-i18n='topology_auto_layout'>Auto layout</button>
+        <button class='btn btn-secondary btn-xs' onclick='exportTopology(&quot;json&quot;)' data-i18n='topology_export_json'>Export JSON</button>
+        <button class='btn btn-secondary btn-xs' onclick='exportTopology(&quot;csv&quot;)' data-i18n='topology_export_csv'>Export CSV</button>
+      </div>
+    </div>
+    <div id='topology-canvas-wrap'>
+      <svg id='topology-canvas'></svg>
+      <div id='topology-empty' class='topology-empty'></div>
+      <div id='topology-hidden' class='topology-hidden-indicator' style='display:none'></div>
+      <aside id='topology-inspector' class='topology-inspector'>
+        <div class='inspector-head'>
+          <strong id='inspector-title'></strong>
+          <button class='inspector-close' onclick='closeInspector()' data-i18n-title='topology_close' title='Close'>&#215;</button>
+        </div>
+        <div id='inspector-body' class='inspector-body'></div>
+      </aside>
+    </div>
+    <div id='topology-result' class='topology-list'></div>
+  </div>
+
   <div id='results-section'>
     <h2 style='margin:0 0 .75rem' id='results-title' data-i18n='scan_results'>Scan Results</h2>
     <table id='results-table'>
@@ -2806,10 +4170,17 @@ let pollTimer      = null;
 let elapsedTimer   = null;
 let scanStartedAt  = null;
 let cancelled      = false;
+const WEB_EDITION = window.TRACEPULSE_WEB_EDITION || {enterprise:false,nodeLimit:25};
+const IS_ENTERPRISE = !!WEB_EDITION.enterprise;
 
-// /8 未満 (16777214台以上) は非現実的なので /8 を上限とする
-const MAX_PREFIX = 8;
+document.querySelectorAll('.enterprise-only').forEach(function(el) {
+  el.style.display = IS_ENTERPRISE ? '' : 'none';
+});
+
+// Community版は単一サブネット（/24 以上）、Enterprise は複数 CIDR と大規模レンジを許可。
+const MAX_PREFIX = IS_ENTERPRISE ? 0 : 24;
 const CONCURRENCY = 256;
+const COMMUNITY_MAX_DEVICES = WEB_EDITION.nodeLimit || 25;
 
 // ── CIDR hint ──
 function cidrHostCount(cidr) {
@@ -2822,24 +4193,36 @@ function cidrHostCount(cidr) {
   return Math.pow(2, 32 - prefix) - 2;
 }
 
+function cidrEntries(value) {
+  return value.split(',').map(function(c) { return c.trim(); }).filter(Boolean);
+}
+
 function updateHint() {
-  const cidr = document.getElementById('cidr').value.trim();
+  const cidrValue = document.getElementById('cidr').value.trim();
   const hintEl = document.getElementById('host-hint');
-  const total = cidrHostCount(cidr);
+  const entries = cidrEntries(cidrValue);
+  const counts = entries.map(cidrHostCount);
+  if (entries.length > 0 && counts.some(function(count) { return count === null; })) { hintEl.innerHTML = ''; return; }
+  const total = counts.reduce(function(sum, count) { return sum + (count || 0); }, 0);
   if (!total) { hintEl.innerHTML = ''; return; }
 
-  const prefix = parseInt(cidr.split('/')[1], 10);
-  const tooLarge = prefix < MAX_PREFIX;
+  const smallestPrefix = Math.min.apply(null, entries.map(function(cidr) { return parseInt(cidr.split('/')[1], 10); }));
+  const tooLarge = !IS_ENTERPRISE && smallestPrefix < MAX_PREFIX;
   const secs = Math.ceil(total * 0.5 / CONCURRENCY);
 
   if (tooLarge) {
-    // /8 より広いCIDRは拒否
+    // Community版は単一サブネット（/24以上）のみ許可
     hintEl.innerHTML =
-      '<span style=\'color:#f87171\'>\u26a0 CIDR too large (/' + prefix + '). Please use /' + MAX_PREFIX + ' or smaller.</span>';
+      '<span style=\'color:#f87171\'>\u26a0 Community\u7248\u3067\u306f\u5358\u4e00\u30b5\u30d6\u30cd\u30c3\u30c8\uff08/' + MAX_PREFIX + ' \u4ee5\u4e0a\uff09\u306e\u307f\u30b9\u30ad\u30e3\u30f3\u53ef\u80fd\u3067\u3059\u3002\u73fe\u5728: /' + smallestPrefix + '</span>';
   } else {
-    const warn = secs > 30;
+    const warn = !IS_ENTERPRISE && (secs > 30 || total > COMMUNITY_MAX_DEVICES);
     const timeStr = secs >= 60 ? Math.ceil(secs / 60) + ' min' : secs + 's';
-    hintEl.innerHTML = '<span>' + total.toLocaleString() + ' hosts \u2022 est. ~' + timeStr + '</span>';
+    const limitText = IS_ENTERPRISE
+      ? ' \u2022 \u30ce\u30fc\u30c9\u767b\u9332\u6570: \u7121\u5236\u9650 (Enterprise)'
+      : (total > COMMUNITY_MAX_DEVICES ? ' \u2022 \u767b\u9332\u53ef\u80fd\u306a\u306e\u306f\u6700\u5927 ' + COMMUNITY_MAX_DEVICES + ' \u53f0\u307e\u3067\uff08Community\u7248\uff09' : '');
+    hintEl.innerHTML = '<span>' + total.toLocaleString() + ' hosts \u2022 est. ~' + timeStr +
+      limitText +
+      '</span>';
     hintEl.className = 'host-hint' + (warn ? ' warn' : '');
   }
 }
@@ -2848,15 +4231,22 @@ function updateHint() {
 async function startScan() {
   const cidr = document.getElementById('cidr').value.trim();
   const community = document.getElementById('community').value.trim() || 'public';
+  const seedIp = (document.getElementById('seed-ip') && document.getElementById('seed-ip').value.trim()) || '';
   if (!cidr) { alert('Please enter a CIDR range.'); return; }
 
-  const prefix = parseInt((cidr.split('/')[1] || '33'), 10);
-  if (prefix < MAX_PREFIX) {
-    showScanError('CIDR /' + prefix + ' is too large. Please use /' + MAX_PREFIX + ' or smaller (e.g. /16, /24).');
+  const entries = cidrEntries(cidr);
+  const prefixes = entries.map(function(entry) { return parseInt((entry.split('/')[1] || '33'), 10); });
+  const smallestPrefix = Math.min.apply(null, prefixes);
+  if (!IS_ENTERPRISE && entries.length > 1) {
+    showScanError('Community\u7248\u3067\u306f CIDR \u30921\u3064\u3060\u3051\u6307\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044\u3002');
+    return;
+  }
+  if (!IS_ENTERPRISE && smallestPrefix < MAX_PREFIX) {
+    showScanError('Community\u7248\u3067\u306f\u5358\u4e00\u30b5\u30d6\u30cd\u30c3\u30c8\uff08/' + MAX_PREFIX + ' \u4ee5\u4e0a\uff09\u306e\u307f\u30b9\u30ad\u30e3\u30f3\u53ef\u80fd\u3067\u3059\u3002\uff08\u73fe\u5728: /' + smallestPrefix + '\uff09');
     return;
   }
 
-  const total = cidrHostCount(cidr);
+  const total = entries.map(cidrHostCount).reduce(function(sum, count) { return sum + (count || 0); }, 0);
   const maxHosts = total || 65534;
 
   cancelled = false;
@@ -2868,6 +4258,7 @@ async function startScan() {
   document.getElementById('cancel-btn').style.display  = '';
   document.getElementById('scan-error').style.display  = 'none';
   document.getElementById('results-section').style.display = 'none';
+  document.getElementById('topology-section').style.display = 'none';
   document.getElementById('register-result').style.display = 'none';
   setProgress(0, 0, 0);
   document.getElementById('scan-progress').style.display = 'block';
@@ -2882,10 +4273,609 @@ async function startScan() {
     if (data.error) { finishScanError(data.error); return; }
     currentJobId = data.job_id;
     scanStartedAt = Date.now();
+    if (seedIp) startTopologyDiscovery(seedIp, community);
     startPolling(data.total || 0);
   } catch(e) {
     finishScanError('Failed to start scan: ' + e.message);
   }
+}
+
+async function runTopologyOnly() {
+  const seedIp = (document.getElementById('seed-ip').value || '').trim();
+  const community = (document.getElementById('community').value || 'public').trim();
+  if (!seedIp) {
+    showScanError(t('topology_seed_required'));
+    return;
+  }
+  document.getElementById('scan-error').style.display = 'none';
+  await startTopologyDiscovery(seedIp, community);
+}
+
+async function startTopologyDiscovery(seedIp, community) {
+  const section = document.getElementById('topology-section');
+  const result = document.getElementById('topology-result');
+  if (!section || !result) return;
+  section.style.display = 'block';
+  updateEditionBadge();
+  setTopologyPlaceholder('topology_running', {ip: seedIp});
+  result.innerHTML = '';
+  try {
+    const res = await fetch('/api/discovery/topology', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'seed_ip=' + encodeURIComponent(seedIp) + '&community=' + encodeURIComponent(community)
+    });
+    const data = await res.json();
+    if (data.error) {
+      setTopologyPlaceholder(null, {}, '\u26a0 ' + data.error);
+      return;
+    }
+    renderTopology(data);
+  } catch(e) {
+    setTopologyPlaceholder(null, {}, '\u26a0 ' + e.message);
+  }
+}
+
+// ── Topology map (SVG renderer) ──────────────────────────────────────────────
+
+const TOPO = {
+  data: null,
+  pos: {},
+  els: {nodes: {}, edges: []},
+  scale: 1,
+  tx: 0,
+  ty: 0,
+  root: null,
+  drag: null,
+  pan: null,
+  selected: null,
+  selection: null,
+  placeholder: {key: 'topology_empty_hint', params: {}, text: null}
+};
+
+const NODE_H = 44;
+const LAYER_GAP = 150;
+const ROW_GAP = 96;
+const COLUMN_GAP = 200;
+
+function svgEl(tag) {
+  return document.createElementNS('http://www.w3.org/2000/svg', tag);
+}
+
+function esc(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ポートのエラー状態（Warning 以上）をエッジ線の色・線種に反映する
+function edgeHealthClass(edge) {
+  if (edge.health_status === 'Critical') return ' crit';
+  if (edge.health_status === 'Warning') return ' warn';
+  return (edge.protocol || '').indexOf('CDP') !== -1 ? ' cdp' : '';
+}
+
+function updateEditionBadge() {
+  const badge = document.getElementById('edition-badge');
+  if (!badge) return;
+  if (IS_ENTERPRISE) {
+    badge.textContent = t('edition_enterprise');
+    badge.classList.add('enterprise');
+  } else {
+    badge.textContent = tf('edition_community', {limit: COMMUNITY_MAX_DEVICES});
+    badge.classList.remove('enterprise');
+  }
+}
+
+// key 指定時は言語切替に追従し、text 指定時は原文（API エラー等）をそのまま表示する
+function setTopologyPlaceholder(key, params, text) {
+  TOPO.placeholder = {key: key, params: params || {}, text: text || null};
+  const empty = document.getElementById('topology-empty');
+  if (!empty) return;
+  if (!key && !text) {
+    empty.textContent = '';
+    empty.style.display = 'none';
+    return;
+  }
+  empty.textContent = text || tf(key, params);
+  empty.style.display = 'flex';
+}
+
+function renderTopology(data) {
+  TOPO.data = data;
+  TOPO.selected = null;
+  closeInspector();
+  updateEditionBadge();
+
+  const nodes = data.nodes || [];
+  const edges = data.edges || [];
+  renderTopologyWarnings(data);
+  updateHiddenIndicator(data);
+
+  if (nodes.length === 0) {
+    clearTopologyCanvas();
+    setTopologyPlaceholder('topology_no_neighbors', {ip: data.seed_ip || '-'});
+    return;
+  }
+
+  setTopologyPlaceholder(null);
+  computeTreeLayout(nodes, edges, data.seed_ip);
+  drawTopology();
+  topoFit();
+}
+
+function renderTopologyWarnings(data) {
+  const result = document.getElementById('topology-result');
+  if (!result) return;
+  const warnings = data.warnings || [];
+  const summary = '<div class=\'topology-edge\'>' + esc(tf('topology_summary', {
+    nodes: data.total_nodes || (data.nodes || []).length,
+    edges: (data.edges || []).length,
+    ip: data.seed_ip || '-'
+  })) + '</div>';
+  result.innerHTML = summary + warnings.map(function(w) {
+    return '<div class=\'topology-edge\'>\u26a0 ' + esc(w) + '</div>';
+  }).join('');
+}
+
+function updateHiddenIndicator(data) {
+  const box = document.getElementById('topology-hidden');
+  if (!box) return;
+  const hidden = data.hidden_nodes || 0;
+  if (hidden > 0) {
+    box.textContent = tf('topology_hidden_nodes', {count: hidden});
+    box.style.display = 'block';
+  } else {
+    box.style.display = 'none';
+  }
+}
+
+// 言語切替時に i18n 属性を持たない動的テキストを再構築する
+function refreshTopologyTexts() {
+  updateEditionBadge();
+  const placeholder = TOPO.placeholder || {};
+  setTopologyPlaceholder(placeholder.key, placeholder.params, placeholder.text);
+  if (TOPO.data) {
+    renderTopologyWarnings(TOPO.data);
+    updateHiddenIndicator(TOPO.data);
+  }
+  const selection = TOPO.selection;
+  if (selection && selection.group) {
+    if (selection.type === 'node') {
+      selectNode(selection.data, selection.group);
+    } else {
+      selectEdge(selection.data, selection.group);
+    }
+  } else {
+    document.getElementById('inspector-title').textContent = t('topology_details');
+  }
+}
+
+// シード機器を根とした BFS ツリーレイアウト。到達不能ノードは第1階層に並べる。
+function computeTreeLayout(nodes, edges, seedIp) {
+  const adjacency = {};
+  nodes.forEach(function(node) { adjacency[node.id] = []; });
+  edges.forEach(function(edge) {
+    if (adjacency[edge.source] && adjacency[edge.target]) {
+      adjacency[edge.source].push(edge.target);
+      adjacency[edge.target].push(edge.source);
+    }
+  });
+
+  const seed = nodes.filter(function(n) { return n.seed; })[0] ||
+    nodes.filter(function(n) { return n.id === seedIp; })[0] || nodes[0];
+  const depth = {};
+  const queue = [seed.id];
+  depth[seed.id] = 0;
+  while (queue.length) {
+    const id = queue.shift();
+    (adjacency[id] || []).forEach(function(next) {
+      if (depth[next] === undefined) { depth[next] = depth[id] + 1; queue.push(next); }
+    });
+  }
+
+  const layers = {};
+  nodes.forEach(function(node) {
+    const d = depth[node.id] === undefined ? 1 : depth[node.id];
+    if (!layers[d]) layers[d] = [];
+    layers[d].push(node.id);
+  });
+
+  TOPO.pos = {};
+  Object.keys(layers).forEach(function(key) {
+    const ids = layers[key];
+    // 1階層が横に伸びすぎないよう折り返して配置する
+    const perRow = Math.min(ids.length, Math.max(4, Math.ceil(Math.sqrt(ids.length * 2))));
+    ids.forEach(function(id, i) {
+      const row = Math.floor(i / perRow);
+      const columns = Math.min(perRow, ids.length - row * perRow);
+      TOPO.pos[id] = {
+        x: ((i % perRow) - (columns - 1) / 2) * COLUMN_GAP,
+        y: Number(key) * LAYER_GAP + row * ROW_GAP
+      };
+    });
+  });
+}
+
+function clearTopologyCanvas() {
+  const svg = document.getElementById('topology-canvas');
+  if (!svg) return;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  TOPO.root = null;
+  TOPO.els = {nodes: {}, edges: []};
+}
+
+function drawTopology() {
+  const svg = document.getElementById('topology-canvas');
+  if (!svg) return;
+  clearTopologyCanvas();
+  bindCanvasEvents(svg);
+
+  const root = svgEl('g');
+  svg.appendChild(root);
+  TOPO.root = root;
+
+  const edgeLayer = svgEl('g');
+  const nodeLayer = svgEl('g');
+  root.appendChild(edgeLayer);
+  root.appendChild(nodeLayer);
+
+  (TOPO.data.edges || []).forEach(function(edge) {
+    if (!TOPO.pos[edge.source] || !TOPO.pos[edge.target]) return;
+    const group = svgEl('g');
+    group.setAttribute('class', 'topo-edge');
+    const line = svgEl('line');
+    line.setAttribute('class', 'topo-edge-line' + edgeHealthClass(edge));
+    const hit = svgEl('line');
+    hit.setAttribute('class', 'topo-edge-hit');
+    const label = svgEl('text');
+    label.setAttribute('class', 'topo-edge-label');
+    label.textContent = edge.label || '';
+    group.appendChild(line);
+    group.appendChild(hit);
+    group.appendChild(label);
+    edgeLayer.appendChild(group);
+    hit.addEventListener('click', function(ev) { ev.stopPropagation(); selectEdge(edge, group); });
+    TOPO.els.edges.push({edge: edge, group: group, line: line, hit: hit, label: label});
+  });
+
+  (TOPO.data.nodes || []).forEach(function(node) {
+    if (!TOPO.pos[node.id]) return;
+    const group = svgEl('g');
+    const classes = ['topo-node', node.kind === 'switch' ? 'switch' : 'endpoint'];
+    if (node.seed) classes.push('seed');
+    if ((node.status || '').toLowerCase() === 'offline') classes.push('offline');
+    group.setAttribute('class', classes.join(' '));
+
+    const label = node.label || node.ip || node.id;
+    const width = Math.max(104, label.length * 7.4 + 28);
+    let shape;
+    if (node.kind === 'switch') {
+      shape = svgEl('rect');
+      shape.setAttribute('width', width);
+      shape.setAttribute('height', NODE_H);
+      shape.setAttribute('x', -width / 2);
+      shape.setAttribute('y', -NODE_H / 2);
+      shape.setAttribute('rx', 6);
+    } else {
+      shape = svgEl('circle');
+      shape.setAttribute('r', Math.max(28, width / 3.2));
+    }
+    shape.setAttribute('class', 'topo-node-shape');
+    group.appendChild(shape);
+
+    const title = svgEl('text');
+    title.setAttribute('class', 'topo-node-label');
+    title.setAttribute('y', -6);
+    title.textContent = label;
+    group.appendChild(title);
+
+    const sub = svgEl('text');
+    sub.setAttribute('class', 'topo-node-sub');
+    sub.setAttribute('y', 10);
+    sub.textContent = node.ip || node.status || '';
+    group.appendChild(sub);
+
+    nodeLayer.appendChild(group);
+    group.addEventListener('mousedown', function(ev) { startNodeDrag(ev, node.id); });
+    group.addEventListener('click', function(ev) { ev.stopPropagation(); selectNode(node, group); });
+    TOPO.els.nodes[node.id] = {group: group, node: node};
+  });
+
+  updateTopologyPositions();
+  applyTopologyTransform();
+}
+
+function updateTopologyPositions() {
+  Object.keys(TOPO.els.nodes).forEach(function(id) {
+    const pos = TOPO.pos[id];
+    if (!pos) return;
+    TOPO.els.nodes[id].group.setAttribute('transform', 'translate(' + pos.x + ',' + pos.y + ')');
+  });
+
+  // 同じノード間に複数エッジが残っている場合に備え、線とラベルをまとめて平行移動し
+  // どのラベルがどの線に対応するか一目でわかるようにする
+  const groups = {};
+  TOPO.els.edges.forEach(function(item) {
+    const key = item.edge.source + '\u0000' + item.edge.target;
+    (groups[key] = groups[key] || []).push(item);
+  });
+
+  Object.keys(groups).forEach(function(key) {
+    const group = groups[key];
+    const mid = (group.length - 1) / 2;
+    group.forEach(function(item, index) {
+      const a = TOPO.pos[item.edge.source];
+      const b = TOPO.pos[item.edge.target];
+      if (!a || !b) return;
+
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len;
+      const ny = dx / len;
+      // ラベル文字幅より広い間隔を確保し、重なって文字が潰れて見えるのを防ぐ
+      const offset = (index - mid) * 90;
+      const ax = a.x + nx * offset;
+      const ay = a.y + ny * offset;
+      const bx = b.x + nx * offset;
+      const by = b.y + ny * offset;
+
+      [item.line, item.hit].forEach(function(line) {
+        line.setAttribute('x1', ax); line.setAttribute('y1', ay);
+        line.setAttribute('x2', bx); line.setAttribute('y2', by);
+      });
+
+      item.label.setAttribute('x', ax + (bx - ax) * 0.68);
+      item.label.setAttribute('y', ay + (by - ay) * 0.68 - 8);
+    });
+  });
+}
+
+function applyTopologyTransform() {
+  if (!TOPO.root) return;
+  TOPO.root.setAttribute('transform',
+    'translate(' + TOPO.tx + ',' + TOPO.ty + ') scale(' + TOPO.scale + ')');
+}
+
+function bindCanvasEvents(svg) {
+  if (svg.dataset.bound === '1') return;
+  svg.dataset.bound = '1';
+
+  svg.addEventListener('wheel', function(ev) {
+    ev.preventDefault();
+    const rect = svg.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    const k = ev.deltaY < 0 ? 1.1 : 0.9;
+    TOPO.tx = mx - (mx - TOPO.tx) * k;
+    TOPO.ty = my - (my - TOPO.ty) * k;
+    TOPO.scale = Math.min(4, Math.max(0.15, TOPO.scale * k));
+    applyTopologyTransform();
+  }, {passive: false});
+
+  svg.addEventListener('mousedown', function(ev) {
+    if (TOPO.drag) return;
+    TOPO.pan = {x: ev.clientX, y: ev.clientY, tx: TOPO.tx, ty: TOPO.ty};
+    svg.classList.add('panning');
+  });
+
+  svg.addEventListener('click', function() { closeInspector(); clearSelection(); });
+
+  window.addEventListener('mousemove', function(ev) {
+    if (TOPO.drag) {
+      const pos = TOPO.pos[TOPO.drag.id];
+      if (!pos) return;
+      pos.x = TOPO.drag.originX + (ev.clientX - TOPO.drag.x) / TOPO.scale;
+      pos.y = TOPO.drag.originY + (ev.clientY - TOPO.drag.y) / TOPO.scale;
+      updateTopologyPositions();
+    } else if (TOPO.pan) {
+      TOPO.tx = TOPO.pan.tx + (ev.clientX - TOPO.pan.x);
+      TOPO.ty = TOPO.pan.ty + (ev.clientY - TOPO.pan.y);
+      applyTopologyTransform();
+    }
+  });
+
+  window.addEventListener('mouseup', function() {
+    TOPO.drag = null;
+    TOPO.pan = null;
+    svg.classList.remove('panning');
+  });
+}
+
+function startNodeDrag(ev, id) {
+  ev.stopPropagation();
+  const pos = TOPO.pos[id];
+  if (!pos) return;
+  TOPO.drag = {id: id, x: ev.clientX, y: ev.clientY, originX: pos.x, originY: pos.y};
+}
+
+function topoZoom(factor) {
+  const svg = document.getElementById('topology-canvas');
+  if (!svg || !TOPO.root) return;
+  const rect = svg.getBoundingClientRect();
+  const cx = rect.width / 2;
+  const cy = rect.height / 2;
+  TOPO.tx = cx - (cx - TOPO.tx) * factor;
+  TOPO.ty = cy - (cy - TOPO.ty) * factor;
+  TOPO.scale = Math.min(4, Math.max(0.15, TOPO.scale * factor));
+  applyTopologyTransform();
+}
+
+function topoFit() {
+  const svg = document.getElementById('topology-canvas');
+  const ids = Object.keys(TOPO.pos);
+  if (!svg || !TOPO.root || ids.length === 0) return;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  ids.forEach(function(id) {
+    const p = TOPO.pos[id];
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  });
+  const rect = svg.getBoundingClientRect();
+  const pad = 110;
+  const width = (maxX - minX) + pad * 2;
+  const height = (maxY - minY) + pad * 2;
+  const scale = Math.min(2, Math.max(0.15, Math.min(rect.width / width, rect.height / height)));
+  TOPO.scale = scale;
+  TOPO.tx = rect.width / 2 - ((minX + maxX) / 2) * scale;
+  TOPO.ty = rect.height / 2 - ((minY + maxY) / 2) * scale;
+  applyTopologyTransform();
+}
+
+function topoRelayout() {
+  if (!TOPO.data) return;
+  computeTreeLayout(TOPO.data.nodes || [], TOPO.data.edges || [], TOPO.data.seed_ip);
+  updateTopologyPositions();
+  topoFit();
+}
+
+// ── Inspector ────────────────────────────────────────────────────────────────
+
+function clearSelection() {
+  if (TOPO.selected) TOPO.selected.classList.remove('selected');
+  TOPO.selected = null;
+  TOPO.selection = null;
+}
+
+function openInspector(title, html) {
+  document.getElementById('inspector-title').textContent = title;
+  document.getElementById('inspector-body').innerHTML = html;
+  document.getElementById('topology-inspector').classList.add('open');
+}
+
+function closeInspector() {
+  const panel = document.getElementById('topology-inspector');
+  if (panel) panel.classList.remove('open');
+  clearSelection();
+}
+
+function inspectorRow(label, value) {
+  return '<div class=\'inspector-row\'><span>' + esc(label) + '</span><span>' +
+    esc(value === null || value === undefined || value === '' ? '-' : value) + '</span></div>';
+}
+
+function portHealthTags(iface) {
+  const m = iface.metrics || {};
+  const tags = [];
+  if ((m.in_errors_delta || 0) > 0) {
+    tags.push(t('port_health_crc') + ': ' + m.in_errors_delta);
+  }
+  if ((m.late_collisions_delta || 0) > 0) {
+    tags.push(t('port_health_late_collisions') + ': ' + m.late_collisions_delta);
+  }
+  const discards = (m.in_discards_delta || 0) + (m.out_discards_delta || 0);
+  if (discards > 0) {
+    tags.push(t('port_health_discards') + ': ' + discards);
+  }
+  return tags;
+}
+
+function selectNode(node, group) {
+  clearSelection();
+  group.classList.add('selected');
+  TOPO.selected = group;
+  TOPO.selection = {type: 'node', data: node, group: group};
+  let html = inspectorRow(t('ip_address'), node.ip) +
+    inspectorRow(t('hostname'), node.hostname) +
+    inspectorRow(t('status'), node.status) +
+    inspectorRow(t('type'), t(node.kind === 'switch' ? 'node_type_switch' : 'node_type_endpoint'));
+  const interfaces = node.interfaces || [];
+  html += '<h4>' + esc(t('topology_interfaces')) + ' (' + interfaces.length + ')</h4>';
+  if (interfaces.length === 0) {
+    html += '<div class=\'inspector-if\'><span>' + esc(t('topology_no_interface_data')) + '</span></div>';
+  } else {
+    html += interfaces.map(function(iface) {
+      const idx = iface.if_index === null || iface.if_index === undefined ? '-' : iface.if_index;
+      return '<div class=\'inspector-if\'><span>' + esc(iface.if_name || ('if-' + idx)) +
+        '</span><span>' + esc(iface.link_status || '-') + '</span></div>';
+    }).join('');
+  }
+
+  const unhealthy = interfaces.filter(function(iface) {
+    return iface.health_status && iface.health_status !== 'Healthy';
+  });
+  if (unhealthy.length > 0) {
+    html += '<h4>' + esc(t('port_health')) + '</h4>';
+    html += unhealthy.map(function(iface) {
+      const critical = iface.health_status === 'Critical';
+      const cls = critical ? 'crit' : 'warn';
+      const icon = critical ? '\u26d4' : '\u26a0';
+      const tags = portHealthTags(iface)
+        .map(function(tag) { return '[' + tag + ' (' + iface.health_status + ')]'; })
+        .join(' ');
+      return '<div class=\'inspector-if ' + cls + '\'><span class=\'inspector-if-icon\'>' + icon +
+        '</span><span>' + esc(iface.if_name) + ' ' + esc(tags) + '</span></div>';
+    }).join('');
+  }
+
+  openInspector(node.label || node.ip || node.id, html);
+}
+
+function selectEdge(edge, group) {
+  clearSelection();
+  group.classList.add('selected');
+  TOPO.selected = group;
+  TOPO.selection = {type: 'edge', data: edge, group: group};
+  const localPort = edge.local_port ||
+    (edge.local_if_index === null || edge.local_if_index === undefined ? '' : 'if-' + edge.local_if_index);
+  const html = inspectorRow(t('topology_protocol'), edge.protocol) +
+    '<h4>' + esc(t('topology_local_side')) + '</h4>' +
+    inspectorRow(t('topology_device'), edge.local_ip) +
+    inspectorRow(t('topology_port'), localPort) +
+    '<h4>' + esc(t('topology_remote_side')) + '</h4>' +
+    inspectorRow(t('topology_device'), edge.remote_hostname || edge.remote_ip) +
+    inspectorRow(t('ip_address'), edge.remote_ip) +
+    inspectorRow(t('topology_port'), edge.remote_port);
+  openInspector(edge.label || t('topology_link'), html);
+}
+
+// ── Export ───────────────────────────────────────────────────────────────────
+
+function exportTopology(format) {
+  if (!TOPO.data) {
+    showScanError(t('topology_export_empty'));
+    return;
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  if (format === 'csv') {
+    downloadFile('tracepulse-topology-' + stamp + '.csv', topologyToCsv(TOPO.data), 'text/csv');
+  } else {
+    downloadFile('tracepulse-topology-' + stamp + '.json', JSON.stringify(TOPO.data, null, 2), 'application/json');
+  }
+}
+
+function csvCell(value) {
+  const quote = '\u0022';
+  const text = String(value === null || value === undefined ? '' : value);
+  return quote + text.split(quote).join(quote + quote) + quote;
+}
+
+function topologyToCsv(data) {
+  const rows = [['record_type', 'id', 'label', 'ip', 'hostname', 'kind_or_protocol', 'status', 'source', 'source_port', 'target', 'target_port']];
+  (data.nodes || []).forEach(function(node) {
+    rows.push(['node', node.id, node.label, node.ip, node.hostname, node.kind, node.status, '', '', '', '']);
+  });
+  (data.edges || []).forEach(function(edge) {
+    const localPort = edge.local_port ||
+      (edge.local_if_index === null || edge.local_if_index === undefined ? '' : 'if-' + edge.local_if_index);
+    rows.push(['edge', edge.id, edge.label, edge.remote_ip, edge.remote_hostname, edge.protocol, '',
+      edge.source, localPort, edge.target, edge.remote_port]);
+  });
+  return rows.map(function(row) {
+    return row.map(csvCell).join(',');
+  }).join('\r\n');
+}
+
+function downloadFile(filename, content, mime) {
+  const blob = new Blob([content], {type: mime + ';charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(function() { URL.revokeObjectURL(url); }, 0);
 }
 
 function startPolling(total) {
@@ -3107,6 +5097,14 @@ async function addManual() {
 }
 
 document.getElementById('cidr').addEventListener('keydown', function(e) { if (e.key === 'Enter') startScan(); });
+
+refreshTopologyTexts();
+
+function applyPageLanguage(lang) {
+  var cidr = document.getElementById('cidr');
+  if (cidr && IS_ENTERPRISE) cidr.placeholder = t('cidr_range_placeholder_enterprise', lang);
+  refreshTopologyTexts();
+}
 ";
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -3137,7 +5135,55 @@ fn url_decode(s: &str) -> String {
 }
 
 fn escape_json(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', "\\\"").replace('\n', r"\n")
+    s.replace('\\', r"\\")
+        .replace('"', "\\\"")
+        .replace('\n', r"\n")
+}
+
+fn effective_interface_link_status(device_status: &str, sample_link_status: &str) -> String {
+    if device_status.eq_ignore_ascii_case("offline") {
+        "down".to_string()
+    } else {
+        sample_link_status.to_string()
+    }
+}
+
+/// インターフェース状態テーブルの診断ステータスバッジを優先度順に判定する。
+/// リンクダウン中はカウンタが陳腐化しているため最優先で "down" とする。
+fn classify_interface_diagnostic(
+    link_status: &str,
+    in_errors_delta: u64,
+    out_errors_delta: u64,
+    in_discards_delta: u64,
+    out_discards_delta: u64,
+    late_collisions_delta: u64,
+) -> &'static str {
+    if !link_status.eq_ignore_ascii_case("up") {
+        "down"
+    } else if late_collisions_delta > 0 {
+        "duplex_mismatch"
+    } else if in_errors_delta > 0 || out_errors_delta > 0 {
+        "l1_error"
+    } else if in_discards_delta > 0 || out_discards_delta > 0 {
+        "congestion"
+    } else {
+        "healthy"
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut idx = 0;
+    while value >= 1024.0 && idx + 1 < UNITS.len() {
+        value /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{} {}", bytes, UNITS[idx])
+    } else {
+        format!("{:.1} {}", value, UNITS[idx])
+    }
 }
 
 #[allow(dead_code)]
@@ -3156,7 +5202,8 @@ fn parse_register_body(body: &str) -> Vec<DeviceConfig> {
         let name = extract_json_str(chunk, "name");
         let community = extract_json_str(chunk, "community");
         if let Some(ip) = ip {
-            let name = name.unwrap_or_else(|| format!("device-{}", ip.split('.').last().unwrap_or("x")));
+            let name =
+                name.unwrap_or_else(|| format!("device-{}", ip.split('.').last().unwrap_or("x")));
             let community = community.unwrap_or_else(|| "public".to_string());
             let mut d = DeviceConfig::new(ip.clone(), community);
             d.name = name;
@@ -3192,7 +5239,8 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
     const OFFLINE_GRACE_INTERVALS: i64 = 3;
 
     loop {
-        let (interval, spike_threshold) = config.lock()
+        let (interval, spike_threshold) = config
+            .lock()
             .map(|c| (c.polling.interval_seconds, c.alert.spike_threshold))
             .unwrap_or((30, 10));
         let snmp_overrides = config.lock().map(|c| c.snmp.clone()).unwrap_or_default();
@@ -3211,97 +5259,115 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
 
         // 機器ごとに並列スレッドで SNMP 収集し、結果を Vec に集める
         // （SNMP はネットワーク I/O なのでスレッド並列が有効）
-        let handles: Vec<_> = devices.into_iter().map(|device| {
-            let now = now.clone();
-            let snmp_overrides = snmp_overrides.clone();
-            std::thread::spawn(move || -> PollResult {
-                let device_id = match device.id {
-                    Some(id) => id,
-                    None => return PollResult::default_for(device.ip.clone()),
-                };
-                let dev_config = DeviceConfig {
-                    id: device.id,
-                    name: device.name.clone(),
-                    ip: device.ip.clone(),
-                    community: device.community.clone(),
-                    device_type: device.device_type.clone(),
-                    status: device.status.clone(),
-                    last_seen_at: device.last_seen_at.clone(),
-                };
+        let handles: Vec<_> = devices
+            .into_iter()
+            .map(|device| {
+                let now = now.clone();
+                let snmp_overrides = snmp_overrides.clone();
+                std::thread::spawn(move || -> PollResult {
+                    let device_id = match device.id {
+                        Some(id) => id,
+                        None => return PollResult::default_for(device.ip.clone()),
+                    };
+                    let dev_config = DeviceConfig {
+                        id: device.id,
+                        name: device.name.clone(),
+                        ip: device.ip.clone(),
+                        community: device.community.clone(),
+                        device_type: device.device_type.clone(),
+                        status: device.status.clone(),
+                        last_seen_at: device.last_seen_at.clone(),
+                    };
 
-                let client = SnmpClient::with_snmp_config(&dev_config.community, snmp_overrides);
+                    let client =
+                        SnmpClient::with_snmp_config(&dev_config.community, snmp_overrides);
 
-                // 死活確認
-                let is_online = client.probe_device(&dev_config).is_ok();
-                let status = if is_online {
-                    "online"
-                } else {
-                    let grace_secs = interval.saturating_mul(OFFLINE_GRACE_INTERVALS as u64) as i64;
-                    let last_seen_secs = device.last_seen_at.as_ref()
-                        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
-                        .map(|dt| (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_seconds())
-                        .unwrap_or(i64::MAX);
-                    if last_seen_secs <= grace_secs {
-                        "warning"
+                    // 死活確認
+                    let is_online = client.probe_device(&dev_config).is_ok();
+                    let status = if is_online {
+                        "online"
                     } else {
-                        "offline"
-                    }
-                };
-                println!("polling: {} ({}) -> {}", device.name, device.ip, status);
+                        let grace_secs =
+                            interval.saturating_mul(OFFLINE_GRACE_INTERVALS as u64) as i64;
+                        let last_seen_secs = device
+                            .last_seen_at
+                            .as_ref()
+                            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                            .map(|dt| {
+                                (chrono::Utc::now() - dt.with_timezone(&chrono::Utc)).num_seconds()
+                            })
+                            .unwrap_or(i64::MAX);
+                        if last_seen_secs <= grace_secs {
+                            "warning"
+                        } else {
+                            "offline"
+                        }
+                    };
+                    println!("polling: {} ({}) -> {}", device.name, device.ip, status);
 
-                let mut result = PollResult {
-                    ip: device.ip.clone(),
-                    name: device.name.clone(),
-                    device_id,
-                    status: status.to_string(),
-                    metrics: None,
-                    samples: vec![],
-                };
+                    let mut result = PollResult {
+                        ip: device.ip.clone(),
+                        name: device.name.clone(),
+                        device_id,
+                        status: status.to_string(),
+                        metrics: None,
+                        samples: vec![],
+                    };
 
-                if is_online {
-                    // CPU/メモリ
-                    if let Ok(info) = client.query_device(&dev_config) {
-                        result.metrics = Some(DeviceMetrics {
-                            id: None,
-                            device_id,
-                            cpu_usage: info.cpu_usage,
-                            memory_usage: info.memory_usage,
-                            sampled_at: now.clone(),
-                        });
-                    }
+                    if is_online {
+                        // CPU/メモリ
+                        if let Ok(info) = client.query_device(&dev_config) {
+                            result.metrics = Some(DeviceMetrics {
+                                id: None,
+                                device_id,
+                                cpu_usage: info.cpu_usage,
+                                memory_usage: info.memory_usage,
+                                memory_used_bytes: info.memory_used_bytes,
+                                sampled_at: now.clone(),
+                            });
+                        }
 
-                    // インターフェース
-                    let indexes = client.discover_interface_indexes(&dev_config)
-                        .unwrap_or_else(|_| vec![1, 2, 3]);
-                    println!("polling: {} ({}) if_indexes={:?}", device.name, device.ip, indexes);
-                    for if_index in indexes.iter().take(16) {
-                        match client.query_interface(&dev_config, *if_index, None) {
-                            Ok(iface) => {
-                                result.samples.push(InterfaceSample {
-                                    id: None,
-                                    device_id,
-                                    if_index: iface.if_index,
-                                    if_name: iface.if_name.clone(),
-                                    link_status: iface.link_status.clone(),
-                                    in_errors: iface.in_errors,
-                                    out_errors: iface.out_errors,
-                                    in_discards: iface.in_discards,
-                                    out_discards: iface.out_discards,
-                                    in_octets: iface.in_octets,
-                                    out_octets: iface.out_octets,
-                                    bandwidth_utilization: iface.bandwidth_utilization,
-                                    sampled_at: now.clone(),
-                                });
-                            }
-                            Err(e) => {
-                                eprintln!("polling: query_interface failed {} if_index={}: {}", device.ip, if_index, e);
+                        // インターフェース
+                        let indexes = client
+                            .discover_interface_indexes(&dev_config)
+                            .unwrap_or_else(|_| vec![1, 2, 3]);
+                        println!(
+                            "polling: {} ({}) if_indexes={:?}",
+                            device.name, device.ip, indexes
+                        );
+                        for if_index in indexes.iter() {
+                            match client.query_interface(&dev_config, *if_index, None) {
+                                Ok(iface) => {
+                                    result.samples.push(InterfaceSample {
+                                        id: None,
+                                        device_id,
+                                        if_index: iface.if_index,
+                                        if_name: iface.if_name.clone(),
+                                        link_status: iface.link_status.clone(),
+                                        in_errors: iface.in_errors,
+                                        out_errors: iface.out_errors,
+                                        in_discards: iface.in_discards,
+                                        out_discards: iface.out_discards,
+                                        late_collisions: iface.late_collisions,
+                                        in_octets: iface.in_octets,
+                                        out_octets: iface.out_octets,
+                                        bandwidth_utilization: iface.bandwidth_utilization,
+                                        sampled_at: now.clone(),
+                                    });
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "polling: query_interface failed {} if_index={}: {}",
+                                        device.ip, if_index, e
+                                    );
+                                }
                             }
                         }
                     }
-                }
-                result
+                    result
+                })
             })
-        }).collect();
+            .collect();
 
         // 全スレッドの完了を待ち、結果を DB に一括書き込み
         for handle in handles {
@@ -3319,7 +5385,9 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
 
                 for sample in &result.samples {
                     let mut sample = sample.clone();
-                    if let Ok(Some(prev)) = r.get_latest_interface_sample(sample.device_id, sample.if_index) {
+                    if let Ok(Some(prev)) =
+                        r.get_latest_interface_sample(sample.device_id, sample.if_index)
+                    {
                         sample.bandwidth_utilization = calculate_bandwidth_utilization_from_delta(
                             prev.in_octets.saturating_add(prev.out_octets),
                             sample.in_octets.saturating_add(sample.out_octets),
@@ -3386,7 +5454,316 @@ struct PollResult {
 
 impl PollResult {
     fn default_for(ip: String) -> Self {
-        Self { ip, name: String::new(), device_id: 0, status: "offline".to_string(), metrics: None, samples: vec![] }
+        Self {
+            ip,
+            name: String::new(),
+            device_id: 0,
+            status: "offline".to_string(),
+            metrics: None,
+            samples: vec![],
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        annotate_edge_health, classify_interface_diagnostic, effective_interface_link_status,
+        evaluate_port_health, merge_duplicate_edges, page_discovery, parse_cdp_edges, WebEdition,
+        WebTopologyEdge, WebTopologyInterface, WebTopologyReport, CDP_CACHE_DEVICE_ID_OID,
+        COMMUNITY_MAX_DEVICES,
+    };
+    use crate::db::models::InterfacePortDelta;
+    use crate::db::repository::Repository;
+    use rusqlite::Connection;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn offline_device_forces_interface_status_down() {
+        assert_eq!(effective_interface_link_status("offline", "up"), "down");
+    }
+
+    #[test]
+    fn online_device_preserves_sample_interface_status() {
+        assert_eq!(effective_interface_link_status("online", "up"), "up");
+        assert_eq!(effective_interface_link_status("online", "down"), "down");
+    }
+
+    #[test]
+    fn discovery_page_exposes_enterprise_edition_to_browser_js() {
+        let repo = Arc::new(Mutex::new(Repository::new(
+            Connection::open_in_memory().expect("in-memory db should open"),
+        )));
+
+        let html = page_discovery(&repo, WebEdition::Enterprise);
+
+        assert!(html.contains("window.TRACEPULSE_WEB_EDITION = {enterprise:true,nodeLimit:null};"));
+        assert!(html.contains("IS_ENTERPRISE"));
+        assert!(html.contains("Enterprise"));
+        assert!(html.contains("cidr_range_placeholder_enterprise"));
+        assert!(html.contains("id='seed-ip'"));
+        assert!(html.contains("/api/discovery/topology"));
+    }
+
+    #[test]
+    fn discovery_page_exposes_community_node_limit_to_browser_js() {
+        let repo = Arc::new(Mutex::new(Repository::new(
+            Connection::open_in_memory().expect("in-memory db should open"),
+        )));
+
+        let html = page_discovery(&repo, WebEdition::Community);
+
+        assert!(html.contains("window.TRACEPULSE_WEB_EDITION = {enterprise:false,nodeLimit:25};"));
+    }
+
+    fn topology_report_with(node_count: usize) -> WebTopologyReport {
+        let mut edges = Vec::new();
+        for index in 1..node_count {
+            edges.push(WebTopologyEdge {
+                id: format!("e{index}"),
+                protocol: "LLDP".to_string(),
+                source: "10.0.0.1".to_string(),
+                target: format!("10.0.0.{}", index + 1),
+                local_ip: "10.0.0.1".to_string(),
+                local_if_index: Some(index as i64),
+                local_port: Some(format!("Gi1/0/{index}")),
+                remote_ip: Some(format!("10.0.0.{}", index + 1)),
+                remote_hostname: Some(format!("sw-{index}")),
+                remote_port: Some("Gi1/0/23".to_string()),
+                health_status: None,
+            });
+        }
+
+        let mut report = WebTopologyReport {
+            seed_ip: "10.0.0.1".to_string(),
+            nodes: Vec::new(),
+            edges,
+            warnings: Vec::new(),
+            total_nodes: 0,
+            hidden_nodes: 0,
+            node_limit: None,
+        };
+        report.rebuild_nodes(&BTreeMap::new());
+        report
+    }
+
+    #[test]
+    fn duplicate_lldp_and_cdp_edges_to_same_neighbor_are_merged() {
+        let lldp = WebTopologyEdge {
+            id: "e0".to_string(),
+            protocol: "LLDP".to_string(),
+            source: "10.0.0.1".to_string(),
+            target: "10.0.0.2".to_string(),
+            local_ip: "10.0.0.1".to_string(),
+            local_if_index: Some(2),
+            local_port: None,
+            remote_ip: Some("10.0.0.2".to_string()),
+            remote_hostname: Some("core-sw-02".to_string()),
+            remote_port: Some("Gi1/0/23".to_string()),
+            health_status: None,
+        };
+        let cdp = WebTopologyEdge {
+            id: "e1".to_string(),
+            protocol: "CDP".to_string(),
+            source: "10.0.0.1".to_string(),
+            target: "10.0.0.2".to_string(),
+            local_ip: "10.0.0.1".to_string(),
+            local_if_index: Some(3),
+            local_port: Some("Gi1/0/2".to_string()),
+            remote_ip: Some("10.0.0.2".to_string()),
+            remote_hostname: Some("core-sw-02".to_string()),
+            remote_port: Some("Gi1/0/23".to_string()),
+            health_status: None,
+        };
+
+        let merged = merge_duplicate_edges(vec![lldp, cdp]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].protocol, "LLDP+CDP");
+        assert_eq!(merged[0].local_if_index, Some(2));
+        assert_eq!(merged[0].local_port, Some("Gi1/0/2".to_string()));
+    }
+
+    #[test]
+    fn edges_with_distinct_remote_ports_are_kept_separate() {
+        let a = WebTopologyEdge {
+            id: "e0".to_string(),
+            protocol: "LLDP".to_string(),
+            source: "10.0.0.1".to_string(),
+            target: "10.0.0.2".to_string(),
+            local_ip: "10.0.0.1".to_string(),
+            local_if_index: Some(2),
+            local_port: Some("Gi1/0/2".to_string()),
+            remote_ip: Some("10.0.0.2".to_string()),
+            remote_hostname: Some("core-sw-02".to_string()),
+            remote_port: Some("Gi1/0/23".to_string()),
+            health_status: None,
+        };
+        let b = WebTopologyEdge {
+            id: "e1".to_string(),
+            protocol: "LLDP".to_string(),
+            source: "10.0.0.1".to_string(),
+            target: "10.0.0.2".to_string(),
+            local_ip: "10.0.0.1".to_string(),
+            local_if_index: Some(3),
+            local_port: Some("Gi1/0/3".to_string()),
+            remote_ip: Some("10.0.0.2".to_string()),
+            remote_hostname: Some("core-sw-02".to_string()),
+            remote_port: Some("Gi1/0/24".to_string()),
+            health_status: None,
+        };
+
+        let merged = merge_duplicate_edges(vec![a, b]);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn cdp_local_if_index_uses_ifindex_not_device_index() {
+        let varbind = crate::snmp::SnmpVarBind {
+            oid: [CDP_CACHE_DEVICE_ID_OID.as_slice(), &[23, 1]].concat(),
+            value: crate::snmp::SnmpValue::OctetString(b"core-sw-02".to_vec()),
+        };
+
+        let edges = parse_cdp_edges("10.0.0.1", &[varbind]);
+
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].local_if_index, Some(23));
+    }
+
+    #[test]
+    fn community_topology_is_truncated_to_node_limit() {
+        let mut report = topology_report_with(30);
+        report.apply_node_limit(WebEdition::Community);
+
+        assert_eq!(report.nodes.len(), COMMUNITY_MAX_DEVICES);
+        assert_eq!(report.hidden_nodes, 30 - COMMUNITY_MAX_DEVICES);
+        assert!(report
+            .edges
+            .iter()
+            .all(|edge| report.nodes.iter().any(|node| node.id == edge.target)));
+    }
+
+    #[test]
+    fn enterprise_topology_keeps_every_node() {
+        let mut report = topology_report_with(30);
+        report.apply_node_limit(WebEdition::Enterprise);
+
+        assert_eq!(report.nodes.len(), 30);
+        assert_eq!(report.hidden_nodes, 0);
+        assert!(report.to_json().contains(r#""node_limit":null"#));
+    }
+
+    #[test]
+    fn topology_json_exposes_graph_schema() {
+        let mut report = topology_report_with(3);
+        report.apply_node_limit(WebEdition::Community);
+        let json = report.to_json();
+
+        assert!(json.contains(r#""nodes":[{"id":"10.0.0.1""#));
+        assert!(json.contains(r#""kind":"switch""#));
+        assert!(json.contains(r#""source":"10.0.0.1","target":"10.0.0.2""#));
+        assert!(json.contains("\"label\":\"Gi1/0/1 \u{2194} Gi1/0/23\""));
+        assert!(json.contains(r#""hidden_nodes":0"#));
+    }
+
+    #[test]
+    fn l1_physical_error_is_flagged_warning_below_threshold() {
+        let delta = InterfacePortDelta {
+            in_errors_delta: 5,
+            ..Default::default()
+        };
+        let (status, alerts) = evaluate_port_health(&delta);
+        assert_eq!(status, "Warning");
+        assert_eq!(alerts, vec!["L1 Physical Error (CRC/Frame Error)".to_string()]);
+    }
+
+    #[test]
+    fn l1_physical_error_escalates_to_critical_above_threshold() {
+        let delta = InterfacePortDelta {
+            in_errors_delta: 50,
+            ..Default::default()
+        };
+        let (status, _) = evaluate_port_health(&delta);
+        assert_eq!(status, "Critical");
+    }
+
+    #[test]
+    fn late_collisions_are_flagged_as_duplex_mismatch() {
+        let delta = InterfacePortDelta {
+            late_collisions_delta: 1,
+            ..Default::default()
+        };
+        let (status, alerts) = evaluate_port_health(&delta);
+        assert_eq!(status, "Warning");
+        assert_eq!(alerts, vec!["Duplex Mismatch / Late Collision".to_string()]);
+    }
+
+    #[test]
+    fn discards_are_flagged_as_congestion() {
+        let delta = InterfacePortDelta {
+            out_discards_delta: 10,
+            ..Default::default()
+        };
+        let (status, alerts) = evaluate_port_health(&delta);
+        assert_eq!(status, "Warning");
+        assert_eq!(
+            alerts,
+            vec!["Buffer Overflow / Congestion (Packet Discards)".to_string()]
+        );
+    }
+
+    #[test]
+    fn healthy_port_has_no_alerts() {
+        let (status, alerts) = evaluate_port_health(&InterfacePortDelta::default());
+        assert_eq!(status, "Healthy");
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn edge_inherits_local_port_health_from_source_node() {
+        let mut report = topology_report_with(2);
+        let unhealthy_iface = WebTopologyInterface {
+            if_index: Some(1),
+            if_name: "Gi1/0/1".to_string(),
+            link_status: "up".to_string(),
+            metrics: InterfacePortDelta {
+                in_errors_delta: 5,
+                ..Default::default()
+            },
+            health_status: "Warning".to_string(),
+            alerts: vec!["L1 Physical Error (CRC/Frame Error)".to_string()],
+        };
+        report.nodes[0].interfaces = vec![unhealthy_iface];
+
+        annotate_edge_health(&mut report);
+
+        assert_eq!(report.edges[0].health_status, Some("Warning".to_string()));
+    }
+
+    #[test]
+    fn diagnostic_status_prioritizes_down_over_counters() {
+        assert_eq!(classify_interface_diagnostic("down", 5, 0, 0, 0, 5), "down");
+    }
+
+    #[test]
+    fn diagnostic_status_prioritizes_duplex_mismatch_over_l1_error() {
+        assert_eq!(classify_interface_diagnostic("up", 5, 0, 0, 0, 1), "duplex_mismatch");
+    }
+
+    #[test]
+    fn diagnostic_status_flags_l1_error_over_congestion() {
+        assert_eq!(classify_interface_diagnostic("up", 1, 0, 3, 0, 0), "l1_error");
+    }
+
+    #[test]
+    fn diagnostic_status_flags_congestion_when_only_discards_present() {
+        assert_eq!(classify_interface_diagnostic("up", 0, 0, 0, 4, 0), "congestion");
+    }
+
+    #[test]
+    fn diagnostic_status_is_healthy_when_no_deltas() {
+        assert_eq!(classify_interface_diagnostic("up", 0, 0, 0, 0, 0), "healthy");
     }
 }
 
@@ -3402,23 +5779,49 @@ fn chrono_now() -> String {
 }
 
 fn epoch_to_ymd_hms(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
-    let s = secs % 60; secs /= 60;
-    let mi = secs % 60; secs /= 60;
-    let h = secs % 24; secs /= 24;
+    let s = secs % 60;
+    secs /= 60;
+    let mi = secs % 60;
+    secs /= 60;
+    let h = secs % 24;
+    secs /= 24;
     // days since 1970-01-01
     let mut days = secs;
     let mut y = 1970u64;
     loop {
-        let dy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 { 366 } else { 365 };
-        if days < dy { break; }
-        days -= dy; y += 1;
+        let dy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        y += 1;
     }
     let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
-    let months = [31u64,if leap{29}else{28},31,30,31,30,31,31,30,31,30,31];
+    let months = [
+        31u64,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 1u64;
     for dm in &months {
-        if days < *dm { break; }
-        days -= dm; mo += 1;
+        if days < *dm {
+            break;
+        }
+        days -= dm;
+        mo += 1;
     }
     (y, mo, days + 1, h, mi, s)
 }

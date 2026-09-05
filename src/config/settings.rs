@@ -14,6 +14,7 @@ impl Default for SnmpConfig {
             default_community: super::defaults::default_snmp_community(),
             cpu_oid_override: super::defaults::default_cpu_oid_override(),
             memory_oid_override: super::defaults::default_memory_oid_override(),
+            hardware_oid_overrides: super::defaults::default_hardware_oid_overrides(),
         }
     }
 }

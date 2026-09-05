@@ -17,6 +17,10 @@ pub struct SnmpConfig {
     pub cpu_oid_override: String,
     #[serde(default = "defaults::default_memory_oid_override")]
     pub memory_oid_override: String,
+    /// Hardware センサーの手動 OID 上書きリスト。複数登録可能。
+    /// 各要素は "sensor_type|oid" 形式(sensor_type は temperature / power / fan のいずれか)。
+    #[serde(default = "defaults::default_hardware_oid_overrides")]
+    pub hardware_oid_overrides: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

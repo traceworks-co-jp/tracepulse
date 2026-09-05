@@ -1,6 +1,10 @@
-use crate::db::models::{AlertEvent, Device, DeviceMetrics, InterfaceSample, InterfaceSpike, RecentAlert};
+use crate::db::models::{
+    AlertEvent, Device, DeviceMetrics, InterfacePortDelta, InterfaceSample, InterfaceSpike,
+    RecentAlert,
+};
 use crate::error::AppError;
 use rusqlite::params;
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Repository {
@@ -36,7 +40,10 @@ impl Repository {
         Ok(id as i64)
     }
 
-    pub fn save_device_config(&self, device: &crate::device::types::DeviceConfig) -> Result<i64, AppError> {
+    pub fn save_device_config(
+        &self,
+        device: &crate::device::types::DeviceConfig,
+    ) -> Result<i64, AppError> {
         let maybe_existing = self.find_device_by_ip(&device.ip)?;
         let id = match maybe_existing {
             Some(existing) => {
@@ -104,10 +111,20 @@ impl Repository {
             .id
             .ok_or_else(|| AppError::Validation(format!("device {} has no id", ip)))?;
 
-        self.connection.execute("DELETE FROM device_metrics WHERE device_id = ?1", params![device_id])?;
-        self.connection.execute("DELETE FROM interface_samples WHERE device_id = ?1", params![device_id])?;
-        self.connection.execute("DELETE FROM alert_events WHERE device_id = ?1", params![device_id])?;
-        self.connection.execute("DELETE FROM devices WHERE id = ?1", params![device_id])?;
+        self.connection.execute(
+            "DELETE FROM device_metrics WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM interface_samples WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        self.connection.execute(
+            "DELETE FROM alert_events WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        self.connection
+            .execute("DELETE FROM devices WHERE id = ?1", params![device_id])?;
 
         Ok(())
     }
@@ -146,14 +163,16 @@ impl Repository {
         };
 
         let sql = format!("SELECT COUNT(*) FROM {table}");
-        let count = self.connection.query_row(&sql, [], |row| row.get::<_, i64>(0))?;
+        let count = self
+            .connection
+            .query_row(&sql, [], |row| row.get::<_, i64>(0))?;
         Ok(count)
     }
 
     pub fn save_sample(&self, sample: &InterfaceSample) -> Result<i64, AppError> {
         let id = self.connection.execute(
-            "INSERT INTO interface_samples (device_id, if_index, if_name, link_status, in_errors, out_errors, in_discards, out_discards, in_octets, out_octets, bandwidth_utilization, sampled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO interface_samples (device_id, if_index, if_name, link_status, in_errors, out_errors, in_discards, out_discards, late_collisions, in_octets, out_octets, bandwidth_utilization, sampled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 sample.device_id,
                 sample.if_index,
@@ -163,6 +182,7 @@ impl Repository {
                 sample.out_errors,
                 sample.in_discards,
                 sample.out_discards,
+                sample.late_collisions,
                 sample.in_octets,
                 sample.out_octets,
                 sample.bandwidth_utilization,
@@ -177,7 +197,12 @@ impl Repository {
         let id = self.connection.execute(
             "INSERT INTO alert_events (device_id, alert_type, severity, details, created_at)
              VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
-            params![alert.device_id, alert.alert_type, alert.severity, alert.details],
+            params![
+                alert.device_id,
+                alert.alert_type,
+                alert.severity,
+                alert.details
+            ],
         )?;
 
         Ok(id as i64)
@@ -198,17 +223,22 @@ impl Repository {
     }
 
     /// デバイスの各インターフェースについて、直近2サンプルの差分からスパイクを抽出する。
-    pub fn check_interface_spikes(&self, device_id: i64, spike_threshold: u64) -> Result<Vec<InterfaceSpike>, AppError> {
+    pub fn check_interface_spikes(
+        &self,
+        device_id: i64,
+        spike_threshold: u64,
+    ) -> Result<Vec<InterfaceSpike>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards,
+                    in_errors, out_errors, in_discards, out_discards, late_collisions,
                     sampled_at
              FROM interface_samples
              WHERE device_id = ?1
              ORDER BY if_index ASC, sampled_at DESC, id DESC",
         )?;
 
-        let mut by_if: std::collections::HashMap<i32, Vec<InterfaceSample>> = std::collections::HashMap::new();
+        let mut by_if: std::collections::HashMap<i32, Vec<InterfaceSample>> =
+            std::collections::HashMap::new();
         let rows = stmt.query_map(params![device_id], |row| {
             Ok(InterfaceSample {
                 id: None,
@@ -220,10 +250,11 @@ impl Repository {
                 out_errors: row.get::<_, i64>(4)? as u64,
                 in_discards: row.get::<_, i64>(5)? as u64,
                 out_discards: row.get::<_, i64>(6)? as u64,
+                late_collisions: row.get::<_, i64>(7)? as u64,
                 in_octets: 0,
                 out_octets: 0,
                 bandwidth_utilization: 0.0,
-                sampled_at: row.get(7)?,
+                sampled_at: row.get(8)?,
             })
         })?;
 
@@ -241,9 +272,14 @@ impl Repository {
             }
             let latest = &samples[0];
             let previous = &samples[1];
-            let latest_total = latest.in_errors + latest.out_errors + latest.in_discards + latest.out_discards;
-            let previous_total = previous.in_errors + previous.out_errors + previous.in_discards + previous.out_discards;
-            let total_delta = latest_total.saturating_sub(previous_total);
+            let in_errors_delta = counter32_delta(previous.in_errors, latest.in_errors);
+            let out_errors_delta = counter32_delta(previous.out_errors, latest.out_errors);
+            let in_discards_delta = counter32_delta(previous.in_discards, latest.in_discards);
+            let out_discards_delta = counter32_delta(previous.out_discards, latest.out_discards);
+            let late_collisions_delta =
+                counter32_delta(previous.late_collisions, latest.late_collisions);
+            let total_delta =
+                in_errors_delta + out_errors_delta + in_discards_delta + out_discards_delta;
             if total_delta < spike_threshold {
                 continue;
             }
@@ -252,17 +288,22 @@ impl Repository {
                 if_index: latest.if_index,
                 if_name: latest.if_name.clone(),
                 link_status: latest.link_status.clone(),
-                in_errors_delta: latest.in_errors.saturating_sub(previous.in_errors),
-                out_errors_delta: latest.out_errors.saturating_sub(previous.out_errors),
-                in_discards_delta: latest.in_discards.saturating_sub(previous.in_discards),
-                out_discards_delta: latest.out_discards.saturating_sub(previous.out_discards),
+                in_errors_delta,
+                out_errors_delta,
+                in_discards_delta,
+                out_discards_delta,
+                late_collisions_delta,
                 total_delta,
                 latest_sampled_at: latest.sampled_at.clone(),
                 previous_sampled_at: previous.sampled_at.clone(),
             });
         }
 
-        spikes.sort_by(|a, b| b.total_delta.cmp(&a.total_delta).then(a.if_index.cmp(&b.if_index)));
+        spikes.sort_by(|a, b| {
+            b.total_delta
+                .cmp(&a.total_delta)
+                .then(a.if_index.cmp(&b.if_index))
+        });
         Ok(spikes)
     }
 
@@ -283,12 +324,13 @@ impl Repository {
 
     pub fn save_device_metrics(&self, metrics: &DeviceMetrics) -> Result<(), AppError> {
         self.connection.execute(
-            "INSERT INTO device_metrics (device_id, cpu_usage, memory_usage, sampled_at)
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO device_metrics (device_id, cpu_usage, memory_usage, memory_used_bytes, sampled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 metrics.device_id,
                 metrics.cpu_usage.map(|v| v as i64),
                 metrics.memory_usage.map(|v| v as i64),
+                metrics.memory_used_bytes.map(|v| v as i64),
                 metrics.sampled_at
             ],
         )?;
@@ -296,9 +338,13 @@ impl Repository {
     }
 
     /// 直近 `limit` 件の CPU/メモリ履歴を時系列昇順で返す
-    pub fn get_device_metrics_history(&self, device_id: i64, limit: usize) -> Result<Vec<DeviceMetrics>, AppError> {
+    pub fn get_device_metrics_history(
+        &self,
+        device_id: i64,
+        limit: usize,
+    ) -> Result<Vec<DeviceMetrics>, AppError> {
         let mut stmt = self.connection.prepare(
-            "SELECT id, device_id, cpu_usage, memory_usage, sampled_at
+            "SELECT id, device_id, cpu_usage, memory_usage, memory_used_bytes, sampled_at
              FROM device_metrics
              WHERE device_id = ?1
              ORDER BY sampled_at DESC
@@ -311,7 +357,8 @@ impl Repository {
                     device_id: row.get(1)?,
                     cpu_usage: row.get::<_, Option<i64>>(2)?.map(|v| v as u32),
                     memory_usage: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
-                    sampled_at: row.get(4)?,
+                    memory_used_bytes: row.get::<_, Option<i64>>(4)?.map(|v| v as u64),
+                    sampled_at: row.get(5)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -325,10 +372,14 @@ impl Repository {
     // ─── Interface History ────────────────────────────────────────────────
 
     /// インターフェース別の直近サンプル履歴（各 if_index ごとに最新 limit 件）
-    pub fn get_interface_history(&self, device_id: i64, limit: usize) -> Result<Vec<InterfaceSample>, AppError> {
+    pub fn get_interface_history(
+        &self,
+        device_id: i64,
+        limit: usize,
+    ) -> Result<Vec<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards,
+                    in_errors, out_errors, in_discards, out_discards, late_collisions,
                     in_octets, out_octets,
                     bandwidth_utilization, sampled_at
              FROM interface_samples
@@ -348,10 +399,11 @@ impl Repository {
                     out_errors: row.get::<_, i64>(6)? as u64,
                     in_discards: row.get::<_, i64>(7)? as u64,
                     out_discards: row.get::<_, i64>(8)? as u64,
-                    in_octets: row.get::<_, i64>(9)? as u64,
-                    out_octets: row.get::<_, i64>(10)? as u64,
-                    bandwidth_utilization: row.get(11)?,
-                    sampled_at: row.get(12)?,
+                    late_collisions: row.get::<_, i64>(9)? as u64,
+                    in_octets: row.get::<_, i64>(10)? as u64,
+                    out_octets: row.get::<_, i64>(11)? as u64,
+                    bandwidth_utilization: row.get(12)?,
+                    sampled_at: row.get(13)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -364,7 +416,7 @@ impl Repository {
     pub fn get_latest_interfaces(&self, device_id: i64) -> Result<Vec<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards,
+                    in_errors, out_errors, in_discards, out_discards, late_collisions,
                     in_octets, out_octets,
                     bandwidth_utilization, sampled_at
              FROM interface_samples
@@ -388,10 +440,11 @@ impl Repository {
                     out_errors: row.get::<_, i64>(6)? as u64,
                     in_discards: row.get::<_, i64>(7)? as u64,
                     out_discards: row.get::<_, i64>(8)? as u64,
-                    in_octets: row.get::<_, i64>(9)? as u64,
-                    out_octets: row.get::<_, i64>(10)? as u64,
-                    bandwidth_utilization: row.get(11)?,
-                    sampled_at: row.get(12)?,
+                    late_collisions: row.get::<_, i64>(9)? as u64,
+                    in_octets: row.get::<_, i64>(10)? as u64,
+                    out_octets: row.get::<_, i64>(11)? as u64,
+                    bandwidth_utilization: row.get(12)?,
+                    sampled_at: row.get(13)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -399,10 +452,14 @@ impl Repository {
         Ok(rows)
     }
 
-    pub fn get_latest_interface_sample(&self, device_id: i64, if_index: i32) -> Result<Option<InterfaceSample>, AppError> {
+    pub fn get_latest_interface_sample(
+        &self,
+        device_id: i64,
+        if_index: i32,
+    ) -> Result<Option<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards,
+                    in_errors, out_errors, in_discards, out_discards, late_collisions,
                     in_octets, out_octets, bandwidth_utilization, sampled_at
              FROM interface_samples
              WHERE device_id = ?1 AND if_index = ?2
@@ -421,10 +478,11 @@ impl Repository {
                 out_errors: row.get::<_, i64>(6)? as u64,
                 in_discards: row.get::<_, i64>(7)? as u64,
                 out_discards: row.get::<_, i64>(8)? as u64,
-                in_octets: row.get::<_, i64>(9)? as u64,
-                out_octets: row.get::<_, i64>(10)? as u64,
-                bandwidth_utilization: row.get(11)?,
-                sampled_at: row.get(12)?,
+                late_collisions: row.get::<_, i64>(9)? as u64,
+                in_octets: row.get::<_, i64>(10)? as u64,
+                out_octets: row.get::<_, i64>(11)? as u64,
+                bandwidth_utilization: row.get(12)?,
+                sampled_at: row.get(13)?,
             })
         }) {
             Ok(sample) => Ok(Some(sample)),
@@ -442,7 +500,7 @@ impl Repository {
     ) -> Result<Vec<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards,
+                    in_errors, out_errors, in_discards, out_discards, late_collisions,
                     in_octets, out_octets, bandwidth_utilization, sampled_at
              FROM interface_samples
              WHERE device_id = ?1 AND if_index = ?2
@@ -462,10 +520,11 @@ impl Repository {
                     out_errors: row.get::<_, i64>(6)? as u64,
                     in_discards: row.get::<_, i64>(7)? as u64,
                     out_discards: row.get::<_, i64>(8)? as u64,
-                    in_octets: row.get::<_, i64>(9)? as u64,
-                    out_octets: row.get::<_, i64>(10)? as u64,
-                    bandwidth_utilization: row.get(11)?,
-                    sampled_at: row.get(12)?,
+                    late_collisions: row.get::<_, i64>(9)? as u64,
+                    in_octets: row.get::<_, i64>(10)? as u64,
+                    out_octets: row.get::<_, i64>(11)? as u64,
+                    bandwidth_utilization: row.get(12)?,
+                    sampled_at: row.get(13)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -476,7 +535,11 @@ impl Repository {
 
     // ─── Alert History ────────────────────────────────────────────────────
 
-    pub fn get_alert_history(&self, device_id: i64, limit: usize) -> Result<Vec<AlertEvent>, AppError> {
+    pub fn get_alert_history(
+        &self,
+        device_id: i64,
+        limit: usize,
+    ) -> Result<Vec<AlertEvent>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, alert_type, severity, details, created_at
              FROM alert_events
@@ -529,7 +592,11 @@ impl Repository {
     }
 
     /// 保存済みの interface_error_spike アラートから直近10分のスパイク一覧を返す。
-    pub fn get_recent_interface_spikes(&self, device_id: i64, limit: usize) -> Result<Vec<InterfaceSpike>, AppError> {
+    pub fn get_recent_interface_spikes(
+        &self,
+        device_id: i64,
+        limit: usize,
+    ) -> Result<Vec<InterfaceSpike>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, alert_type, severity, details, created_at
              FROM alert_events
@@ -555,10 +622,18 @@ impl Repository {
         let mut spikes = Vec::new();
 
         for alert in alerts {
-            let Some((if_name, if_index, total_delta, in_errors_delta, out_errors_delta, in_discards_delta, out_discards_delta)) =
-                parse_interface_spike_details(&alert.details) else {
-                    continue;
-                };
+            let Some((
+                if_name,
+                if_index,
+                total_delta,
+                in_errors_delta,
+                out_errors_delta,
+                in_discards_delta,
+                out_discards_delta,
+            )) = parse_interface_spike_details(&alert.details)
+            else {
+                continue;
+            };
 
             let link_status = self
                 .get_latest_interface_sample(device_id, if_index)
@@ -575,14 +650,96 @@ impl Repository {
                 out_errors_delta,
                 in_discards_delta,
                 out_discards_delta,
+                late_collisions_delta: 0,
                 total_delta,
                 latest_sampled_at: alert.created_at.unwrap_or_default(),
                 previous_sampled_at: String::new(),
             });
         }
 
-        spikes.sort_by(|a, b| b.latest_sampled_at.cmp(&a.latest_sampled_at).then(b.total_delta.cmp(&a.total_delta)));
+        spikes.sort_by(|a, b| {
+            b.latest_sampled_at
+                .cmp(&a.latest_sampled_at)
+                .then(b.total_delta.cmp(&a.total_delta))
+        });
         Ok(spikes)
+    }
+
+    /// 各インターフェースの直近2サンプルからカウンタ差分を算出する（3パターン障害検知の入力値）。
+    pub fn get_interface_port_deltas(
+        &self,
+        device_id: i64,
+    ) -> Result<HashMap<i32, InterfacePortDelta>, AppError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT if_index, in_errors, out_errors, in_discards, out_discards, late_collisions
+             FROM interface_samples
+             WHERE device_id = ?1
+             ORDER BY if_index ASC, sampled_at DESC, id DESC",
+        )?;
+
+        struct Counters {
+            in_errors: u64,
+            out_errors: u64,
+            in_discards: u64,
+            out_discards: u64,
+            late_collisions: u64,
+        }
+
+        let mut by_if: HashMap<i32, Vec<Counters>> = HashMap::new();
+        let rows = stmt.query_map(params![device_id], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                Counters {
+                    in_errors: row.get::<_, i64>(1)? as u64,
+                    out_errors: row.get::<_, i64>(2)? as u64,
+                    in_discards: row.get::<_, i64>(3)? as u64,
+                    out_discards: row.get::<_, i64>(4)? as u64,
+                    late_collisions: row.get::<_, i64>(5)? as u64,
+                },
+            ))
+        })?;
+
+        for (if_index, counters) in rows.filter_map(|r| r.ok()) {
+            let entry = by_if.entry(if_index).or_default();
+            if entry.len() < 2 {
+                entry.push(counters);
+            }
+        }
+
+        let mut deltas = HashMap::new();
+        for (if_index, samples) in by_if {
+            let delta = if samples.len() < 2 {
+                InterfacePortDelta::default()
+            } else {
+                let latest = &samples[0];
+                let previous = &samples[1];
+                InterfacePortDelta {
+                    in_errors_delta: counter32_delta(previous.in_errors, latest.in_errors),
+                    out_errors_delta: counter32_delta(previous.out_errors, latest.out_errors),
+                    in_discards_delta: counter32_delta(previous.in_discards, latest.in_discards),
+                    out_discards_delta: counter32_delta(
+                        previous.out_discards,
+                        latest.out_discards,
+                    ),
+                    late_collisions_delta: counter32_delta(
+                        previous.late_collisions,
+                        latest.late_collisions,
+                    ),
+                }
+            };
+            deltas.insert(if_index, delta);
+        }
+
+        Ok(deltas)
+    }
+}
+
+/// SNMP Counter32 は 2^32 を超えるとラップアラウンドするため、減少時はラップを考慮して差分を算出する。
+pub(crate) fn counter32_delta(previous: u64, current: u64) -> u64 {
+    if current >= previous {
+        current - previous
+    } else {
+        (u32::MAX as u64 + 1 - previous) + current
     }
 }
 

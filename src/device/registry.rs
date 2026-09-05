@@ -13,11 +13,16 @@ impl DeviceRegistry {
 
     pub fn add_device(&mut self, device: DeviceConfig) -> Result<(), AppError> {
         if device.ip.trim().is_empty() {
-            return Err(AppError::Validation("device IP cannot be empty".to_string()));
+            return Err(AppError::Validation(
+                "device IP cannot be empty".to_string(),
+            ));
         }
 
         if self.devices.iter().any(|entry| entry.ip == device.ip) {
-            return Err(AppError::Validation(format!("device {} already registered", device.ip)));
+            return Err(AppError::Validation(format!(
+                "device {} already registered",
+                device.ip
+            )));
         }
 
         self.devices.push(device);
@@ -26,7 +31,10 @@ impl DeviceRegistry {
 
     pub fn update_device(&mut self, ip: &str, status: &str) -> Result<(), AppError> {
         let Some(device) = self.devices.iter_mut().find(|entry| entry.ip == ip) else {
-            return Err(AppError::Validation(format!("device {} is not registered", ip)));
+            return Err(AppError::Validation(format!(
+                "device {} is not registered",
+                ip
+            )));
         };
 
         device.status = status.to_string();

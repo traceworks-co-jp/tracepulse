@@ -4,11 +4,11 @@ mod tests {
     use crate::alert::scorer::HealthScorer;
     use crate::app_state::AppState;
     use crate::config::AppConfig;
-    use crate::device::discovery::parse_cidr;
-    use crate::device::registry::DeviceRegistry;
-    use crate::device::types::DeviceConfig;
     use crate::db::models::{AlertEvent, DeviceMetrics, InterfaceSample};
     use crate::db::repository::Repository;
+    use crate::device::discovery::{parse_cidr, validate_community_scan_range};
+    use crate::device::registry::DeviceRegistry;
+    use crate::device::types::DeviceConfig;
     use crate::monitor::interface::InterfaceMonitor;
     use crate::monitor::system::SystemMonitor;
     use crate::snmp::SnmpDeviceInfo;
@@ -24,6 +24,19 @@ mod tests {
     fn rejects_invalid_cidr() {
         let result = parse_cidr("invalid");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn community_scan_range_allows_single_subnet() {
+        assert!(validate_community_scan_range("192.168.1.0/24").is_ok());
+        assert!(validate_community_scan_range("192.168.1.0/28").is_ok());
+        assert!(validate_community_scan_range("192.168.1.5/32").is_ok());
+    }
+
+    #[test]
+    fn community_scan_range_rejects_wider_than_slash24() {
+        assert!(validate_community_scan_range("192.168.0.0/23").is_err());
+        assert!(validate_community_scan_range("10.0.0.0/8").is_err());
     }
 
     #[test]
@@ -57,6 +70,7 @@ mod tests {
             sys_descr: "Cisco IOS".to_string(),
             cpu_usage: Some(62),
             memory_usage: Some(48),
+            memory_used_bytes: Some(512 * 1024 * 1024),
             hardware_sensors: vec![],
         };
 
@@ -64,6 +78,7 @@ mod tests {
         assert_eq!(monitor.sys_name, "core-sw-01");
         assert_eq!(monitor.cpu_usage, Some(62));
         assert_eq!(monitor.memory_usage, Some(48));
+        assert_eq!(monitor.memory_used_bytes, Some(512 * 1024 * 1024));
     }
 
     #[test]
@@ -76,6 +91,7 @@ mod tests {
             2,
             8,
             9,
+            0,
             500_000,
             750_000,
         );
@@ -92,7 +108,10 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         let state = AppState::new(config.clone(), connection);
 
-        assert_eq!(state.config.polling.interval_seconds, config.polling.interval_seconds);
+        assert_eq!(
+            state.config.polling.interval_seconds,
+            config.polling.interval_seconds
+        );
         assert!(state.registry.list_devices().is_empty());
     }
 
@@ -155,6 +174,7 @@ mod tests {
                     out_errors INTEGER NOT NULL DEFAULT 0,
                     in_discards INTEGER NOT NULL DEFAULT 0,
                     out_discards INTEGER NOT NULL DEFAULT 0,
+                    late_collisions INTEGER NOT NULL DEFAULT 0,
                     in_octets INTEGER NOT NULL DEFAULT 0,
                     out_octets INTEGER NOT NULL DEFAULT 0,
                     bandwidth_utilization REAL NOT NULL DEFAULT 0.0,
@@ -173,6 +193,7 @@ mod tests {
                     device_id INTEGER NOT NULL,
                     cpu_usage INTEGER,
                     memory_usage INTEGER,
+                    memory_used_bytes INTEGER,
                     sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
                 "#,
@@ -194,6 +215,7 @@ mod tests {
                 out_errors: 0,
                 in_discards: 0,
                 out_discards: 0,
+                late_collisions: 0,
                 in_octets: 0,
                 out_octets: 0,
                 bandwidth_utilization: 0.0,
@@ -216,6 +238,7 @@ mod tests {
                 device_id,
                 cpu_usage: Some(10),
                 memory_usage: Some(20),
+                memory_used_bytes: Some(128 * 1024 * 1024),
                 sampled_at: "2026-08-30T00:00:00Z".to_string(),
             })
             .unwrap();

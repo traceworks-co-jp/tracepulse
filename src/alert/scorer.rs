@@ -14,13 +14,7 @@ impl HealthScorer {
         }
     }
 
-    pub fn score(
-        &self,
-        error_rate: f64,
-        bandwidth: f64,
-        cpu_usage: u32,
-        memory_usage: u32,
-    ) -> u32 {
+    pub fn score(&self, error_rate: f64, bandwidth: f64, cpu_usage: u32, memory_usage: u32) -> u32 {
         let mut score = 100u32;
 
         score = score.saturating_sub((error_rate * 1.5) as u32);

@@ -20,9 +20,7 @@ impl TuiRenderer {
             for device in &self.devices {
                 println!(
                     "│ {:<15} {:<15} {:<8} │",
-                    device.name,
-                    device.ip,
-                    device.status
+                    device.name, device.ip, device.status
                 );
             }
         }
