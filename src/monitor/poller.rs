@@ -47,6 +47,63 @@ impl PollingEngine {
         self.alerts.publish(event)
     }
 
+    pub fn publish_predictive_alerts(&self, device: &DeviceConfig, sample: &InterfaceSample) {
+        let Ok(history) =
+            self.repository
+                .get_recent_interface_samples(sample.device_id, sample.if_index, 3)
+        else {
+            return;
+        };
+        let Some(indicators) = crate::monitor::predictive::evaluate_predictive(&history) else {
+            return;
+        };
+        if indicators.error_ratio_warning {
+            self.publish_alert(AlertEvent::predictive(
+                crate::alert::AlertKind::PredictiveErrorRate,
+                device,
+                sample.if_index,
+                &sample.if_name,
+                format!("{:.6}%", indicators.error_ratio * 100.0),
+                "0.001%",
+                format!(
+                    "[PRED] Error ratio rising on {}: {:.6}%",
+                    sample.if_name,
+                    indicators.error_ratio * 100.0
+                ),
+            ));
+        }
+        if indicators.trend_warning {
+            self.publish_alert(AlertEvent::predictive(
+                crate::alert::AlertKind::PredictiveTrend,
+                device,
+                sample.if_index,
+                &sample.if_name,
+                format!("{:.0}", indicators.error_acceleration),
+                "> 0 errors/poll acceleration",
+                format!(
+                    "[PRED] Error acceleration rising on {}: {:.0}",
+                    sample.if_name, indicators.error_acceleration
+                ),
+            ));
+        }
+        if indicators.dom_warning {
+            if let Some(power) = indicators.rx_optical_power_dbm {
+                self.publish_alert(AlertEvent::predictive(
+                    crate::alert::AlertKind::PredictiveDom,
+                    device,
+                    sample.if_index,
+                    &sample.if_name,
+                    format!("{power:.1} dBm"),
+                    "-18 dBm",
+                    format!(
+                        "[PRED] SFP Rx optical power degraded on {}: {power:.1} dBm",
+                        sample.if_name
+                    ),
+                ));
+            }
+        }
+    }
+
     pub fn poll_device(
         &self,
         device: &DeviceConfig,

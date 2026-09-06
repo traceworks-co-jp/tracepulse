@@ -2,8 +2,8 @@ use crate::config::SnmpConfig;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::monitor::interface::InterfaceMonitor;
-use crate::snmp::walk::{SnmpValue, SnmpVarBind};
 use crate::snmp::template::VendorOidTemplate;
+use crate::snmp::walk::{SnmpValue, SnmpVarBind};
 use snmp::{SyncSession, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -19,7 +19,7 @@ pub struct SnmpClient {
 }
 
 impl SnmpClient {
-fn query_sensors_from_template(
+    fn query_sensors_from_template(
         &self,
         session: &mut SyncSession,
         template: &VendorOidTemplate,
@@ -138,7 +138,9 @@ fn get_template_dir() -> std::path::PathBuf {
         crate::exe_dir().join("../templates"),
         crate::exe_dir().join("../../templates"),
         std::path::PathBuf::from("templates"),
-        std::env::current_dir().unwrap_or_default().join("templates"),
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join("templates"),
     ];
 
     for path in &candidates {
@@ -204,7 +206,9 @@ impl SnmpClient {
 
         let cpu_usage = self.query_cpu_usage(&mut session, vendor_enterprise_id)?;
 
-        let memory_usage = None;
+        let memory_usage = self
+            .query_memory_usage(&mut session, vendor_enterprise_id)
+            .unwrap_or(None);
         let memory_used_bytes = self
             .query_memory_used_bytes(&mut session, vendor_enterprise_id)
             .unwrap_or(None);
@@ -369,6 +373,94 @@ impl SnmpClient {
         })
     }
 
+    /// LLDP/CDP から各ポート (if_index) の対向機器名・対向ポート情報を取得して返す
+    pub fn query_device_port_neighbors(
+        &self,
+        device: &crate::device::types::DeviceConfig,
+    ) -> std::collections::HashMap<i32, String> {
+        let mut neighbors = std::collections::HashMap::new();
+
+        const LLDP_REM_SYS_NAME_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9];
+        const LLDP_REM_PORT_ID_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 7];
+        const CDP_CACHE_DEVICE_ID_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 6];
+        const CDP_CACHE_DEVICE_PORT_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 7];
+
+        // 1. LLDP
+        if let Ok(varbinds) = self.walk_oid(device, &[1, 0, 8802, 1, 1, 2, 1, 4, 1, 1]) {
+            let mut lldp_names: std::collections::HashMap<i32, String> =
+                std::collections::HashMap::new();
+            let mut lldp_ports: std::collections::HashMap<i32, String> =
+                std::collections::HashMap::new();
+            for vb in varbinds {
+                if let Some(suffix) = vb.index_suffix(&LLDP_REM_SYS_NAME_OID) {
+                    if let Some(&local_if) = suffix.get(1) {
+                        if let Some(val) = vb.value.as_string() {
+                            if !val.trim().is_empty() {
+                                lldp_names.insert(local_if as i32, val);
+                            }
+                        }
+                    }
+                } else if let Some(suffix) = vb.index_suffix(&LLDP_REM_PORT_ID_OID) {
+                    if let Some(&local_if) = suffix.get(1) {
+                        if let Some(val) = vb.value.as_string() {
+                            if !val.trim().is_empty() {
+                                lldp_ports.insert(local_if as i32, val);
+                            }
+                        }
+                    }
+                }
+            }
+            for (if_idx, name) in lldp_names {
+                let port = lldp_ports.get(&if_idx).cloned().unwrap_or_default();
+                let desc = if port.is_empty() {
+                    name
+                } else {
+                    format!("{} ({})", name, port)
+                };
+                neighbors.insert(if_idx, desc);
+            }
+        }
+
+        // 2. CDP (LLDPで取れなかったポートを補完)
+        if let Ok(varbinds) = self.walk_oid(device, &[1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1]) {
+            let mut cdp_names: std::collections::HashMap<i32, String> =
+                std::collections::HashMap::new();
+            let mut cdp_ports: std::collections::HashMap<i32, String> =
+                std::collections::HashMap::new();
+            for vb in varbinds {
+                if let Some(suffix) = vb.index_suffix(&CDP_CACHE_DEVICE_ID_OID) {
+                    if let Some(&local_if) = suffix.first() {
+                        if let Some(val) = vb.value.as_string() {
+                            if !val.trim().is_empty() {
+                                cdp_names.insert(local_if as i32, val);
+                            }
+                        }
+                    }
+                } else if let Some(suffix) = vb.index_suffix(&CDP_CACHE_DEVICE_PORT_OID) {
+                    if let Some(&local_if) = suffix.first() {
+                        if let Some(val) = vb.value.as_string() {
+                            if !val.trim().is_empty() {
+                                cdp_ports.insert(local_if as i32, val);
+                            }
+                        }
+                    }
+                }
+            }
+            for (if_idx, name) in cdp_names {
+                neighbors.entry(if_idx).or_insert_with(|| {
+                    let port = cdp_ports.get(&if_idx).cloned().unwrap_or_default();
+                    if port.is_empty() {
+                        name
+                    } else {
+                        format!("{} ({})", name, port)
+                    }
+                });
+            }
+        }
+
+        neighbors
+    }
+
     /// Discovery専用の軽量プローブ。sysName (OID 1.3.6.1.2.1.1.5.0) 1つだけ取得する。
     /// タイムアウトは 500ms、アプリレベルで最大3回リトライ。
     /// 並列スキャン時のUDPパケットロスによる取りこぼしを防ぐ。
@@ -530,6 +622,24 @@ impl SnmpClient {
                 .collect::<Vec<_>>(),
         )
         .unwrap_or(0);
+        let in_packets = query_u64(
+            &mut session,
+            &oid_prefix
+                .iter()
+                .copied()
+                .chain([11, if_index])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or(0);
+        let out_packets = query_u64(
+            &mut session,
+            &oid_prefix
+                .iter()
+                .copied()
+                .chain([17, if_index])
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or(0);
         let in_discards = query_u64(
             &mut session,
             &oid_prefix
@@ -552,6 +662,27 @@ impl SnmpClient {
         let late_collisions = query_u64(
             &mut session,
             &[1u32, 3, 6, 1, 2, 1, 10, 7, 2, 1, 8, if_index],
+        )
+        .unwrap_or(0);
+        // EtherLike-MIB (RFC 3635) 破損パケット内訳 OID
+        let fcs_errors = query_u64(
+            &mut session,
+            &[1u32, 3, 6, 1, 2, 1, 10, 7, 2, 1, 3, if_index],
+        )
+        .unwrap_or(0);
+        let alignment_errors = query_u64(
+            &mut session,
+            &[1u32, 3, 6, 1, 2, 1, 10, 7, 2, 1, 2, if_index],
+        )
+        .unwrap_or(0);
+        let frame_too_longs = query_u64(
+            &mut session,
+            &[1u32, 3, 6, 1, 2, 1, 10, 7, 2, 1, 13, if_index],
+        )
+        .unwrap_or(0);
+        let internal_mac_receive_errors = query_u64(
+            &mut session,
+            &[1u32, 3, 6, 1, 2, 1, 10, 7, 2, 1, 16, if_index],
         )
         .unwrap_or(0);
         let in_octets = query_u64(
@@ -580,6 +711,8 @@ impl SnmpClient {
                 query_string(&mut session, &name_oid).unwrap_or_else(|_| format!("if-{}", if_index))
             }
         };
+        let rx_optical_power_dbm =
+            query_rx_optical_power_dbm(&mut session, if_index, &resolved_name);
 
         Ok(InterfaceMonitor::from_snmp_snapshot(
             if_index as i32,
@@ -587,9 +720,16 @@ impl SnmpClient {
             link_status,
             in_errors,
             out_errors,
+            in_packets,
+            out_packets,
             in_discards,
             out_discards,
             late_collisions,
+            fcs_errors,
+            alignment_errors,
+            frame_too_longs,
+            internal_mac_receive_errors,
+            rx_optical_power_dbm,
             in_octets,
             out_octets,
         ))
@@ -717,7 +857,13 @@ fn query_string(session: &mut SyncSession, oid: &[u32]) -> Result<String, AppErr
                     Value::ObjectIdentifier(oid_name) => {
                         let mut buf = [0u32; 128];
                         if let Ok(parsed) = oid_name.read_name(&mut buf) {
-                            Some(parsed.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("."))
+                            Some(
+                                parsed
+                                    .iter()
+                                    .map(|v| v.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("."),
+                            )
                         } else {
                             Some(oid_name.to_string())
                         }
@@ -784,6 +930,69 @@ fn query_u64(session: &mut SyncSession, oid: &[u32]) -> Result<u64, AppError> {
         .ok_or_else(|| AppError::Validation(format!("OID {:?} was not returned", oid)))?;
 
     Ok(value)
+}
+
+fn query_i64(session: &mut SyncSession, oid: &[u32]) -> Result<i64, AppError> {
+    let mut response = session.get(oid).map_err(|err| {
+        AppError::Validation(format!("SNMP GET failed for OID {:?}: {:?}", oid, err))
+    })?;
+    response
+        .varbinds
+        .find_map(|(name, value)| {
+            if name != oid {
+                return None;
+            }
+            match value {
+                Value::Integer(value) => Some(value),
+                Value::Unsigned32(value) => Some(value as i64),
+                Value::Counter32(value) => Some(value as i64),
+                Value::Counter64(value) => Some(value as i64),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| AppError::Validation(format!("OID {:?} was not returned", oid)))
+}
+
+fn query_rx_optical_power_dbm(
+    session: &mut SyncSession,
+    if_index: u32,
+    if_name: &str,
+) -> Option<f64> {
+    let names = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 2]).ok()?;
+    let index = names.into_iter().find_map(|(index, name)| {
+        let lower = name.to_ascii_lowercase();
+        let optical = lower.contains("rx")
+            || lower.contains("receive")
+            || lower.contains("optical")
+            || name.contains('光');
+        let same_interface = name.contains(if_name) || index == if_index;
+        if optical && same_interface {
+            Some(index)
+        } else {
+            None
+        }
+    })?;
+    let value = query_i64(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 4, index]).ok()? as f64;
+    let scale = query_i64(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 3, index]).unwrap_or(9);
+    let precision = query_i64(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 6, index]).unwrap_or(0);
+    let exponent = match scale {
+        1 => -24,
+        2 => -21,
+        3 => -18,
+        4 => -15,
+        5 => -12,
+        6 => -9,
+        7 => -6,
+        8 => -3,
+        _ => 0,
+    };
+    let scaled = value * 10_f64.powi(exponent);
+    let dbm = if precision > 0 {
+        scaled / 10_f64.powi(precision as i32)
+    } else {
+        scaled
+    };
+    dbm.is_finite().then_some(dbm)
 }
 
 fn query_cpu_usage(
@@ -945,6 +1154,78 @@ impl SnmpClient {
         query_cpu_usage(session, vendor_enterprise_id)
     }
 
+    fn query_memory_usage(
+        &self,
+        session: &mut SyncSession,
+        vendor_enterprise_id: Option<u32>,
+    ) -> Result<Option<u32>, AppError> {
+        if let Some(overrides) = &self.overrides {
+            if let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override) {
+                if let Ok(value) = query_u32_with_table_fallback(session, &memory_oid) {
+                    if let Some(v) = value {
+                        if v <= 100 {
+                            return Ok(Some(v));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(enterprise_id) = vendor_enterprise_id {
+            if let Some(template) = self.templates.get(&enterprise_id) {
+                let mem_tmpl = &template.memory;
+                let mode = mem_tmpl.mode.trim().to_lowercase();
+
+                if mode == "direct" && !mem_tmpl.oid.is_empty() {
+                    if let Some(oid) = parse_oid_string(&mem_tmpl.oid) {
+                        if let Ok(value) = query_u32_with_table_fallback(session, &oid) {
+                            if let Some(v) = value {
+                                return Ok(Some(v.min(100)));
+                            }
+                        }
+                    }
+                } else {
+                    let (used_val, free_val, total_val) = query_memory_pair_from_prefixes(
+                        session,
+                        &mem_tmpl.used_prefix,
+                        &mem_tmpl.free_prefix,
+                        &mem_tmpl.total_prefix,
+                    );
+
+                    if let Some(util) = crate::snmp::template::MemoryTemplate::calculate_utilization(
+                        &mem_tmpl.mode,
+                        None,
+                        used_val,
+                        free_val,
+                        total_val,
+                    ) {
+                        return Ok(Some(util.round() as u32));
+                    }
+                }
+            }
+        }
+
+        if vendor_enterprise_id == Some(9) {
+            let (used, free) = query_cisco_memory_pool_bytes(session)?;
+            if let (Some(u), Some(f)) = (used, free) {
+                let sum = u + f;
+                if sum > 0 {
+                    let util = ((u as f64 / sum as f64) * 100.0).round() as u32;
+                    return Ok(Some(util.min(100)));
+                }
+            }
+        }
+
+        if let Ok((Some(used), Some(total))) = query_hr_storage_memory_used_and_total(session) {
+            if total > 0 {
+                let util = ((used as f64 / total as f64) * 100.0).round() as u32;
+                return Ok(Some(util.min(100)));
+            }
+        }
+
+        Ok(None)
+    }
+
     fn query_memory_used_bytes(
         &self,
         session: &mut SyncSession,
@@ -1060,6 +1341,218 @@ fn query_u32_with_table_fallback(
         }
     }
     query_table_first_u32(session, oid)
+}
+
+fn query_memory_pair_from_prefixes(
+    session: &mut SyncSession,
+    used_prefix_str: &str,
+    free_prefix_str: &str,
+    total_prefix_str: &str,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let used_oid = parse_oid_string(used_prefix_str);
+    let free_oid = parse_oid_string(free_prefix_str);
+    let total_oid = parse_oid_string(total_prefix_str);
+
+    // 1. スカラー (GET 応答) を試みる
+    let used_scalar = used_oid
+        .as_ref()
+        .and_then(|oid| query_u32(session, oid).ok())
+        .map(|v| v as f64);
+    let free_scalar = free_oid
+        .as_ref()
+        .and_then(|oid| query_u32(session, oid).ok())
+        .map(|v| v as f64);
+    let total_scalar = total_oid
+        .as_ref()
+        .and_then(|oid| query_u32(session, oid).ok())
+        .map(|v| v as f64);
+
+    if used_scalar.is_some() || free_scalar.is_some() || total_scalar.is_some() {
+        return (used_scalar, free_scalar, total_scalar);
+    }
+
+    // 2. テーブル (GETNEXT) から全行を取得してインデックスごとにつなぐ
+    let used_rows: HashMap<u32, i64> = used_oid
+        .as_ref()
+        .and_then(|oid| query_table_i64_values(session, oid).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let free_rows: HashMap<u32, i64> = free_oid
+        .as_ref()
+        .and_then(|oid| query_table_i64_values(session, oid).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let total_rows: HashMap<u32, i64> = total_oid
+        .as_ref()
+        .and_then(|oid| query_table_i64_values(session, oid).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    if used_rows.is_empty() && free_rows.is_empty() && total_rows.is_empty() {
+        return (None, None, None);
+    }
+
+    let mut all_indices: Vec<u32> = used_rows
+        .keys()
+        .chain(free_rows.keys())
+        .chain(total_rows.keys())
+        .copied()
+        .collect();
+    all_indices.sort();
+    all_indices.dedup();
+
+    let mut best_used = None;
+    let mut best_free = None;
+    let mut best_total = None;
+    let mut max_capacity = 0i128;
+
+    for idx in all_indices {
+        let u = used_rows
+            .get(&idx)
+            .copied()
+            .filter(|&v| v >= 0)
+            .map(|v| v as f64);
+        let f = free_rows
+            .get(&idx)
+            .copied()
+            .filter(|&v| v >= 0)
+            .map(|v| v as f64);
+        let t = total_rows
+            .get(&idx)
+            .copied()
+            .filter(|&v| v >= 0)
+            .map(|v| v as f64);
+
+        let capacity = match (u, f, t) {
+            (Some(uv), Some(fv), _) => (uv + fv) as i128,
+            (Some(_), _, Some(tv)) => tv as i128,
+            _ => 0,
+        };
+
+        if capacity > max_capacity {
+            max_capacity = capacity;
+            best_used = u;
+            best_free = f;
+            best_total = t;
+        }
+    }
+
+    (best_used, best_free, best_total)
+}
+
+fn query_cisco_memory_pool_bytes(
+    session: &mut SyncSession,
+) -> Result<(Option<u64>, Option<u64>), AppError> {
+    let used_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 5];
+    let free_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 6];
+    let name_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 2];
+
+    let names: HashMap<u32, String> = query_table_strings(session, &name_prefix)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let used_rows: HashMap<u32, i64> = query_table_i64_values(session, &used_prefix)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let free_rows: HashMap<u32, i64> = query_table_i64_values(session, &free_prefix)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    let mut best_used = None;
+    let mut best_free = None;
+    let mut best_score = -1i128;
+
+    let mut all_indices: Vec<u32> = used_rows.keys().chain(free_rows.keys()).copied().collect();
+    all_indices.sort();
+    all_indices.dedup();
+
+    for index in all_indices {
+        let u = used_rows
+            .get(&index)
+            .copied()
+            .filter(|&v| v >= 0)
+            .map(|v| v as u64);
+        let f = free_rows
+            .get(&index)
+            .copied()
+            .filter(|&v| v >= 0)
+            .map(|v| v as u64);
+
+        if u.is_none() && f.is_none() {
+            continue;
+        }
+
+        let name = names
+            .get(&index)
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        let name_bonus: i128 = if name.contains("processor") {
+            1_000_000_000_000_000
+        } else if name.contains("main") {
+            500_000_000_000_000
+        } else if name.contains("io") || name.contains("i/o") {
+            100_000_000_000_000
+        } else {
+            0
+        };
+
+        let cap = u.unwrap_or(0) as i128 + f.unwrap_or(0) as i128;
+        let score = name_bonus + cap;
+
+        if score > best_score {
+            best_score = score;
+            best_used = u;
+            best_free = f;
+        }
+    }
+
+    Ok((best_used, best_free))
+}
+
+fn query_hr_storage_memory_used_and_total(
+    session: &mut SyncSession,
+) -> Result<(Option<u64>, Option<u64>), AppError> {
+    let type_prefix = [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 2];
+    let units_prefix = [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 4];
+    let size_prefix = [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 5];
+    let used_prefix = [1, 3, 6, 1, 2, 1, 25, 2, 3, 1, 6];
+
+    let types = query_table_strings(session, &type_prefix).unwrap_or_default();
+    let ram_index = types
+        .into_iter()
+        .find(|(_, t)| t.ends_with(".1.3.6.1.2.1.25.2.1.2") || t.contains("25.2.1.2"))
+        .map(|(i, _)| i);
+
+    if let Some(index) = ram_index {
+        let units = query_table_i64_values(session, &units_prefix)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, v)| v as u64)
+            .unwrap_or(1);
+        let size = query_table_i64_values(session, &size_prefix)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, v)| v as u64);
+        let used = query_table_i64_values(session, &used_prefix)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, v)| v as u64);
+
+        if let (Some(u), Some(s)) = (used, size) {
+            return Ok((Some(u * units), Some(s * units)));
+        }
+    }
+    Ok((None, None))
 }
 
 fn query_cisco_memory_used_bytes_candidates(
@@ -1371,7 +1864,7 @@ struct HardwareInventory {
 }
 
 impl SnmpClient {
-fn query_hardware_inventory_with_session(
+    fn query_hardware_inventory_with_session(
         &self,
         session: &mut SyncSession,
         vendor_enterprise_id: Option<u32>,
@@ -1389,7 +1882,9 @@ fn query_hardware_inventory_with_session(
         }
 
         // Cisco 機器向けハードウェアセンサー直接フォールバック
-        if inventory.sensors.is_empty() && (vendor_enterprise_id == Some(9) || vendor_enterprise_id.is_none()) {
+        if inventory.sensors.is_empty()
+            && (vendor_enterprise_id == Some(9) || vendor_enterprise_id.is_none())
+        {
             if let Ok(temp_sensors) = query_cisco_envmon_temperature_sensors(session) {
                 inventory.sensors.extend(temp_sensors);
             }
@@ -1630,7 +2125,6 @@ fn query_cisco_envmon_power_sensors(
 
     Ok(sensors)
 }
-
 
 /// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) のファンテーブルを取得する。
 fn query_cisco_envmon_fan_sensors(

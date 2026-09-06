@@ -29,6 +29,8 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             link_status TEXT NOT NULL,
             in_errors INTEGER NOT NULL DEFAULT 0,
             out_errors INTEGER NOT NULL DEFAULT 0,
+            in_packets INTEGER NOT NULL DEFAULT 0,
+            out_packets INTEGER NOT NULL DEFAULT 0,
             in_discards INTEGER NOT NULL DEFAULT 0,
             out_discards INTEGER NOT NULL DEFAULT 0,
             late_collisions INTEGER NOT NULL DEFAULT 0,
@@ -59,12 +61,26 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             FOREIGN KEY(device_id) REFERENCES devices(id)
         );
 
+        CREATE TABLE IF NOT EXISTS flow_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_ip TEXT NOT NULL,
+            destination_ip TEXT NOT NULL,
+            source_port INTEGER NOT NULL,
+            destination_port INTEGER NOT NULL,
+            protocol TEXT NOT NULL,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            packets INTEGER NOT NULL DEFAULT 0,
+            observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_device_metrics_device_sampled
             ON device_metrics(device_id, sampled_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interface_samples_device_sampled
             ON interface_samples(device_id, sampled_at DESC);
         CREATE INDEX IF NOT EXISTS idx_alert_events_device_created
             ON alert_events(device_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_flow_records_observed
+            ON flow_records(observed_at DESC);
         "#,
     )?;
 
@@ -88,6 +104,18 @@ fn ensure_interface_sample_columns(connection: &Connection) -> Result<(), AppErr
             [],
         )?;
     }
+    if !columns.iter().any(|c| c == "in_packets") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN in_packets INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "out_packets") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN out_packets INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     if !columns.iter().any(|c| c == "out_octets") {
         connection.execute(
             "ALTER TABLE interface_samples ADD COLUMN out_octets INTEGER NOT NULL DEFAULT 0",
@@ -97,6 +125,36 @@ fn ensure_interface_sample_columns(connection: &Connection) -> Result<(), AppErr
     if !columns.iter().any(|c| c == "late_collisions") {
         connection.execute(
             "ALTER TABLE interface_samples ADD COLUMN late_collisions INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "fcs_errors") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN fcs_errors INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "alignment_errors") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN alignment_errors INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "frame_too_longs") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN frame_too_longs INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "internal_mac_receive_errors") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN internal_mac_receive_errors INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|c| c == "rx_optical_power_dbm") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN rx_optical_power_dbm REAL",
             [],
         )?;
     }

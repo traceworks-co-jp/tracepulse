@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub enum AlertKind {
     InterfaceSpike,
     ErrorRate,
+    PredictiveErrorRate,
+    PredictiveTrend,
+    PredictiveDom,
     HealthDegraded,
     DeviceOffline,
 }
@@ -19,6 +22,9 @@ impl AlertKind {
         match self {
             Self::InterfaceSpike => "SPIKE",
             Self::ErrorRate => "ERROR_RATE",
+            Self::PredictiveErrorRate => "PREDICTIVE_ERROR_RATE",
+            Self::PredictiveTrend => "PREDICTIVE_TREND",
+            Self::PredictiveDom => "PREDICTIVE_DOM",
             Self::HealthDegraded => "HEALTH_DEGRADED",
             Self::DeviceOffline => "DEVICE_OFFLINE",
         }
@@ -132,6 +138,22 @@ impl AlertEvent {
             device,
             message,
         )
+    }
+
+    pub fn predictive(
+        kind: AlertKind,
+        device: &DeviceConfig,
+        interface_id: i32,
+        interface_name: &str,
+        observed: impl Into<String>,
+        threshold: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(kind, AlertSeverity::Warning, device, message)
+            .with_interface(interface_name)
+            .with_interface_id(i64::from(interface_id))
+            .with_observed_value(observed)
+            .with_threshold(threshold)
     }
 }
 

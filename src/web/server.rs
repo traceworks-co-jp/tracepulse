@@ -1,6 +1,7 @@
+use crate::alert::{AlertBroadcaster, AlertEvent, AlertKind};
 use crate::config::AppConfig;
 use crate::db::models::InterfacePortDelta;
-use crate::db::repository::{counter32_delta, Repository};
+use crate::db::repository::{Repository, counter32_delta};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::snmp::SnmpClient;
@@ -75,6 +76,7 @@ pub struct WebServer {
     repository: Arc<Mutex<Repository>>,
     jobs: JobStore,
     edition: WebEdition,
+    alerts: AlertBroadcaster,
 }
 
 impl WebServer {
@@ -84,7 +86,14 @@ impl WebServer {
         config: AppConfig,
         repository: Repository,
     ) -> Self {
-        Self::with_edition(host, port, config, repository, WebEdition::Community)
+        Self::with_edition_and_broadcaster(
+            host,
+            port,
+            config,
+            repository,
+            WebEdition::Community,
+            AlertBroadcaster::new(),
+        )
     }
 
     pub fn with_edition(
@@ -93,6 +102,24 @@ impl WebServer {
         config: AppConfig,
         repository: Repository,
         edition: WebEdition,
+    ) -> Self {
+        Self::with_edition_and_broadcaster(
+            host,
+            port,
+            config,
+            repository,
+            edition,
+            AlertBroadcaster::new(),
+        )
+    }
+
+    pub fn with_edition_and_broadcaster(
+        host: impl Into<String>,
+        port: u16,
+        config: AppConfig,
+        repository: Repository,
+        edition: WebEdition,
+        alerts: AlertBroadcaster,
     ) -> Self {
         let config_path = crate::config_path();
         Self {
@@ -103,6 +130,7 @@ impl WebServer {
             repository: Arc::new(Mutex::new(repository)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             edition,
+            alerts,
         }
     }
 
@@ -117,10 +145,15 @@ impl WebServer {
         {
             let repo = Arc::clone(&self.repository);
             let cfg = Arc::clone(&self.config);
+            let alerts = self.alerts.clone();
             std::thread::spawn(move || {
-                run_polling_loop(cfg, repo);
+                run_polling_loop(cfg, repo, alerts);
             });
         }
+        crate::flow::FlowCollector::start(
+            Arc::clone(&self.repository),
+            crate::flow::FlowCollectorConfig::default(),
+        );
 
         for stream in listener.incoming() {
             match stream {
@@ -255,6 +288,11 @@ fn handle_connection(
         return respond_json(stream, "200 OK", body);
     }
 
+    if req.method == "GET" && req.path == "/api/flow/analytics" {
+        let body = api_flow_analytics(&repo);
+        return respond_json(stream, "200 OK", body);
+    }
+
     if req.method == "DELETE" && req.path.starts_with("/api/device/") {
         let ip = req.path.trim_start_matches("/api/device/").to_string();
         let (status, body) = api_delete_device(&ip, &repo);
@@ -322,6 +360,47 @@ fn api_summary(repo: &Arc<Mutex<Repository>>) -> String {
     format!(
         r#"{{"healthy":{healthy},"warning":{warning},"critical":{critical},"offline":{offline},"total":{}}}"#,
         devices.len()
+    )
+}
+
+fn api_flow_analytics(repo: &Arc<Mutex<Repository>>) -> String {
+    let Ok(repo) = repo.lock() else {
+        return r#"{"error":"repository lock failed"}"#.to_string();
+    };
+    let shares = repo.protocol_shares(60).unwrap_or_default();
+    let talkers = repo.top_talkers(60, 5).unwrap_or_default();
+    let shares_json = shares
+        .iter()
+        .map(|share| {
+            format!(
+                r#"{{"protocol":"{}","bytes":{},"percentage":{:.2},"bps":{:.0}}}"#,
+                escape_json(&share.protocol),
+                share.bytes,
+                share.percentage,
+                share.bps,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let talkers_json = talkers
+    .iter()
+    .map(|talker| {
+      format!(
+        r#"{{"source_ip":"{}","destination_ip":"{}","source_port":{},"destination_port":{},"protocol":"{}","bytes":{},"bps":{}}}"#,
+        escape_json(&talker.source_ip),
+        escape_json(&talker.destination_ip),
+        talker.source_port,
+        talker.destination_port,
+        escape_json(&talker.protocol),
+        talker.bytes,
+        talker.bps,
+      )
+    })
+    .collect::<Vec<_>>()
+    .join(",");
+    format!(
+        r#"{{"window_seconds":60,"protocols":[{}],"top_talkers":[{}]}}"#,
+        shares_json, talkers_json
     )
 }
 
@@ -413,13 +492,19 @@ fn api_device_detail(
     // 最新インターフェーススナップショット
     let latest_ifaces = r.get_latest_interfaces(device_id).unwrap_or_default();
     let ifaces_json: Vec<String> = latest_ifaces.iter().map(|s| {
-        let recent = r.get_recent_interface_samples(device_id, s.if_index, 2).unwrap_or_default();
+        let recent = r.get_recent_interface_samples(device_id, s.if_index, 3).unwrap_or_default();
         let prev = recent.get(1);
         let in_errors_delta = prev.map(|p| counter32_delta(p.in_errors, s.in_errors)).unwrap_or(0);
         let out_errors_delta = prev.map(|p| counter32_delta(p.out_errors, s.out_errors)).unwrap_or(0);
         let in_discards_delta = prev.map(|p| counter32_delta(p.in_discards, s.in_discards)).unwrap_or(0);
         let out_discards_delta = prev.map(|p| counter32_delta(p.out_discards, s.out_discards)).unwrap_or(0);
         let late_collisions_delta = prev.map(|p| counter32_delta(p.late_collisions, s.late_collisions)).unwrap_or(0);
+        // EtherLike-MIB (RFC 3635) 破損パケット内訳の差分
+        let fcs_errors_delta = prev.map(|p| counter32_delta(p.fcs_errors, s.fcs_errors)).unwrap_or(0);
+        let alignment_errors_delta = prev.map(|p| counter32_delta(p.alignment_errors, s.alignment_errors)).unwrap_or(0);
+        let frame_too_longs_delta = prev.map(|p| counter32_delta(p.frame_too_longs, s.frame_too_longs)).unwrap_or(0);
+        let internal_mac_receive_errors_delta = prev.map(|p| counter32_delta(p.internal_mac_receive_errors, s.internal_mac_receive_errors)).unwrap_or(0);
+        let predictive = crate::monitor::predictive::evaluate_predictive(&recent);
         let link_status = effective_interface_link_status(&device.status, &s.link_status);
         let health_status = classify_interface_diagnostic(
             &link_status,
@@ -430,14 +515,23 @@ fn api_device_detail(
             late_collisions_delta,
         );
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"sampled_at":"{}"}}"#,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","predictive_status":{{"error_ratio":{:.8},"trend_warning":{},"dom_warning":{},"rx_optical_power_dbm":{}}},"metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}"}}"#,
             s.if_index, escape_json(&s.if_name), escape_json(&link_status), health_status,
+            predictive.map(|value| value.error_ratio).unwrap_or(0.0),
+            predictive.map(|value| value.trend_warning).unwrap_or(false),
+            predictive.map(|value| value.dom_warning).unwrap_or(false),
+            predictive.and_then(|value| value.rx_optical_power_dbm).map(|value| format!("{value:.2}")).unwrap_or_else(|| "null".to_string()),
             s.in_errors, in_errors_delta,
             s.out_errors, out_errors_delta,
             s.in_discards, in_discards_delta,
             s.out_discards, out_discards_delta,
             s.late_collisions, late_collisions_delta,
-            s.bandwidth_utilization, escape_json(&s.sampled_at),
+            s.bandwidth_utilization,
+            s.fcs_errors, fcs_errors_delta,
+            s.alignment_errors, alignment_errors_delta,
+            s.frame_too_longs, frame_too_longs_delta,
+            s.internal_mac_receive_errors, internal_mac_receive_errors_delta,
+            escape_json(&s.sampled_at),
         )
     }).collect();
 
@@ -481,18 +575,50 @@ fn api_device_detail(
                 .filter(|v| *v <= 100)
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "null".to_string());
+            let memory = m
+                .memory_usage
+                .filter(|v| *v <= 100)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".to_string());
             let memory_bytes = m
                 .memory_used_bytes
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "null".to_string());
             format!(
-                r#"{{"t":"{}","cpu":{},"memory_bytes":{}}}"#,
+                r#"{{"t":"{}","cpu":{},"memory":{},"memory_bytes":{}}}"#,
                 escape_json(&m.sampled_at),
                 cpu,
+                memory,
                 memory_bytes
             )
         })
         .collect();
+
+    let latest_m = metrics.last();
+    let cpu_util = latest_m
+        .and_then(|m| m.cpu_usage)
+        .filter(|v| *v <= 100)
+        .map(|v| v as f64);
+    let mem_util = latest_m
+        .and_then(|m| m.memory_usage)
+        .filter(|v| *v <= 100)
+        .map(|v| v as f64);
+    let mem_status = match mem_util {
+        Some(u) if u >= 90.0 => "critical",
+        Some(u) if u >= 80.0 => "warning",
+        Some(_) => "normal",
+        None => "unknown",
+    };
+    let system_metrics_json = format!(
+        r#"{{"cpu_utilization":{},"memory_utilization":{},"memory_status":"{}"}}"#,
+        cpu_util
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        mem_util
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        mem_status
+    );
 
     // アラート履歴（直近 30 件）
     let alerts = r.get_alert_history(device_id, 30).unwrap_or_default();
@@ -548,12 +674,14 @@ fn api_device_detail(
     }).collect();
 
     format!(
-        r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}]}}"#,
+        r#"{{"device_id":"{}","ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","system_metrics":{},"interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}]}}"#,
+        escape_json(&device.ip),
         escape_json(&device.ip),
         escape_json(&device.name),
         escape_json(&device.status),
         escape_json(&device.community),
         escape_json(device.last_seen_at.as_deref().unwrap_or("")),
+        system_metrics_json,
         ifaces_json.join(","),
         if_series_json
             .into_iter()
@@ -1040,12 +1168,7 @@ fn api_discovery_topology(
 fn merge_duplicate_edges(edges: Vec<WebTopologyEdge>) -> Vec<WebTopologyEdge> {
     let mut merged: Vec<WebTopologyEdge> = Vec::new();
     for edge in edges {
-        let remote_port = edge
-            .remote_port
-            .as_deref()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let remote_port = edge.remote_port.as_deref().unwrap_or("").trim().to_string();
         let duplicate = if remote_port.is_empty() {
             None
         } else {
@@ -1174,21 +1297,32 @@ fn enrich_topology_nodes(report: &mut WebTopologyReport, repo: &Arc<Mutex<Reposi
         }
         if let Some(device_id) = device.id {
             if let Ok(samples) = repo.get_latest_interfaces(device_id) {
-                let deltas = repo.get_interface_port_deltas(device_id).unwrap_or_default();
+                let deltas = repo
+                    .get_interface_port_deltas(device_id)
+                    .unwrap_or_default();
                 node.interfaces = samples
                     .into_iter()
                     .map(|sample| {
-                        let delta = deltas
-                            .get(&sample.if_index)
-                            .copied()
-                            .unwrap_or_default();
+                        let delta = deltas.get(&sample.if_index).copied().unwrap_or_default();
                         let (health_status, alerts) = evaluate_port_health(&delta);
+                        let predictive_warning = crate::monitor::predictive::evaluate_predictive(
+                            &repo
+                                .get_recent_interface_samples(device_id, sample.if_index, 3)
+                                .unwrap_or_default(),
+                        )
+                        .map(|indicators| {
+                            indicators.error_ratio_warning
+                                || indicators.trend_warning
+                                || indicators.dom_warning
+                        })
+                        .unwrap_or(false);
                         WebTopologyInterface {
                             if_index: Some(i64::from(sample.if_index)),
                             if_name: sample.if_name,
                             link_status: sample.link_status,
                             metrics: delta,
                             health_status,
+                            predictive_warning,
                             alerts,
                         }
                     })
@@ -1250,6 +1384,7 @@ fn annotate_edge_health(report: &mut WebTopologyReport) {
         if iface.health_status != "Healthy" {
             edge.health_status = Some(iface.health_status.clone());
         }
+        edge.predictive_warning = iface.predictive_warning;
     }
 }
 
@@ -1282,6 +1417,7 @@ impl WebTopologyReport {
                     link_status: "unknown".to_string(),
                     metrics: InterfacePortDelta::default(),
                     health_status: "Healthy".to_string(),
+                    predictive_warning: false,
                     alerts: Vec::new(),
                 })
                 .collect(),
@@ -1380,6 +1516,7 @@ struct WebTopologyInterface {
     link_status: String,
     metrics: InterfacePortDelta,
     health_status: String,
+    predictive_warning: bool,
     alerts: Vec<String>,
 }
 
@@ -1392,7 +1529,7 @@ impl WebTopologyInterface {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","metrics":{{"in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"late_collisions_delta":{}}},"health_status":"{}","alerts":[{}]}}"#,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","metrics":{{"in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"late_collisions_delta":{}}},"health_status":"{}","predictive_warning":{},"alerts":[{}]}}"#,
             json_opt_i64(self.if_index),
             escape_json(&self.if_name),
             escape_json(&self.link_status),
@@ -1402,6 +1539,7 @@ impl WebTopologyInterface {
             self.metrics.out_discards_delta,
             self.metrics.late_collisions_delta,
             escape_json(&self.health_status),
+            self.predictive_warning,
             alerts
         )
     }
@@ -1463,12 +1601,13 @@ struct WebTopologyEdge {
     remote_hostname: Option<String>,
     remote_port: Option<String>,
     health_status: Option<String>,
+    predictive_warning: bool,
 }
 
 impl WebTopologyEdge {
     fn to_json(&self) -> String {
         format!(
-            r#"{{"id":"{}","protocol":"{}","source":"{}","target":"{}","label":"{}","local_ip":"{}","local_if_index":{},"local_port":"{}","remote_ip":"{}","remote_hostname":"{}","remote_port":"{}","health_status":"{}"}}"#,
+            r#"{{"id":"{}","protocol":"{}","source":"{}","target":"{}","label":"{}","local_ip":"{}","local_if_index":{},"local_port":"{}","remote_ip":"{}","remote_hostname":"{}","remote_port":"{}","health_status":"{}","predictive_warning":{}}}"#,
             escape_json(&self.id),
             escape_json(&self.protocol),
             escape_json(&self.source),
@@ -1481,6 +1620,7 @@ impl WebTopologyEdge {
             escape_json(self.remote_hostname.as_deref().unwrap_or("")),
             escape_json(self.remote_port.as_deref().unwrap_or("")),
             escape_json(self.health_status.as_deref().unwrap_or("Healthy")),
+            self.predictive_warning,
         )
     }
 
@@ -1556,6 +1696,7 @@ fn parse_lldp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec
             remote_hostname: row.remote_hostname,
             remote_port: row.remote_port,
             health_status: None,
+            predictive_warning: false,
         })
         .collect()
 }
@@ -1617,6 +1758,7 @@ fn parse_cdp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec<
             remote_hostname: row.remote_hostname,
             remote_port: row.remote_port,
             health_status: None,
+            predictive_warning: false,
         })
         .collect()
 }
@@ -1934,6 +2076,17 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
         </tr></thead><tbody id='if-tbody'><tr><td colspan=11>Loading...</td></tr></tbody></table></div>");
     html.push_str("</section>");
 
+    // セクション: 破損パケット内訳（EtherLike-MIB Error Breakdown）
+    html.push_str("<section class='detail-section'>");
+    html.push_str("<h2 data-i18n='error_breakdown_title'>Error Breakdown</h2>");
+    html.push_str("<div id='error-breakdown' class='error-breakdown'></div>");
+    html.push_str("</section>");
+
+    html.push_str("<section class='detail-section'>");
+    html.push_str("<h2 data-i18n='traffic_protocols_title'>Traffic &amp; Protocols</h2>");
+    html.push_str("<div id='traffic-protocols' class='traffic-protocols'></div>");
+    html.push_str("</section>");
+
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='interface_filter_title'>Interface Selection</h2>");
     html.push_str("<div class='iface-filter-actions'>");
@@ -1963,7 +2116,7 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("</section>");
 
     html.push_str("<section class='detail-section'>");
-    html.push_str("<h2 data-i18n='memory_used_title'>Memory Used</h2>");
+    html.push_str("<h2 data-i18n='memory_usage_title'>Memory Usage (%)</h2>");
     html.push_str("<div class='chart-wrap'><svg id='memory-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
     html.push_str("</section>");
 
@@ -2714,7 +2867,19 @@ var I18N = {
     port_health: 'Port Health',
     port_health_crc: 'CRC Errors',
     port_health_late_collisions: 'Late Collisions',
-    port_health_discards: 'Discards'
+    port_health_discards: 'Discards',
+    error_breakdown_title: 'Error Breakdown',
+    error_breakdown_select_hint: 'Select an interface to inspect corrupted-packet breakdown.',
+    error_breakdown_no_data: 'No error breakdown data collected yet.',
+    error_breakdown_fcs_errors: 'FCS/CRC Errors',
+    error_breakdown_alignment_errors: 'Alignment Errors',
+    error_breakdown_frame_too_longs: 'Oversized Frames',
+    error_breakdown_internal_mac_receive_errors: 'MAC Receive Errors',
+    error_breakdown_hover_title: 'Error Breakdown (since previous poll)',
+    traffic_protocols_title: 'Traffic & Protocols',
+    traffic_protocols_empty: 'No flow records received yet.',
+    traffic_protocols_share: 'Protocol Share',
+    traffic_protocols_top_talkers: 'Top Talkers'
   },
   ja: {
     nav_dashboard: 'ダッシュボード',
@@ -2779,6 +2944,14 @@ var I18N = {
     cidr_range: 'CIDR 範囲',
     cidr_range_placeholder: '192.168.1.0/24',
     cidr_range_placeholder_enterprise: '例: 192.168.11.0/24, 10.0.0.0/24 (カンマ区切りで複数指定可)',
+    error_breakdown_title: 'エラー詳細（Error Breakdown）',
+    error_breakdown_select_hint: 'インターフェースを選択すると破損パケットの内訳を表示します。',
+    error_breakdown_no_data: 'まだエラー内訳データが収集されていません。',
+    error_breakdown_fcs_errors: 'FCS/CRC エラー',
+    error_breakdown_alignment_errors: 'アライメントエラー',
+    error_breakdown_frame_too_longs: 'フレーム超過（ジャイアント）',
+    error_breakdown_internal_mac_receive_errors: 'MAC 層受信エラー',
+    error_breakdown_hover_title: 'エラー詳細（直近ポーリング差分）',
     community: 'コミュニティ',
     public_placeholder: 'public',
     scan: 'スキャン',
@@ -2896,7 +3069,11 @@ var I18N = {
     port_health: 'ポート健全性',
     port_health_crc: 'CRC エラー',
     port_health_late_collisions: 'Late Collision',
-    port_health_discards: 'ディスカード'
+    port_health_discards: 'ディスカード',
+    traffic_protocols_title: 'トラフィックとプロトコル',
+    traffic_protocols_empty: 'フローデータをまだ受信していません。',
+    traffic_protocols_share: 'プロトコル構成比',
+    traffic_protocols_top_talkers: 'Top Talkers'
   }
 };
 
@@ -3342,6 +3519,11 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .diagnostic-badge.down { background:rgba(107,114,128,.2); color:#9ca3af; }
   .row-warn td { background: rgba(245, 158, 11, .08); }
   .row-crit td { background: rgba(248, 113, 113, .10); }
+  .pred-badge { display:inline-block; margin-left:.3rem; padding:.12rem .4rem; border-radius:999px; background:rgba(251,191,36,.16); color:#fbbf24; font-size:.72rem; font-weight:700; }
+  .dom-meter { display:inline-flex; align-items:center; gap:.35rem; min-width:7rem; }
+  .dom-meter-track { width:4rem; height:.42rem; border-radius:999px; background:#334155; overflow:hidden; }
+  .dom-meter-fill { height:100%; background:#fbbf24; }
+  .dom-meter-fill.ok { background:#4ade80; }
   .link-up { color:#4ade80; font-weight:600; }
   .link-down { color:#f87171; font-weight:600; }
   .sev-warning { color:#f59e0b; }
@@ -3350,6 +3532,41 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .no-data { color:#475569; font-style:italic; padding:.5rem 0; }
   #dev-title { font-size:1.4rem; }
   #spike-table th { white-space:nowrap; }
+  /* 破損パケット内訳（EtherLike-MIB Error Breakdown）: ホバーポップオーバー */
+  .err-cell { position:relative; cursor:help; border-bottom:1px dotted #64748b; }
+  .err-pop { display:none; position:absolute; left:0; top:100%; margin-top:.35rem; min-width:220px; z-index:20; background:#0f172a; border:1px solid #334155; border-radius:.4rem; padding:.55rem .7rem; font-size:.78rem; color:#cbd5e1; box-shadow:0 8px 20px rgba(0,0,0,.35); white-space:normal; }
+  .err-cell:hover .err-pop, .err-cell:focus .err-pop { display:block; }
+  .err-pop-title { font-weight:700; color:#f1f5f9; margin-bottom:.3rem; }
+  .err-pop-row { display:flex; justify-content:space-between; gap:.75rem; padding:.1rem 0; }
+  .err-pop-row .n { color:#94a3b8; }
+  .err-pop-row .v { font-variant-numeric:tabular-nums; }
+  /* 破損パケット内訳カード: セレクタ + Stacked Bar + 数値テーブル */
+  .error-breakdown { display:flex; flex-direction:column; gap:.85rem; }
+  .error-breakdown-select { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
+  .error-breakdown-select select { background:#0f172a; border:1px solid #334155; color:#f1f5f9; padding:.4rem .6rem; border-radius:.375rem; font-size:.88rem; }
+  .breakdown-bar { display:flex; width:100%; height:1.6rem; border-radius:.375rem; overflow:hidden; background:#0f172a; border:1px solid #334155; }
+  .breakdown-bar-seg { height:100%; }
+  .breakdown-bar-seg.fcs { background:#f87171; }
+  .breakdown-bar-seg.alignment { background:#fbbf24; }
+  .breakdown-bar-seg.frametoolong { background:#a78bfa; }
+  .breakdown-bar-seg.macreceive { background:#38bdf8; }
+  .breakdown-legend { display:flex; flex-wrap:wrap; gap:.9rem; font-size:.8rem; color:#cbd5e1; }
+  .breakdown-legend .swatch { display:inline-block; width:.7rem; height:.7rem; border-radius:.2rem; margin-right:.35rem; vertical-align:middle; }
+  .breakdown-table { width:100%; border-collapse:collapse; }
+  .breakdown-table th, .breakdown-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.85rem; text-align:left; }
+  .breakdown-table th { color:#94a3b8; font-weight:600; }
+  .traffic-protocols { display:grid; grid-template-columns:minmax(220px,.8fr) minmax(360px,1.2fr); gap:1rem; align-items:start; }
+  .traffic-donut-wrap { display:flex; align-items:center; gap:1rem; min-height:180px; }
+  .traffic-donut { width:150px; height:150px; border-radius:50%; background:conic-gradient(#38bdf8 0 100%); position:relative; flex:0 0 auto; }
+  .traffic-donut::after { content:''; position:absolute; inset:32px; border-radius:50%; background:#1e293b; }
+  .traffic-legend { display:grid; gap:.35rem; font-size:.8rem; color:#cbd5e1; }
+  .traffic-legend-item { display:flex; gap:.35rem; align-items:center; }
+  .traffic-legend-swatch { width:.7rem; height:.7rem; border-radius:.15rem; }
+  .talker-table { width:100%; border-collapse:collapse; }
+  .talker-table th, .talker-table td { padding:.45rem .55rem; border-bottom:1px solid #334155; text-align:left; font-size:.8rem; }
+  .talker-table th { color:#94a3b8; }
+  .traffic-empty { color:#64748b; font-style:italic; padding:.75rem 0; }
+  @media (max-width:760px) { .traffic-protocols { grid-template-columns:1fr; } .traffic-donut-wrap { justify-content:center; } }
 </style>";
 
 const DEVICE_DETAIL_JS: &str = r"
@@ -3511,6 +3728,19 @@ function formatLateCollisions(total, delta) {
   if (!delta) return totalText;
   return totalText + '<span class=\'counter-delta duplex\'> (+' + fmtNum(delta) + ')</span>';
 }
+function errorBreakdownPopoverHtml(eb) {
+  eb = eb || {};
+  return '<div class=\'err-pop\'>' +
+    '<div class=\'err-pop-title\'>' + t('error_breakdown_hover_title') + '</div>' +
+    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_fcs_errors') + '</span><span class=\'v\'>+' + fmtNum(eb.fcs_errors_delta) + '</span></div>' +
+    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_alignment_errors') + '</span><span class=\'v\'>+' + fmtNum(eb.alignment_errors_delta) + '</span></div>' +
+    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_frame_too_longs') + '</span><span class=\'v\'>+' + fmtNum(eb.frame_too_longs_delta) + '</span></div>' +
+    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_internal_mac_receive_errors') + '</span><span class=\'v\'>+' + fmtNum(eb.internal_mac_receive_errors_delta) + '</span></div>' +
+    '</div>';
+}
+function formatCounterWithBreakdown(total, delta, eb) {
+  return '<span class=\'err-cell\' tabindex=\'0\'>' + formatCounter(total, delta) + errorBreakdownPopoverHtml(eb) + '</span>';
+}
 function diagnosticBadge(status) {
   var key = status || 'healthy';
   return '<span class=\'diagnostic-badge ' + key + '\'>' + t('diagnostic_' + key) + '</span>';
@@ -3625,15 +3855,17 @@ function renderInterfaces(ifaces) {
     var rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? ' row-crit' : (errorDelta > 0 || discardDelta > 0 ? ' row-warn' : '');
     return '<tr class=\'' + rowClass.trim() + '\'>' +
       '<td>'+f.if_index+'</td>' +
-      '<td>'+f.if_name+'</td>' +
+      '<td>'+f.if_name + ((f.predictive_status && (f.predictive_status.dom_warning || f.predictive_status.trend_warning)) ? '<span class=\'pred-badge\'>[PRED]</span>' : '') + '</td>' +
       '<td><span class='+lc+'>'+f.link_status+'</span></td>' +
       '<td>'+diagnosticBadge(f.health_status)+'</td>' +
-      '<td>'+formatCounter(m.in_errors, m.in_errors_delta)+'</td>' +
-      '<td>'+formatCounter(m.out_errors, m.out_errors_delta)+'</td>' +
+      '<td>'+formatCounterWithBreakdown(m.in_errors, m.in_errors_delta, f.error_breakdown)+'</td>' +
+      '<td>'+formatCounterWithBreakdown(m.out_errors, m.out_errors_delta, f.error_breakdown)+'</td>' +
       '<td>'+formatCounter(m.in_discards, m.in_discards_delta)+'</td>' +
       '<td>'+formatCounter(m.out_discards, m.out_discards_delta)+'</td>' +
       '<td>'+formatLateCollisions(m.late_collisions, m.late_collisions_delta)+'</td>' +
-      '<td>'+(m.bandwidth_utilization*100).toFixed(1)+'%</td>' +
+      '<td>'+(m.bandwidth_utilization*100).toFixed(1)+'%' +
+        ((f.predictive_status && f.predictive_status.rx_optical_power_dbm !== null && f.predictive_status.rx_optical_power_dbm !== undefined) ? '<div class=\'dom-meter\'><span>Rx Power: '+Number(f.predictive_status.rx_optical_power_dbm).toFixed(1)+' dBm</span><span class=\'dom-meter-track\'><span class=\'dom-meter-fill '+(f.predictive_status.dom_warning ? '' : 'ok')+'\' style=\'width:'+Math.max(0, Math.min(100, (Number(f.predictive_status.rx_optical_power_dbm)+30)/30*100))+'%\'></span></span></div>' : '') +
+      '</td>' +
       '<td>'+fmtTime(f.sampled_at)+'</td>' +
       '</tr>';
   }).join('');
@@ -3698,6 +3930,117 @@ function renderSysChart(metrics) {
   renderMemoryChart(metrics);
 }
 
+var ERROR_BREAKDOWN_SELECTED_IF = null;
+
+function renderErrorBreakdownCard(ifaces) {
+  var box = document.getElementById('error-breakdown');
+  if (!box) return;
+  ifaces = ifaces || [];
+
+  if (ifaces.length === 0) {
+    box.innerHTML = '<p class=\'no-data\'>' + t('error_breakdown_no_data') + '</p>';
+    return;
+  }
+
+  if (ERROR_BREAKDOWN_SELECTED_IF === null || !ifaces.some(function(f) { return f.if_index === ERROR_BREAKDOWN_SELECTED_IF; })) {
+    ERROR_BREAKDOWN_SELECTED_IF = ifaces[0].if_index;
+  }
+
+  var options = ifaces.map(function(f) {
+    var sel = f.if_index === ERROR_BREAKDOWN_SELECTED_IF ? ' selected' : '';
+    return '<option value=\'' + f.if_index + '\'' + sel + '>' + (f.if_name || ('if-' + f.if_index)) + ' (if-' + f.if_index + ')</option>';
+  }).join('');
+
+  var selected = ifaces.find(function(f) { return f.if_index === ERROR_BREAKDOWN_SELECTED_IF; }) || ifaces[0];
+  var eb = selected.error_breakdown || {};
+  var fcs = eb.fcs_errors_delta || 0;
+  var align = eb.alignment_errors_delta || 0;
+  var toolong = eb.frame_too_longs_delta || 0;
+  var macrx = eb.internal_mac_receive_errors_delta || 0;
+  var total = fcs + align + toolong + macrx;
+
+  function pct(v) { return total > 0 ? (v / total * 100) : 0; }
+
+  var bar = '<div class=\'breakdown-bar\'>' +
+    '<div class=\'breakdown-bar-seg fcs\' style=\'width:' + pct(fcs) + '%\'></div>' +
+    '<div class=\'breakdown-bar-seg alignment\' style=\'width:' + pct(align) + '%\'></div>' +
+    '<div class=\'breakdown-bar-seg frametoolong\' style=\'width:' + pct(toolong) + '%\'></div>' +
+    '<div class=\'breakdown-bar-seg macreceive\' style=\'width:' + pct(macrx) + '%\'></div>' +
+    '</div>';
+
+  var legend = '<div class=\'breakdown-legend\'>' +
+    '<span><span class=\'swatch\' style=\'background:#f87171\'></span>' + t('error_breakdown_fcs_errors') + '</span>' +
+    '<span><span class=\'swatch\' style=\'background:#fbbf24\'></span>' + t('error_breakdown_alignment_errors') + '</span>' +
+    '<span><span class=\'swatch\' style=\'background:#a78bfa\'></span>' + t('error_breakdown_frame_too_longs') + '</span>' +
+    '<span><span class=\'swatch\' style=\'background:#38bdf8\'></span>' + t('error_breakdown_internal_mac_receive_errors') + '</span>' +
+    '</div>';
+
+  var table = '<table class=\'breakdown-table\'><thead><tr>' +
+    '<th>' + t('error_breakdown_fcs_errors') + '</th>' +
+    '<th>' + t('error_breakdown_alignment_errors') + '</th>' +
+    '<th>' + t('error_breakdown_frame_too_longs') + '</th>' +
+    '<th>' + t('error_breakdown_internal_mac_receive_errors') + '</th>' +
+    '</tr></thead><tbody><tr>' +
+    '<td>' + fmtNum(eb.fcs_errors) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(fcs) + ')</span></td>' +
+    '<td>' + fmtNum(eb.alignment_errors) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(align) + ')</span></td>' +
+    '<td>' + fmtNum(eb.frame_too_longs) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(toolong) + ')</span></td>' +
+    '<td>' + fmtNum(eb.internal_mac_receive_errors) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(macrx) + ')</span></td>' +
+    '</tr></tbody></table>';
+
+  box.innerHTML =
+    '<div class=\'error-breakdown-select\'>' +
+    '<label for=\'error-breakdown-if\'>' + t('error_breakdown_select_hint') + '</label>' +
+    '<select id=\'error-breakdown-if\' onchange=\'onErrorBreakdownIfaceChange(this.value)\'>' + options + '</select>' +
+    '</div>' + bar + legend + table;
+}
+
+function onErrorBreakdownIfaceChange(value) {
+  ERROR_BREAKDOWN_SELECTED_IF = parseInt(value, 10);
+  if (LAST_DEVICE_DETAIL) renderErrorBreakdownCard(LAST_DEVICE_DETAIL.interfaces || []);
+}
+
+function renderTrafficProtocols(data) {
+  var box = document.getElementById('traffic-protocols');
+  if (!box) return;
+  var protocols = data && data.protocols || [];
+  var talkers = data && data.top_talkers || [];
+  if (protocols.length === 0 && talkers.length === 0) {
+    box.innerHTML = '<p class=\'traffic-empty\'>' + t('traffic_protocols_empty') + '</p>';
+    return;
+  }
+  var palette = ['#38bdf8','#4ade80','#f59e0b','#f87171','#a78bfa','#34d399'];
+  var cursor = 0;
+  var stops = protocols.map(function(item, index) {
+    var start = cursor;
+    cursor += Number(item.percentage || 0);
+    return palette[index % palette.length] + ' ' + start + '% ' + cursor + '%';
+  });
+  var legend = protocols.map(function(item, index) {
+    return '<div class=\'traffic-legend-item\'><span class=\'traffic-legend-swatch\' style=\'background:' + palette[index % palette.length] + '\'></span>' +
+      esc(item.protocol) + ' ' + Number(item.percentage || 0).toFixed(1) + '% (' + formatBps(item.bps) + ')</div>';
+  }).join('');
+  var rows = talkers.map(function(item) {
+    return '<tr><td>' + esc(item.source_ip) + ':' + item.source_port + '</td><td>' + esc(item.destination_ip) + ':' + item.destination_port + '</td><td>' + esc(item.protocol) + '</td><td>' + formatBps(item.bps) + '</td></tr>';
+  }).join('');
+  box.innerHTML = '<div><h3>' + t('traffic_protocols_share') + '</h3><div class=\'traffic-donut-wrap\'><div class=\'traffic-donut\' style=\'background:conic-gradient(' + (stops.join(',') || '#334155 0 100%') + ')\'></div><div class=\'traffic-legend\'>' + legend + '</div></div></div>' +
+    '<div><h3>' + t('traffic_protocols_top_talkers') + '</h3><table class=\'talker-table\'><thead><tr><th>Source</th><th>Destination</th><th>Protocol</th><th>bps</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function formatBps(value) {
+  value = Number(value || 0);
+  if (value >= 1000000000) return (value / 1000000000).toFixed(1) + ' Gbps';
+  if (value >= 1000000) return (value / 1000000).toFixed(1) + ' Mbps';
+  if (value >= 1000) return (value / 1000).toFixed(1) + ' Kbps';
+  return Math.round(value) + ' bps';
+}
+
+function refreshTrafficProtocols() {
+  fetch('/api/flow/analytics', {cache:'no-store'})
+    .then(function(response) { return response.json(); })
+    .then(renderTrafficProtocols)
+    .catch(function() { renderTrafficProtocols(null); });
+}
+
 function renderDetail(d) {
   LAST_DEVICE_DETAIL = d;
   renderHeader(d);
@@ -3707,6 +4050,8 @@ function renderDetail(d) {
   syncSelectedInterfaces(ifaces);
   renderInterfaceSelection(ifaces);
   renderInterfaces(ifaces);
+  renderErrorBreakdownCard(ifaces);
+  refreshTrafficProtocols();
   renderBwChart(d.if_series || []);
   renderErrChart(d.if_series || []);
   renderSysChart(d.metrics || []);
@@ -3727,11 +4072,35 @@ function renderCpuChart(metrics) {
 
 function renderMemoryChart(metrics) {
   var memSeries = {
-    label:'Memory Used',
-    color:'#a78bfa',
-    points: metrics.filter(function(m) { return m.memory_bytes !== null && m.memory_bytes !== undefined && m.memory_bytes > 0; }).map(function(m) { return {t:m.t, v:m.memory_bytes}; })
+    label: 'Memory Usage (%)',
+    color: '#a78bfa',
+    points: []
   };
-  sparkline('memory-chart', [memSeries], 'bytes');
+
+  (metrics || []).forEach(function(m) {
+    if (m && m.memory !== null && m.memory !== undefined && !isNaN(m.memory)) {
+      memSeries.points.push({ t: m.t, v: m.memory });
+    }
+  });
+
+  if (memSeries.points.length === 0 && metrics && metrics.length > 0) {
+    var maxBytes = 0;
+    metrics.forEach(function(m) {
+      if (m && m.memory_bytes && m.memory_bytes > maxBytes) {
+        maxBytes = m.memory_bytes;
+      }
+    });
+    if (maxBytes > 0) {
+      metrics.forEach(function(m) {
+        if (m && m.memory_bytes !== null && m.memory_bytes !== undefined && m.memory_bytes > 0) {
+          var pct = Math.round((m.memory_bytes / maxBytes) * 100);
+          memSeries.points.push({ t: m.t, v: pct });
+        }
+      });
+    }
+  }
+
+  sparkline('memory-chart', [memSeries], '%');
 }
 
 function renderSpikes(spikes) {
@@ -4029,6 +4398,7 @@ const DISCOVERY_CSS: &str = "<style>
   .topo-edge-line { stroke:#475569; stroke-width:2; }
   .topo-edge-line.cdp { stroke-dasharray:6 4; }
   .topo-edge-line.warn { stroke:#f59e0b; stroke-dasharray:6 4; }
+  .topo-edge-line.predictive { stroke:#fbbf24; stroke-dasharray:8 6; animation:topo-predictive-dash 1.2s linear infinite; }
   .topo-edge-line.crit { stroke:#ef4444; stroke-width:4; }
   .topo-edge-hit { stroke:transparent; stroke-width:14; cursor:pointer; }
   .topo-edge.selected .topo-edge-line { stroke:#f472b6; stroke-width:3; }
@@ -4053,6 +4423,7 @@ const DISCOVERY_CSS: &str = "<style>
   .inspector-if-icon { margin-right:.25rem; }
   .topology-list { margin-top:.5rem; display:grid; gap:.4rem; }
   .topology-edge { background:#1e293b; border:1px solid #334155; border-radius:.375rem; padding:.55rem .7rem; font-size:.85rem; color:#cbd5e1; }
+  @keyframes topo-predictive-dash { to { stroke-dashoffset:-28; } }
 </style>";
 
 const DISCOVERY_HTML: &str = "<main>
@@ -4354,6 +4725,7 @@ function esc(value) {
 function edgeHealthClass(edge) {
   if (edge.health_status === 'Critical') return ' crit';
   if (edge.health_status === 'Warning') return ' warn';
+  if (edge.predictive_warning) return ' predictive';
   return (edge.protocol || '').indexOf('CDP') !== -1 ? ' cdp' : '';
 }
 
@@ -4789,7 +5161,8 @@ function selectNode(node, group) {
   } else {
     html += interfaces.map(function(iface) {
       const idx = iface.if_index === null || iface.if_index === undefined ? '-' : iface.if_index;
-      return '<div class=\'inspector-if\'><span>' + esc(iface.if_name || ('if-' + idx)) +
+      const pred = iface.predictive_warning ? ' <span class=\'pred-badge\'>[PRED]</span>' : '';
+      return '<div class=\'inspector-if\'><span>' + esc(iface.if_name || ('if-' + idx)) + pred +
         '</span><span>' + esc(iface.link_status || '-') + '</span></div>';
     }).join('');
   }
@@ -5232,7 +5605,11 @@ fn extract_json_str(chunk: &str, key: &str) -> Option<String> {
 
 // ─── Background polling loop ──────────────────────────────────────────────────
 
-fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>) {
+fn run_polling_loop(
+    config: Arc<Mutex<AppConfig>>,
+    repo: Arc<Mutex<Repository>>,
+    alerts: crate::alert::AlertBroadcaster,
+) {
     use crate::db::models::{AlertEvent, DeviceMetrics, InterfaceSample};
     use crate::monitor::calculate_bandwidth_utilization_from_delta;
     use crate::snmp::SnmpClient;
@@ -5311,6 +5688,7 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
                     let mut result = PollResult {
                         ip: device.ip.clone(),
                         name: device.name.clone(),
+                        community: device.community.clone(),
                         device_id,
                         status: status.to_string(),
                         metrics: None,
@@ -5349,9 +5727,17 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
                                         link_status: iface.link_status.clone(),
                                         in_errors: iface.in_errors,
                                         out_errors: iface.out_errors,
+                                        in_packets: iface.in_packets,
+                                        out_packets: iface.out_packets,
                                         in_discards: iface.in_discards,
                                         out_discards: iface.out_discards,
                                         late_collisions: iface.late_collisions,
+                                        fcs_errors: iface.fcs_errors,
+                                        alignment_errors: iface.alignment_errors,
+                                        frame_too_longs: iface.frame_too_longs,
+                                        internal_mac_receive_errors: iface
+                                            .internal_mac_receive_errors,
+                                        rx_optical_power_dbm: iface.rx_optical_power_dbm,
                                         in_octets: iface.in_octets,
                                         out_octets: iface.out_octets,
                                         bandwidth_utilization: iface.bandwidth_utilization,
@@ -5399,6 +5785,16 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
                         );
                     }
                     let _ = r.save_sample(&sample);
+                    let dev_config = DeviceConfig {
+                        id: Some(result.device_id),
+                        name: result.name.clone(),
+                        ip: result.ip.clone(),
+                        community: result.community.clone(),
+                        device_type: "network".to_string(),
+                        status: result.status.clone(),
+                        last_seen_at: None,
+                    };
+                    publish_predictive_alerts(&alerts, &dev_config, &sample, &*r);
                 }
 
                 // スパイク検出（インターフェース単位）
@@ -5449,10 +5845,63 @@ fn run_polling_loop(config: Arc<Mutex<AppConfig>>, repo: Arc<Mutex<Repository>>)
 struct PollResult {
     ip: String,
     name: String,
+    community: String,
     device_id: i64,
     status: String,
     metrics: Option<crate::db::models::DeviceMetrics>,
     samples: Vec<crate::db::models::InterfaceSample>,
+}
+
+fn publish_predictive_alerts(
+    alerts: &crate::alert::AlertBroadcaster,
+    device: &DeviceConfig,
+    sample: &crate::db::models::InterfaceSample,
+    repository: &Repository,
+) {
+    let Ok(history) = repository.get_recent_interface_samples(sample.device_id, sample.if_index, 3)
+    else {
+        return;
+    };
+    let Some(indicators) = crate::monitor::predictive::evaluate_predictive(&history) else {
+        return;
+    };
+    let publish = |kind, observed: String, threshold: String, message: String| {
+        alerts.publish(AlertEvent::predictive(
+            kind,
+            device,
+            sample.if_index,
+            &sample.if_name,
+            observed,
+            threshold,
+            message,
+        ));
+    };
+    if indicators.error_ratio_warning {
+        publish(
+            AlertKind::PredictiveErrorRate,
+            format!("{:.6}%", indicators.error_ratio * 100.0),
+            "0.001%".to_string(),
+            format!("[PRED] Error ratio rising on {}", sample.if_name),
+        );
+    }
+    if indicators.trend_warning {
+        publish(
+            AlertKind::PredictiveTrend,
+            format!("{:.0}", indicators.error_acceleration),
+            "> 0 errors/poll acceleration".to_string(),
+            format!("[PRED] Error acceleration rising on {}", sample.if_name),
+        );
+    }
+    if indicators.dom_warning {
+        if let Some(power) = indicators.rx_optical_power_dbm {
+            publish(
+                AlertKind::PredictiveDom,
+                format!("{power:.1} dBm"),
+                "-18 dBm".to_string(),
+                format!("[PRED] SFP Rx optical power degraded on {}", sample.if_name),
+            );
+        }
+    }
 }
 
 impl PollResult {
@@ -5460,6 +5909,7 @@ impl PollResult {
         Self {
             ip,
             name: String::new(),
+            community: "public".to_string(),
             device_id: 0,
             status: "offline".to_string(),
             metrics: None,
@@ -5471,10 +5921,10 @@ impl PollResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        annotate_edge_health, classify_interface_diagnostic, effective_interface_link_status,
-        evaluate_port_health, merge_duplicate_edges, page_discovery, parse_cdp_edges, WebEdition,
-        WebTopologyEdge, WebTopologyInterface, WebTopologyReport, CDP_CACHE_DEVICE_ID_OID,
-        COMMUNITY_MAX_DEVICES,
+        CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebEdition, WebTopologyEdge,
+        WebTopologyInterface, WebTopologyReport, annotate_edge_health,
+        classify_interface_diagnostic, effective_interface_link_status, evaluate_port_health,
+        merge_duplicate_edges, page_discovery, parse_cdp_edges,
     };
     use crate::db::models::InterfacePortDelta;
     use crate::db::repository::Repository;
@@ -5535,6 +5985,7 @@ mod tests {
                 remote_hostname: Some(format!("sw-{index}")),
                 remote_port: Some("Gi1/0/23".to_string()),
                 health_status: None,
+                predictive_warning: false,
             });
         }
 
@@ -5565,6 +6016,7 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/23".to_string()),
             health_status: None,
+            predictive_warning: false,
         };
         let cdp = WebTopologyEdge {
             id: "e1".to_string(),
@@ -5578,6 +6030,7 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/23".to_string()),
             health_status: None,
+            predictive_warning: false,
         };
 
         let merged = merge_duplicate_edges(vec![lldp, cdp]);
@@ -5602,6 +6055,7 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/23".to_string()),
             health_status: None,
+            predictive_warning: false,
         };
         let b = WebTopologyEdge {
             id: "e1".to_string(),
@@ -5615,6 +6069,7 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/24".to_string()),
             health_status: None,
+            predictive_warning: false,
         };
 
         let merged = merge_duplicate_edges(vec![a, b]);
@@ -5641,10 +6096,12 @@ mod tests {
 
         assert_eq!(report.nodes.len(), COMMUNITY_MAX_DEVICES);
         assert_eq!(report.hidden_nodes, 30 - COMMUNITY_MAX_DEVICES);
-        assert!(report
-            .edges
-            .iter()
-            .all(|edge| report.nodes.iter().any(|node| node.id == edge.target)));
+        assert!(
+            report
+                .edges
+                .iter()
+                .all(|edge| report.nodes.iter().any(|node| node.id == edge.target))
+        );
     }
 
     #[test]
@@ -5678,7 +6135,10 @@ mod tests {
         };
         let (status, alerts) = evaluate_port_health(&delta);
         assert_eq!(status, "Warning");
-        assert_eq!(alerts, vec!["L1 Physical Error (CRC/Frame Error)".to_string()]);
+        assert_eq!(
+            alerts,
+            vec!["L1 Physical Error (CRC/Frame Error)".to_string()]
+        );
     }
 
     #[test]
@@ -5735,6 +6195,7 @@ mod tests {
                 ..Default::default()
             },
             health_status: "Warning".to_string(),
+            predictive_warning: false,
             alerts: vec!["L1 Physical Error (CRC/Frame Error)".to_string()],
         };
         report.nodes[0].interfaces = vec![unhealthy_iface];
@@ -5751,22 +6212,34 @@ mod tests {
 
     #[test]
     fn diagnostic_status_prioritizes_duplex_mismatch_over_l1_error() {
-        assert_eq!(classify_interface_diagnostic("up", 5, 0, 0, 0, 1), "duplex_mismatch");
+        assert_eq!(
+            classify_interface_diagnostic("up", 5, 0, 0, 0, 1),
+            "duplex_mismatch"
+        );
     }
 
     #[test]
     fn diagnostic_status_flags_l1_error_over_congestion() {
-        assert_eq!(classify_interface_diagnostic("up", 1, 0, 3, 0, 0), "l1_error");
+        assert_eq!(
+            classify_interface_diagnostic("up", 1, 0, 3, 0, 0),
+            "l1_error"
+        );
     }
 
     #[test]
     fn diagnostic_status_flags_congestion_when_only_discards_present() {
-        assert_eq!(classify_interface_diagnostic("up", 0, 0, 0, 4, 0), "congestion");
+        assert_eq!(
+            classify_interface_diagnostic("up", 0, 0, 0, 4, 0),
+            "congestion"
+        );
     }
 
     #[test]
     fn diagnostic_status_is_healthy_when_no_deltas() {
-        assert_eq!(classify_interface_diagnostic("up", 0, 0, 0, 0, 0), "healthy");
+        assert_eq!(
+            classify_interface_diagnostic("up", 0, 0, 0, 0, 0),
+            "healthy"
+        );
     }
 }
 

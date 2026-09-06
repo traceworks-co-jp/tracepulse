@@ -1,6 +1,6 @@
 use crate::db::models::{
-    AlertEvent, Device, DeviceMetrics, InterfacePortDelta, InterfaceSample, InterfaceSpike,
-    RecentAlert,
+    AlertEvent, Device, DeviceMetrics, FlowRecord, InterfacePortDelta, InterfaceSample,
+    InterfaceSpike, ProtocolShare, RecentAlert, TopTalker,
 };
 use crate::error::AppError;
 use rusqlite::params;
@@ -171,8 +171,8 @@ impl Repository {
 
     pub fn save_sample(&self, sample: &InterfaceSample) -> Result<i64, AppError> {
         let id = self.connection.execute(
-            "INSERT INTO interface_samples (device_id, if_index, if_name, link_status, in_errors, out_errors, in_discards, out_discards, late_collisions, in_octets, out_octets, bandwidth_utilization, sampled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO interface_samples (device_id, if_index, if_name, link_status, in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions, fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm, in_octets, out_octets, bandwidth_utilization, sampled_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 sample.device_id,
                 sample.if_index,
@@ -180,9 +180,16 @@ impl Repository {
                 sample.link_status,
                 sample.in_errors,
                 sample.out_errors,
+                sample.in_packets,
+                sample.out_packets,
                 sample.in_discards,
                 sample.out_discards,
                 sample.late_collisions,
+                sample.fcs_errors,
+                sample.alignment_errors,
+                sample.frame_too_longs,
+                sample.internal_mac_receive_errors,
+                sample.rx_optical_power_dbm,
                 sample.in_octets,
                 sample.out_octets,
                 sample.bandwidth_utilization,
@@ -191,6 +198,76 @@ impl Repository {
         )?;
 
         Ok(id as i64)
+    }
+
+    pub fn save_flow_record(&self, flow: &FlowRecord) -> Result<i64, AppError> {
+        let id = self.connection.execute(
+            "INSERT INTO flow_records (source_ip, destination_ip, source_port, destination_port, protocol, bytes, packets, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                flow.source_ip,
+                flow.destination_ip,
+                flow.source_port,
+                flow.destination_port,
+                flow.protocol,
+                flow.bytes,
+                flow.packets,
+                flow.observed_at,
+            ],
+        )?;
+        Ok(id as i64)
+    }
+
+    pub fn protocol_shares(&self, limit_seconds: i64) -> Result<Vec<ProtocolShare>, AppError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT protocol, SUM(bytes), SUM(bytes) * 8.0 / MAX(1, ?1),
+                    SUM(bytes) * 100.0 / MAX(1, (SELECT SUM(bytes) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')))
+             FROM flow_records
+             WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+             GROUP BY protocol ORDER BY SUM(bytes) DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![limit_seconds], |row| {
+                Ok(ProtocolShare {
+                    protocol: row.get(0)?,
+                    bytes: row.get::<_, i64>(1)? as u64,
+                    bps: row.get(2)?,
+                    percentage: row.get(3)?,
+                })
+            })?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn top_talkers(
+        &self,
+        limit_seconds: i64,
+        limit: usize,
+    ) -> Result<Vec<TopTalker>, AppError> {
+        let mut stmt = self.connection.prepare(
+            "SELECT source_ip, destination_ip, source_port, destination_port, protocol,
+                    SUM(bytes), SUM(bytes) * 8 / MAX(1, ?1)
+             FROM flow_records
+             WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+             GROUP BY source_ip, destination_ip, source_port, destination_port, protocol
+             ORDER BY SUM(bytes) DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![limit_seconds, limit as i64], |row| {
+                Ok(TopTalker {
+                    source_ip: row.get(0)?,
+                    destination_ip: row.get(1)?,
+                    source_port: row.get::<_, i64>(2)? as u16,
+                    destination_port: row.get::<_, i64>(3)? as u16,
+                    protocol: row.get(4)?,
+                    bytes: row.get::<_, i64>(5)? as u64,
+                    bps: row.get::<_, i64>(6)? as u64,
+                })
+            })?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
     }
 
     pub fn save_alert(&self, alert: &AlertEvent) -> Result<i64, AppError> {
@@ -248,9 +325,16 @@ impl Repository {
                 link_status: row.get(2)?,
                 in_errors: row.get::<_, i64>(3)? as u64,
                 out_errors: row.get::<_, i64>(4)? as u64,
+                in_packets: 0,
+                out_packets: 0,
                 in_discards: row.get::<_, i64>(5)? as u64,
                 out_discards: row.get::<_, i64>(6)? as u64,
                 late_collisions: row.get::<_, i64>(7)? as u64,
+                fcs_errors: 0,
+                alignment_errors: 0,
+                frame_too_longs: 0,
+                internal_mac_receive_errors: 0,
+                rx_optical_power_dbm: None,
                 in_octets: 0,
                 out_octets: 0,
                 bandwidth_utilization: 0.0,
@@ -379,7 +463,8 @@ impl Repository {
     ) -> Result<Vec<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards, late_collisions,
+                    in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
+                    fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
                     in_octets, out_octets,
                     bandwidth_utilization, sampled_at
              FROM interface_samples
@@ -397,13 +482,20 @@ impl Repository {
                     link_status: row.get(4)?,
                     in_errors: row.get::<_, i64>(5)? as u64,
                     out_errors: row.get::<_, i64>(6)? as u64,
-                    in_discards: row.get::<_, i64>(7)? as u64,
-                    out_discards: row.get::<_, i64>(8)? as u64,
-                    late_collisions: row.get::<_, i64>(9)? as u64,
-                    in_octets: row.get::<_, i64>(10)? as u64,
-                    out_octets: row.get::<_, i64>(11)? as u64,
-                    bandwidth_utilization: row.get(12)?,
-                    sampled_at: row.get(13)?,
+                    in_packets: row.get::<_, i64>(7)? as u64,
+                    out_packets: row.get::<_, i64>(8)? as u64,
+                    in_discards: row.get::<_, i64>(9)? as u64,
+                    out_discards: row.get::<_, i64>(10)? as u64,
+                    late_collisions: row.get::<_, i64>(11)? as u64,
+                    fcs_errors: row.get::<_, i64>(12)? as u64,
+                    alignment_errors: row.get::<_, i64>(13)? as u64,
+                    frame_too_longs: row.get::<_, i64>(14)? as u64,
+                    internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
+                    rx_optical_power_dbm: row.get(16)?,
+                    in_octets: row.get::<_, i64>(17)? as u64,
+                    out_octets: row.get::<_, i64>(18)? as u64,
+                    bandwidth_utilization: row.get(19)?,
+                    sampled_at: row.get(20)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -416,7 +508,8 @@ impl Repository {
     pub fn get_latest_interfaces(&self, device_id: i64) -> Result<Vec<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards, late_collisions,
+                    in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
+                    fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
                     in_octets, out_octets,
                     bandwidth_utilization, sampled_at
              FROM interface_samples
@@ -438,13 +531,20 @@ impl Repository {
                     link_status: row.get(4)?,
                     in_errors: row.get::<_, i64>(5)? as u64,
                     out_errors: row.get::<_, i64>(6)? as u64,
-                    in_discards: row.get::<_, i64>(7)? as u64,
-                    out_discards: row.get::<_, i64>(8)? as u64,
-                    late_collisions: row.get::<_, i64>(9)? as u64,
-                    in_octets: row.get::<_, i64>(10)? as u64,
-                    out_octets: row.get::<_, i64>(11)? as u64,
-                    bandwidth_utilization: row.get(12)?,
-                    sampled_at: row.get(13)?,
+                    in_packets: row.get::<_, i64>(7)? as u64,
+                    out_packets: row.get::<_, i64>(8)? as u64,
+                    in_discards: row.get::<_, i64>(9)? as u64,
+                    out_discards: row.get::<_, i64>(10)? as u64,
+                    late_collisions: row.get::<_, i64>(11)? as u64,
+                    fcs_errors: row.get::<_, i64>(12)? as u64,
+                    alignment_errors: row.get::<_, i64>(13)? as u64,
+                    frame_too_longs: row.get::<_, i64>(14)? as u64,
+                    internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
+                    rx_optical_power_dbm: row.get(16)?,
+                    in_octets: row.get::<_, i64>(17)? as u64,
+                    out_octets: row.get::<_, i64>(18)? as u64,
+                    bandwidth_utilization: row.get(19)?,
+                    sampled_at: row.get(20)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -459,7 +559,8 @@ impl Repository {
     ) -> Result<Option<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards, late_collisions,
+                    in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
+                    fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
                     in_octets, out_octets, bandwidth_utilization, sampled_at
              FROM interface_samples
              WHERE device_id = ?1 AND if_index = ?2
@@ -476,13 +577,20 @@ impl Repository {
                 link_status: row.get(4)?,
                 in_errors: row.get::<_, i64>(5)? as u64,
                 out_errors: row.get::<_, i64>(6)? as u64,
-                in_discards: row.get::<_, i64>(7)? as u64,
-                out_discards: row.get::<_, i64>(8)? as u64,
-                late_collisions: row.get::<_, i64>(9)? as u64,
-                in_octets: row.get::<_, i64>(10)? as u64,
-                out_octets: row.get::<_, i64>(11)? as u64,
-                bandwidth_utilization: row.get(12)?,
-                sampled_at: row.get(13)?,
+                in_packets: row.get::<_, i64>(7)? as u64,
+                out_packets: row.get::<_, i64>(8)? as u64,
+                in_discards: row.get::<_, i64>(9)? as u64,
+                out_discards: row.get::<_, i64>(10)? as u64,
+                late_collisions: row.get::<_, i64>(11)? as u64,
+                fcs_errors: row.get::<_, i64>(12)? as u64,
+                alignment_errors: row.get::<_, i64>(13)? as u64,
+                frame_too_longs: row.get::<_, i64>(14)? as u64,
+                internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
+                rx_optical_power_dbm: row.get(16)?,
+                in_octets: row.get::<_, i64>(17)? as u64,
+                out_octets: row.get::<_, i64>(18)? as u64,
+                bandwidth_utilization: row.get(19)?,
+                sampled_at: row.get(20)?,
             })
         }) {
             Ok(sample) => Ok(Some(sample)),
@@ -500,7 +608,8 @@ impl Repository {
     ) -> Result<Vec<InterfaceSample>, AppError> {
         let mut stmt = self.connection.prepare(
             "SELECT id, device_id, if_index, if_name, link_status,
-                    in_errors, out_errors, in_discards, out_discards, late_collisions,
+                    in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
+                    fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
                     in_octets, out_octets, bandwidth_utilization, sampled_at
              FROM interface_samples
              WHERE device_id = ?1 AND if_index = ?2
@@ -518,13 +627,20 @@ impl Repository {
                     link_status: row.get(4)?,
                     in_errors: row.get::<_, i64>(5)? as u64,
                     out_errors: row.get::<_, i64>(6)? as u64,
-                    in_discards: row.get::<_, i64>(7)? as u64,
-                    out_discards: row.get::<_, i64>(8)? as u64,
-                    late_collisions: row.get::<_, i64>(9)? as u64,
-                    in_octets: row.get::<_, i64>(10)? as u64,
-                    out_octets: row.get::<_, i64>(11)? as u64,
-                    bandwidth_utilization: row.get(12)?,
-                    sampled_at: row.get(13)?,
+                    in_packets: row.get::<_, i64>(7)? as u64,
+                    out_packets: row.get::<_, i64>(8)? as u64,
+                    in_discards: row.get::<_, i64>(9)? as u64,
+                    out_discards: row.get::<_, i64>(10)? as u64,
+                    late_collisions: row.get::<_, i64>(11)? as u64,
+                    fcs_errors: row.get::<_, i64>(12)? as u64,
+                    alignment_errors: row.get::<_, i64>(13)? as u64,
+                    frame_too_longs: row.get::<_, i64>(14)? as u64,
+                    internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
+                    rx_optical_power_dbm: row.get(16)?,
+                    in_octets: row.get::<_, i64>(17)? as u64,
+                    out_octets: row.get::<_, i64>(18)? as u64,
+                    bandwidth_utilization: row.get(19)?,
+                    sampled_at: row.get(20)?,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -671,7 +787,8 @@ impl Repository {
         device_id: i64,
     ) -> Result<HashMap<i32, InterfacePortDelta>, AppError> {
         let mut stmt = self.connection.prepare(
-            "SELECT if_index, in_errors, out_errors, in_discards, out_discards, late_collisions
+            "SELECT if_index, in_errors, out_errors, in_discards, out_discards, late_collisions,
+                    fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors
              FROM interface_samples
              WHERE device_id = ?1
              ORDER BY if_index ASC, sampled_at DESC, id DESC",
@@ -683,6 +800,10 @@ impl Repository {
             in_discards: u64,
             out_discards: u64,
             late_collisions: u64,
+            fcs_errors: u64,
+            alignment_errors: u64,
+            frame_too_longs: u64,
+            internal_mac_receive_errors: u64,
         }
 
         let mut by_if: HashMap<i32, Vec<Counters>> = HashMap::new();
@@ -695,6 +816,10 @@ impl Repository {
                     in_discards: row.get::<_, i64>(3)? as u64,
                     out_discards: row.get::<_, i64>(4)? as u64,
                     late_collisions: row.get::<_, i64>(5)? as u64,
+                    fcs_errors: row.get::<_, i64>(6)? as u64,
+                    alignment_errors: row.get::<_, i64>(7)? as u64,
+                    frame_too_longs: row.get::<_, i64>(8)? as u64,
+                    internal_mac_receive_errors: row.get::<_, i64>(9)? as u64,
                 },
             ))
         })?;
@@ -717,13 +842,23 @@ impl Repository {
                     in_errors_delta: counter32_delta(previous.in_errors, latest.in_errors),
                     out_errors_delta: counter32_delta(previous.out_errors, latest.out_errors),
                     in_discards_delta: counter32_delta(previous.in_discards, latest.in_discards),
-                    out_discards_delta: counter32_delta(
-                        previous.out_discards,
-                        latest.out_discards,
-                    ),
+                    out_discards_delta: counter32_delta(previous.out_discards, latest.out_discards),
                     late_collisions_delta: counter32_delta(
                         previous.late_collisions,
                         latest.late_collisions,
+                    ),
+                    fcs_errors_delta: counter32_delta(previous.fcs_errors, latest.fcs_errors),
+                    alignment_errors_delta: counter32_delta(
+                        previous.alignment_errors,
+                        latest.alignment_errors,
+                    ),
+                    frame_too_longs_delta: counter32_delta(
+                        previous.frame_too_longs,
+                        latest.frame_too_longs,
+                    ),
+                    internal_mac_receive_errors_delta: counter32_delta(
+                        previous.internal_mac_receive_errors,
+                        latest.internal_mac_receive_errors,
                     ),
                 }
             };

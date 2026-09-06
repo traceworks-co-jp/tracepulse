@@ -1,6 +1,7 @@
 pub mod interface;
 pub mod metrics;
 pub mod poller;
+pub mod predictive;
 pub mod system;
 
 pub use interface::InterfaceMonitor;

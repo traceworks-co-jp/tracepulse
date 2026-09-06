@@ -22,9 +22,17 @@ pub struct InterfaceSample {
     pub link_status: String,
     pub in_errors: u64,
     pub out_errors: u64,
+    pub in_packets: u64,
+    pub out_packets: u64,
     pub in_discards: u64,
     pub out_discards: u64,
     pub late_collisions: u64,
+    // EtherLike-MIB (RFC 3635) 破損パケット内訳カウンタ
+    pub fcs_errors: u64,
+    pub alignment_errors: u64,
+    pub frame_too_longs: u64,
+    pub internal_mac_receive_errors: u64,
+    pub rx_optical_power_dbm: Option<f64>,
     pub in_octets: u64,
     pub out_octets: u64,
     pub bandwidth_utilization: f64,
@@ -86,4 +94,40 @@ pub struct InterfacePortDelta {
     pub in_discards_delta: u64,
     pub out_discards_delta: u64,
     pub late_collisions_delta: u64,
+    // EtherLike-MIB 破損パケット内訳（Error Breakdown カード用）
+    pub fcs_errors_delta: u64,
+    pub alignment_errors_delta: u64,
+    pub frame_too_longs_delta: u64,
+    pub internal_mac_receive_errors_delta: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowRecord {
+    pub source_ip: String,
+    pub destination_ip: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub protocol: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProtocolShare {
+    pub protocol: String,
+    pub bytes: u64,
+    pub percentage: f64,
+    pub bps: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopTalker {
+    pub source_ip: String,
+    pub destination_ip: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub protocol: String,
+    pub bytes: u64,
+    pub bps: u64,
 }

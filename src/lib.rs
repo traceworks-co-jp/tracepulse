@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod device;
 pub mod error;
+pub mod flow;
 pub mod monitor;
 pub mod snmp;
 pub mod tests;
