@@ -1,0 +1,35 @@
+name = "Brocade FC Switch"
+enterprise_id = 1588
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.1588.2.1.1.1.26.1.0", # SW-MIB::swCpuUsage.0
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.1588.2.1.1.1.26.6.0" # SW-MIB::swMemUsage.0 (直接パーセンテージ取得)
+
+# -------------------------------------------------------------
+# 1. 温度センサー (SW-MIB: swSensorType = 1)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.5" # SW-MIB::swSensorInfo
+value_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.4" # SW-MIB::swSensorValue (°C)
+state_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.3" # SW-MIB::swSensorStatus (4: nominal)
+
+# -------------------------------------------------------------
+# 2. ファン (SW-MIB: swSensorType = 2)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.5" # SW-MIB::swSensorInfo
+state_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.3" # SW-MIB::swSensorStatus (4: nominal)
+speed_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.4" # SW-MIB::swSensorValue (RPM)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (SW-MIB: swSensorType = 3)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.5" # SW-MIB::swSensorInfo
+state_prefix = "1.3.6.1.4.1.1588.2.1.1.1.1.22.1.3" # SW-MIB::swSensorStatus (4: nominal)
+fallback_builtin_power = false

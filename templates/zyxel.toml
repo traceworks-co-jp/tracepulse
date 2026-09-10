@@ -1,0 +1,74 @@
+name = "Zyxel Switches & DSLAMs"
+enterprise_id = 890
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.890.1.5.8.72.12.7.0",  # ZYXEL-ES3500-8PD-MIB::cpuUsage
+    "1.3.6.1.4.1.890.1.5.8.20.12.7.0",  # ZYXEL-GS4012F-MIB::cpuUsage
+    "1.3.6.1.4.1.890.1.5.13.5.11.3.4.1.2", # ZYXEL-IES5000-MIB::cpuTable Utilization
+    "1.3.6.1.2.1.25.3.3.1.2",          # HOST-RESOURCES-MIB::hrProcessorLoad
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.890.1.5.8.72.124.1.1.5" # ZYXEL-ES3500-8PD-MIB::memoryTable Utilization (%)
+
+# -------------------------------------------------------------
+# 1. 温度センサー
+# -------------------------------------------------------------
+# ES3500 シリーズ
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.8.72.9.2.1.1"
+value_prefix = "1.3.6.1.4.1.890.1.5.8.72.9.2.1.2" # (°C)
+
+# GS4012 シリーズ
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.8.20.9.2.1.1"
+value_prefix = "1.3.6.1.4.1.890.1.5.8.20.9.2.1.2" # (°C)
+
+# IES-500x / IES-6000 シリーズ
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.13.5.11.3.3.1.1"
+value_prefix = "1.3.6.1.4.1.890.1.5.13.5.11.3.3.1.2" # (°C)
+
+# AAM1212 / IES1248 シリーズ
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.13.1.2.3.1.1"
+value_prefix = "1.3.6.1.4.1.890.1.5.13.1.2.3.1.2" # (°C)
+
+# -------------------------------------------------------------
+# 2. ファン
+# -------------------------------------------------------------
+# GS4012 シリーズ
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.8.20.9.1.1.1"
+speed_prefix = "1.3.6.1.4.1.890.1.5.8.20.9.1.1.2" # RPM
+
+# IES-500x / IES-6000 シリーズ
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.13.5.11.3.1.1.1"
+speed_prefix = "1.3.6.1.4.1.890.1.5.13.5.11.3.1.1.2" # RPM
+
+# AAM1212 / IES1248 シリーズ
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.13.1.2.1.1.1"
+speed_prefix = "1.3.6.1.4.1.890.1.5.13.1.2.1.1.2" # RPM
+
+# -------------------------------------------------------------
+# 3. 電圧/電源センサー
+# -------------------------------------------------------------
+# 電圧（mV -> V 変換: multiplier = 0.001）
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.8.72.9.3.1.5"  # ES3500 Nominal Voltage
+state_prefix = "1.3.6.1.4.1.890.1.5.8.72.9.3.1.2"  # Reading (mV)
+fallback_builtin_power = false
+
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.8.20.9.3.1.5"  # GS4012 Nominal Voltage
+state_prefix = "1.3.6.1.4.1.890.1.5.8.20.9.3.1.2"  # Reading (mV)
+fallback_builtin_power = false
+
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.890.1.5.13.5.11.3.2.1.5" # IES5000 Nominal Voltage
+state_prefix = "1.3.6.1.4.1.890.1.5.13.5.11.3.2.1.2" # Reading (mV)
+fallback_builtin_power = false

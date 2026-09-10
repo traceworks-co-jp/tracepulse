@@ -63,7 +63,7 @@ In TUI mode, all operations can be performed using keyboard shortcuts:
 | **`Enter`** | **Error Breakdown Modal**: (When Interface Pane focused) View detailed port error breakdown (FCS/CRC, Alignment, Giant, MAC Rx). |
 | **`r`** | **Manual Poll**: Perform immediate SNMP polling for all devices with progress bar overlay. |
 | **`d`** | **Network Discovery Modal**: Open CIDR discovery dialog for automated device scanning & registration. |
-| **`p`** | **Toggle Protocol View**: Switch middle pane to Protocol Share chart (NetFlow/sFlow). |
+| **`p`** | **Toggle Protocol View**: Switch middle pane to the NetFlow/IPFIX protocol-share and Top Talkers view. |
 | **`q`** / **`Esc`** | **Quit / Cancel**: Safely exit TUI or close the active modal dialog. |
 
 #### Network Discovery Modal Controls
@@ -73,6 +73,15 @@ In TUI mode, all operations can be performed using keyboard shortcuts:
 3. **`←` / `→` / `Home` / `End`**: Move cursor within text fields.
 4. **`SNMP Version Selection`**: Toggle SNMP version (`v2c`, `v1`, `v3`) using **`←` / `→` / `Space`** or keys **`1` / `2` / `3`**.
 5. **`Enter`**: Start 64-thread parallel scan. Discovered devices are auto-registered and immediately polled.
+
+---
+
+### Flow Analytics Scope
+
+- The protocol-share and Top Talkers views use decoded NetFlow v5/v9 records received over UDP 2055 and IPFIX records received over UDP 4739. Values are estimates from received flows and do not correct device-side sampling.
+- NetFlow v9 and IPFIX require a Template FlowSet before data records can be analyzed. Templates are scoped to the exporter and Observation Domain/Source ID and expire after 30 minutes.
+- sFlow datagrams are accepted at UDP 6343 but excluded from analytics because sFlow decoding is not implemented.
+- Packet corruption, drops, and communication failures are monitored per port through SNMP IF-MIB counters, including `ifInErrors`, `ifOutErrors`, `ifInDiscards`, and `ifOutDiscards`.
 
 ---
 
@@ -125,7 +134,12 @@ history_days = 7
 
 ## License
 
-This repository is provided as a personal project / open-source prototype.
+This project is licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
 
 ---
 
@@ -187,7 +201,7 @@ TUI モードでは、キーボードのみで直感的に全操作を行えま�
 | **`Enter`** | **エラー詳細ダイアログ**: (中ペインフォーカス時) 選択ポートの物理エラー (FCS/CRC, Alignment, Giant, MAC Rx) の詳細内訳を表示。 |
 | **`r`** | **手動ポーリング (Manual Poll)**: 全登録機器の SNMP 情報を即時再取得 (進捗プログレスバーを表示)。 |
 | **`d`** | **ネットワーク自動探索 (Discovery)**: CIDR スキャン＆自動登録ダイアログを開く。 |
-| **`p`** | **プロトコル表示切替**: 中ペインをプロトコル別通信シェアグラフ (NetFlow/sFlow) に切替。 |
+| **`p`** | **プロトコル表示切替**: 中ペインを NetFlow/IPFIX のプロトコル別通信シェア / Top Talkers 表示に切替。 |
 | **`q`** / **`Esc`** | **終了 / キャンセル**: TUI を安全に終了、またはアクティブなモーダルダイアログを閉じる。 |
 
 #### ネットワーク自動探索 (Discovery) ダイアログの操作
@@ -197,6 +211,15 @@ TUI モードでは、キーボードのみで直感的に全操作を行えま�
 3. **`←` / `→` / `Home` / `End`**: テキスト入力フィールド内のカーソル移動。
 4. **`SNMP Version 選択`**: `SNMP Version` フィールド選択中に **`←` / `→` / `Space`** または **`1` / `2` / `3`** キーで `v2c`, `v1`, `v3` を切り替え。
 5. **`Enter`**: 64 スレッド並列スキャンを開始。応答があった機器を DB へ自動登録し、初回ポーリングを一括実行してダッシュボードを更新。
+
+---
+
+### フロー分析の対象範囲
+
+- プロトコル別通信シェアと Top Talkers は、UDP 2055 で受信した NetFlow v5/v9 と UDP 4739 で受信した IPFIX の基本レコードを対象とします。表示値は受信フローに基づく概算値であり、機器側のサンプリング設定は補正しません。
+- NetFlow v9/IPFIX は Template FlowSet を受信後に解析します。テンプレートは送信元、Observation Domain/Source ID ごとに管理し、30 分で期限切れになります。
+- sFlow は UDP 6343 で待ち受けますが、デコード未対応のため分析対象から除外します。
+- パケット破損・破棄・通信エラーは、`ifInErrors`、`ifOutErrors`、`ifInDiscards`、`ifOutDiscards` など、SNMP IF-MIB のポート単位カウンタで監視します。
 
 ---
 
@@ -249,4 +272,9 @@ history_days = 7
 
 ## ライセンス
 
-このリポジトリは個人開発・オープンソースプロトタイプとして提供されています。
+本プロジェクトは、以下のいずれかのライセンスの下で提供されます。
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) または http://www.apache.org/licenses/LICENSE-2.0)
+* MIT License ([LICENSE-MIT](LICENSE-MIT) または http://opensource.org/licenses/MIT)
+
+いずれかを選択できます。

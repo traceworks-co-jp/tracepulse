@@ -1,0 +1,28 @@
+name = "Fortinet FortiGate"
+enterprise_id = 12356
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.12356.101.4.1.3.0", # FORTINET-FORTIGATE-MIB::fgSysCpuUsage.0
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.12356.101.4.1.4.0" # FORTINET-FORTIGATE-MIB::fgSysMemUsage.0 (直接取得 %)
+
+# -------------------------------------------------------------
+# 1. ハードウェアセンサー (FORTINET-FORTIGATE-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.2" # fgHwSensorEntName
+value_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.3" # fgHwSensorEntValue
+state_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.4" # fgHwSensorEntAlarmStatus (0: false/正常, 1: true/アラーム)
+
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.2" # fgHwSensorEntName
+state_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.4" # fgHwSensorEntAlarmStatus (0: false/正常, 1: true/アラーム)
+
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.2" # fgHwSensorEntName
+state_prefix = "1.3.6.1.4.1.12356.101.4.3.2.1.4" # fgHwSensorEntAlarmStatus (0: false/正常, 1: true/アラーム)
+fallback_builtin_power = false

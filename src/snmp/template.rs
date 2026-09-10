@@ -71,7 +71,7 @@ impl MemoryTemplate {
 pub struct SensorGroupTemplate {
     #[serde(default)]
     pub descr_prefix: String,
-    #[serde(default)]
+    #[serde(default, alias = "speed_prefix")]
     pub value_prefix: String,
     #[serde(default)]
     pub state_prefix: String,
@@ -178,5 +178,21 @@ mod tests {
         let util_total =
             MemoryTemplate::calculate_utilization("calculated", None, Some(0.0), None, Some(0.0));
         assert_eq!(util_total, Some(0.0));
+    }
+
+    #[test]
+    fn parses_all_vendor_templates() {
+        let template_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let templates = VendorOidTemplate::load_all_from_dir(&template_dir);
+
+        assert!(
+            templates.contains_key(&0),
+            "generic template should be loaded"
+        );
+        assert!(
+            templates.contains_key(&9),
+            "Cisco template should be loaded"
+        );
+        assert!(templates.len() > 2, "vendor templates should be loaded");
     }
 }

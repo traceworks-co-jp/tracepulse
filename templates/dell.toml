@@ -1,0 +1,33 @@
+name = "Dell Force10 S-Series"
+enterprise_id = 6027
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.6027.3.10.1.2.9.1.3", # F10-S-SERIES-CHASSIS-MIB::chStackUnitCpuUtil1Min
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.6027.3.10.1.2.9.1.5" # F10-S-SERIES-CHASSIS-MIB::chStackUnitMemUsageUtil (直接パーセンテージ取得)
+
+# -------------------------------------------------------------
+# 1. 温度センサー (F10-S-SERIES-CHASSIS-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.6027.3.10.1.2.2.1.2"  # chStackUnitIndex
+value_prefix = "1.3.6.1.4.1.6027.3.10.1.2.2.1.14" # chStackUnitTemp (°C)
+
+# -------------------------------------------------------------
+# 2. ファン (F10-S-SERIES-CHASSIS-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.6027.3.10.1.2.4.1.1" # chSysFanTrayIndex
+state_prefix = "1.3.6.1.4.1.6027.3.10.1.2.4.1.2" # chSysFanTrayOperStatus (1: up, 2: down, 3: absent)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (F10-S-SERIES-CHASSIS-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.6027.3.10.1.2.3.1.1" # chSysPowerSupplyIndex
+state_prefix = "1.3.6.1.4.1.6027.3.10.1.2.3.1.2" # chSysPowerSupplyOperStatus (1: up, 2: down, 3: absent)
+fallback_builtin_power = false

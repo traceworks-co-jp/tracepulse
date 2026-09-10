@@ -4,6 +4,9 @@ interval_seconds = 30
 [snmp]
 default_community = "public"
 
+[display]
+timezone = "utc" # "utc" または "jst"
+
 [alert]
 error_rate_threshold = 0.05
 spike_threshold = 10

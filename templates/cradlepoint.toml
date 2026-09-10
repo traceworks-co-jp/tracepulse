@@ -1,0 +1,17 @@
+name = "Cradlepoint NetCloud"
+enterprise_id = 20992
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2", # HOST-RESOURCES-MIB::hrProcessorLoad
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.2.1.25.2.3.1.5" # HOST-RESOURCES-MIB::hrStorageSize
+used_prefix = "1.3.6.1.2.1.25.2.3.1.6"  # HOST-RESOURCES-MIB::hrStorageUsed
+
+# -------------------------------------------------------------
+# 1. モデム / インターフェース センサ (IF-MIB / Cradlepoint MIB)
+# -------------------------------------------------------------
+# ※ Cradlepoint 機器本体のローカル SNMP では標準 IF-MIB および HOST-RESOURCES-MIB が応答します。

@@ -1,0 +1,36 @@
+name = "Extreme EXOS"
+enterprise_id = 1916
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.1916.1.32.1.2.0", # EXTREME-SOFTWARE-MONITOR-MIB::extremeCpuMonitorTotalUtilization.0
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.1916.1.32.2.2.1.2" # EXTREME-SOFTWARE-MONITOR-MIB::extremeMemoryMonitorSystemTotal (KB)
+free_prefix  = "1.3.6.1.4.1.1916.1.32.2.2.1.3" # EXTREME-SOFTWARE-MONITOR-MIB::extremeMemoryMonitorSystemFree (KB)
+
+# -------------------------------------------------------------
+# 1. 温度センサー (EXTREME-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.1916.1.1.1.7.0" # extremeOverTemperatureAlarm.0
+value_prefix = "1.3.6.1.4.1.1916.1.1.1.8.0" # extremeCurrentTemperature.0 (°C)
+state_prefix = "1.3.6.1.4.1.1916.1.1.1.7.0" # extremeOverTemperatureAlarm.0 (1: alarm, 2: normal)
+
+# -------------------------------------------------------------
+# 2. ファン (EXTREME-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.1916.1.1.1.9.1.1" # ファン Index
+state_prefix = "1.3.6.1.4.1.1916.1.1.1.9.1.2" # extremeFanOperational (1: true - on, 2: false - off)
+speed_prefix = "1.3.6.1.4.1.1916.1.1.1.9.1.4" # extremeFanSpeed (RPM)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (EXTREME-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.1916.1.1.1.27.1.1" # PSU Index
+state_prefix = "1.3.6.1.4.1.1916.1.1.1.27.1.2" # extremePowerSupplyStatus (1: notPresent, 2: presentOK, 3: presentNotOK, 4: presentPowerOff)
+fallback_builtin_power = false

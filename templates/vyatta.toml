@@ -1,0 +1,18 @@
+name = "Vyatta Virtual Router"
+enterprise_id = 2021
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2",    # HOST-RESOURCES-MIB::hrProcessorLoad
+    "1.3.6.1.4.1.2021.10.1.3.1", # UCD-SNMP-MIB::laLoad.1 (1m Load Average)
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.2021.4.5.0" # UCD-SNMP-MIB::memTotalReal.0
+free_prefix = "1.3.6.1.4.1.2021.4.6.0"  # UCD-SNMP-MIB::memAvailReal.0
+
+# -------------------------------------------------------------
+# インターフェース / BGP (IF-MIB / BGP4-MIB)
+# ※ Vyatta 仮想ルーターは標準 Linux MIB / RFC MIB に準拠します。
+# -------------------------------------------------------------

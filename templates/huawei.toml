@@ -1,0 +1,33 @@
+name = "Huawei VRP / AR Series"
+enterprise_id = 2011
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5", # HUAWEI-ENTITY-EXTENT-MIB::hwEntityCpuUsage
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7" # HUAWEI-ENTITY-EXTENT-MIB::hwEntityMemUsage (直接取得 %)
+
+# -------------------------------------------------------------
+# 1. 温度センサー (HUAWEI-ENTITY-EXTENT-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.7"         # ENTITY-MIB::entPhysicalName
+value_prefix = "1.3.6.1.4.1.2011.5.25.31.1.1.1.1.11" # hwEntityTemperature (°C)
+
+# -------------------------------------------------------------
+# 2. ファン (HUAWEI-ENTITY-EXTENT-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.2011.5.25.31.1.1.10.1.1" # hwEntityFanIndex
+state_prefix = "1.3.6.1.4.1.2011.5.25.31.1.1.10.1.7" # hwEntityFanState (1: normal, 2: abnormal)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (HUAWEI-ENTITY-EXTENT-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.2011.5.25.31.3.1.0" # hwDevicePowerInfoTotalPower
+state_prefix = "1.3.6.1.4.1.2011.5.25.31.3.2.0" # hwDevicePowerInfoUsedPower (W)
+fallback_builtin_power = false

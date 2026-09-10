@@ -1,0 +1,35 @@
+name = "Ribbon Communications SBC"
+enterprise_id = 17792
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.17792.3.1.2.1.1.1", # SONUS-SYSTEM-MIB::sonusCpuUsage
+    "1.3.6.1.2.1.25.3.3.1.2",        # HOST-RESOURCES-MIB::hrProcessorLoad
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.2.1.25.2.3.1.5" # HOST-RESOURCES-MIB::hrStorageSize
+used_prefix  = "1.3.6.1.2.1.25.2.3.1.6" # HOST-RESOURCES-MIB::hrStorageUsed
+
+# -------------------------------------------------------------
+# 1. 温度センサー (SONUS-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.17792.3.1.3.1.1.2" # sonusEnvTempSensorDescr
+value_prefix = "1.3.6.1.4.1.17792.3.1.3.1.1.3" # sonusEnvTempSensorValue (°C)
+
+# -------------------------------------------------------------
+# 2. ファン (SONUS-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.17792.3.1.3.2.1.2" # sonusEnvFanDescr
+state_prefix = "1.3.6.1.4.1.17792.3.1.3.2.1.3" # sonusEnvFanState (1: normal, 2: failed)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (SONUS-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.17792.3.1.3.3.1.2" # sonusEnvPowerSupplyDescr
+state_prefix = "1.3.6.1.4.1.17792.3.1.3.3.1.3" # sonusEnvPowerSupplyState (1: normal, 2: failed)
+fallback_builtin_power = false

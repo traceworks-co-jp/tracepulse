@@ -1,0 +1,35 @@
+name = "Netgear Fastpath"
+enterprise_id = 4526
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.4526.10.1.1.4.9.0", # FASTPATH-SWITCHING-MIB::agentSwitchCpuProcessTotalUtilization.0
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.4526.10.1.1.5.2.0" # FASTPATH-SWITCHING-MIB::agentSwitchCpuProcessMemAvailable.0
+free_prefix  = "1.3.6.1.4.1.4526.10.1.1.5.1.0" # FASTPATH-SWITCHING-MIB::agentSwitchCpuProcessMemFree.0
+
+# -------------------------------------------------------------
+# 1. 温度センサー (FASTPATH-BOXSERVICES-PRIVATE-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.4526.10.43.1.8.1.1" # boxServicesTempSensorIndex
+value_prefix = "1.3.6.1.4.1.4526.10.43.1.8.1.5" # boxServicesTempSensorTemperature (°C)
+state_prefix = "1.3.6.1.4.1.4526.10.43.1.8.1.3" # boxServicesTempSensorState (1: normal, 2: warning, 3: critical)
+
+# -------------------------------------------------------------
+# 2. ファン (FASTPATH-BOXSERVICES-PRIVATE-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.4526.10.43.1.6.1.1" # boxServicesFanIndex
+state_prefix = "1.3.6.1.4.1.4526.10.43.1.6.1.3" # boxServicesFanItemState (1: operational, 2: failed)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (FASTPATH-BOXSERVICES-PRIVATE-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.4526.10.43.1.7.1.1" # boxServicesPowSupplyIndex
+state_prefix = "1.3.6.1.4.1.4526.10.43.1.7.1.3" # boxServicesPowSupplyItemState (1: operational, 2: failed)
+fallback_builtin_power = false

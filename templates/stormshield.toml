@@ -1,0 +1,35 @@
+name = "Stormshield SNS"
+enterprise_id = 11256
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2", # HOST-RESOURCES-MIB::hrProcessorLoad
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.2021.4.5.0" # UCD-SNMP-MIB::memTotalReal.0
+free_prefix  = "1.3.6.1.4.1.2021.4.6.0" # UCD-SNMP-MIB::memAvailReal.0
+
+# -------------------------------------------------------------
+# 1. 温度センサー (STORMSHIELD-SYSTEM-MONITOR-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.11256.1.10.7.1.1" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsCpuTempIndex
+value_prefix = "1.3.6.1.4.1.11256.1.10.7.1.2" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsCpuTemp (°C)
+
+# -------------------------------------------------------------
+# 2. ファン (STORMSHIELD-SYSTEM-MONITOR-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.11256.1.10.9.1.2" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsFanName
+state_prefix = "1.3.6.1.4.1.11256.1.10.9.1.3" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsFanStatus (1: failure, 2: running)
+speed_prefix = "1.3.6.1.4.1.11256.1.10.9.1.4" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsFanRpm
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (STORMSHIELD-SYSTEM-MONITOR-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.11256.1.10.6.1.1" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsPowerSupplyIndex
+state_prefix = "1.3.6.1.4.1.11256.1.10.6.1.3" # STORMSHIELD-SYSTEM-MONITOR-MIB::snsPowerSupplyStatus (4: failed, 5: ok)
+fallback_builtin_power = false

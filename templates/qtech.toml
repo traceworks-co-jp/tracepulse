@@ -1,0 +1,34 @@
+name = "QTech QSW"
+enterprise_id = 27514
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.27514.100.1.11.10.0", # QTECH-MIB::switchCpuUsage.0
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.27514.100.1.11.6.0" # QTECH-MIB::switchMemorySize.0
+used_prefix  = "1.3.6.1.4.1.27514.100.1.11.7.0" # QTECH-MIB::switchMemoryBusy.0
+
+# -------------------------------------------------------------
+# 1. 温度センサー (QTECH-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.27514.100.1.11.9.0" # QTECH-MIB::switchTemperature.0
+value_prefix = "1.3.6.1.4.1.27514.100.1.11.9.0"
+
+# -------------------------------------------------------------
+# 2. ファン (QTECH-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.27514.100.1.12.1.3" # QTECH-MIB::sysFanStatus
+state_prefix = "1.3.6.1.4.1.27514.100.1.12.1.3" # (0: normal, 1: abnormal)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (QTECH-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.27514.100.1.7.1.5"  # QTECH-MIB::sysPowerStatus
+state_prefix = "1.3.6.1.4.1.27514.100.1.7.1.5"  # (0: normal, 1: abnormal, 2: not available)
+fallback_builtin_power = false

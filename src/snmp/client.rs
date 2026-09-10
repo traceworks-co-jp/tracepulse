@@ -19,6 +19,30 @@ pub struct SnmpClient {
 }
 
 impl SnmpClient {
+    fn template_for_enterprise_id(&self, enterprise_id: Option<u32>) -> Option<&VendorOidTemplate> {
+        enterprise_id
+            .and_then(|id| self.templates.get(&id))
+            .or_else(|| self.templates.get(&0))
+    }
+
+    fn query_cpu_from_template(
+        &self,
+        session: &mut SyncSession,
+        vendor_enterprise_id: Option<u32>,
+    ) -> Option<u32> {
+        self.template_for_enterprise_id(vendor_enterprise_id)?
+            .cpu
+            .candidates
+            .iter()
+            .filter_map(|candidate| parse_oid_string(candidate))
+            .find_map(|oid| {
+                query_u32_with_table_fallback(session, &oid)
+                    .ok()
+                    .flatten()
+                    .filter(|value| *value <= 100)
+            })
+    }
+
     fn query_sensors_from_template(
         &self,
         session: &mut SyncSession,
@@ -461,10 +485,12 @@ impl SnmpClient {
         neighbors
     }
 
-    /// Discovery専用の軽量プローブ。sysName (OID 1.3.6.1.2.1.1.5.0) 1つだけ取得する。
-    /// タイムアウトは 500ms、アプリレベルで最大3回リトライ。
-    /// 並列スキャン時のUDPパケットロスによる取りこぼしを防ぐ。
-    pub fn probe_device(&self, device: &DeviceConfig) -> Result<String, AppError> {
+    /// sysName (OID 1.3.6.1.2.1.1.5.0) を1回だけ問い合わせて到達性を確認する。
+    pub fn probe_device_once(
+        &self,
+        device: &DeviceConfig,
+        timeout: Duration,
+    ) -> Result<String, AppError> {
         if device.ip.trim().is_empty() {
             return Err(AppError::Validation("SNMP device IP is empty".to_string()));
         }
@@ -475,37 +501,35 @@ impl SnmpClient {
             device.community.clone()
         };
 
-        const MAX_RETRIES: u32 = 3;
         let session_addr = format!("{}:161", device.ip);
-        let mut last_err = String::new();
+        let mut session = SyncSession::new(
+            session_addr.as_str(),
+            community.as_bytes(),
+            Some(timeout),
+            0,
+        )
+        .map_err(|err| {
+            AppError::Validation(format!("SNMP session error for {}: {}", device.ip, err))
+        })?;
 
-        for attempt in 0..MAX_RETRIES {
-            // 試行ごとに新しいセッション（UDPソケット）を作成して再送
-            let mut session = match SyncSession::new(
-                session_addr.as_str(),
-                community.as_bytes(),
-                Some(Duration::from_millis(500)),
-                0,
-            ) {
-                Ok(s) => s,
-                Err(err) => {
-                    last_err = format!("session error on attempt {}: {}", attempt + 1, err);
-                    continue;
-                }
-            };
+        query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 5, 0]).map_err(|err| {
+            AppError::Validation(format!("SNMP probe failed for {}: {}", device.ip, err))
+        })
+    }
 
-            match query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 5, 0]) {
+    /// Discovery専用の軽量プローブ。500ms の問い合わせを最大3回試行する。
+    /// 並列スキャン時のUDPパケットロスによる取りこぼしを防ぐ。
+    pub fn probe_device(&self, device: &DeviceConfig) -> Result<String, AppError> {
+        let mut last_err = None;
+
+        for _ in 0..3 {
+            match self.probe_device_once(device, Duration::from_millis(500)) {
                 Ok(sys_name) => return Ok(sys_name),
-                Err(err) => {
-                    last_err = format!("no response on attempt {}: {}", attempt + 1, err);
-                }
+                Err(err) => last_err = Some(err),
             }
         }
 
-        Err(AppError::Validation(format!(
-            "SNMP probe failed for {} after {} attempts: {}",
-            device.ip, MAX_RETRIES, last_err
-        )))
+        Err(last_err.unwrap_or_else(|| AppError::Validation("SNMP probe failed".to_string())))
     }
 
     pub fn discover_interface_indexes(&self, device: &DeviceConfig) -> Result<Vec<u32>, AppError> {
@@ -1151,6 +1175,9 @@ impl SnmpClient {
                 }
             }
         }
+        if let Some(value) = self.query_cpu_from_template(session, vendor_enterprise_id) {
+            return Ok(Some(value));
+        }
         query_cpu_usage(session, vendor_enterprise_id)
     }
 
@@ -1171,36 +1198,34 @@ impl SnmpClient {
             }
         }
 
-        if let Some(enterprise_id) = vendor_enterprise_id {
-            if let Some(template) = self.templates.get(&enterprise_id) {
-                let mem_tmpl = &template.memory;
-                let mode = mem_tmpl.mode.trim().to_lowercase();
+        if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id) {
+            let mem_tmpl = &template.memory;
+            let mode = mem_tmpl.mode.trim().to_lowercase();
 
-                if mode == "direct" && !mem_tmpl.oid.is_empty() {
-                    if let Some(oid) = parse_oid_string(&mem_tmpl.oid) {
-                        if let Ok(value) = query_u32_with_table_fallback(session, &oid) {
-                            if let Some(v) = value {
-                                return Ok(Some(v.min(100)));
-                            }
+            if mode == "direct" && !mem_tmpl.oid.is_empty() {
+                if let Some(oid) = parse_oid_string(&mem_tmpl.oid) {
+                    if let Ok(value) = query_u32_with_table_fallback(session, &oid) {
+                        if let Some(v) = value {
+                            return Ok(Some(v.min(100)));
                         }
                     }
-                } else {
-                    let (used_val, free_val, total_val) = query_memory_pair_from_prefixes(
-                        session,
-                        &mem_tmpl.used_prefix,
-                        &mem_tmpl.free_prefix,
-                        &mem_tmpl.total_prefix,
-                    );
+                }
+            } else {
+                let (used_val, free_val, total_val) = query_memory_pair_from_prefixes(
+                    session,
+                    &mem_tmpl.used_prefix,
+                    &mem_tmpl.free_prefix,
+                    &mem_tmpl.total_prefix,
+                );
 
-                    if let Some(util) = crate::snmp::template::MemoryTemplate::calculate_utilization(
-                        &mem_tmpl.mode,
-                        None,
-                        used_val,
-                        free_val,
-                        total_val,
-                    ) {
-                        return Ok(Some(util.round() as u32));
-                    }
+                if let Some(util) = crate::snmp::template::MemoryTemplate::calculate_utilization(
+                    &mem_tmpl.mode,
+                    None,
+                    used_val,
+                    free_val,
+                    total_val,
+                ) {
+                    return Ok(Some(util.round() as u32));
                 }
             }
         }
@@ -1871,13 +1896,9 @@ impl SnmpClient {
     ) -> Result<HardwareInventory, AppError> {
         let mut inventory = query_hardware_inventory_with_session(session, vendor_enterprise_id)?;
 
-        let target_enterprise_id = vendor_enterprise_id.or(Some(9));
-
-        if let Some(enterprise_id) = target_enterprise_id {
-            if let Some(template) = self.templates.get(&enterprise_id) {
-                if let Ok(template_sensors) = self.query_sensors_from_template(session, template) {
-                    inventory.sensors.extend(template_sensors);
-                }
+        if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id) {
+            if let Ok(template_sensors) = self.query_sensors_from_template(session, template) {
+                inventory.sensors.extend(template_sensors);
             }
         }
 

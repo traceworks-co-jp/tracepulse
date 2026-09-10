@@ -1,0 +1,35 @@
+name = "Intel / QLogic InfiniBand"
+enterprise_id = 10222
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2", # HOST-RESOURCES-MIB::hrProcessorLoad
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.2.1.25.2.3.1.5" # HOST-RESOURCES-MIB::hrStorageSize
+used_prefix  = "1.3.6.1.2.1.25.2.3.1.6" # HOST-RESOURCES-MIB::hrStorageUsed
+
+# -------------------------------------------------------------
+# 1. 温度センサー (ICS-CHASSIS-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.10222.2.1.9.8.1.7" # icsChassisSensorSlotDescription
+value_prefix = "1.3.6.1.4.1.10222.2.1.9.8.1.8" # icsChassisSensorSlotValue (°C)
+state_prefix = "1.3.6.1.4.1.10222.2.1.9.8.1.3" # icsChassisSensorSlotOperStatus (4: good, 2: bad, 3: warning)
+
+# -------------------------------------------------------------
+# 2. ファン (ICS-CHASSIS-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.10222.2.1.6.5.1.2" # icsChassisFanDescription
+state_prefix = "1.3.6.1.4.1.10222.2.1.6.5.1.3" # icsChassisFanOperStatus (2: operational, 3: failed)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (ICS-CHASSIS-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.10222.2.1.4.7.1.2" # icsChassisPowerSupplyDescription
+state_prefix = "1.3.6.1.4.1.10222.2.1.4.7.1.3" # icsChassisPowerSupplyOperStatus (6: engaged, 3: failed, 4: warning)
+fallback_builtin_power = false

@@ -1,0 +1,40 @@
+name = "MikroTik RouterOS"
+enterprise_id = 14988
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2",          # HOST-RESOURCES-MIB::hrProcessorLoad
+    "1.3.6.1.4.1.14988.1.1.1.3.1.1.5", # MIKROTIK-MIB::mtxrProcessorLoad
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.2.1.25.2.3.1.5" # HOST-RESOURCES-MIB::hrStorageSize
+used_prefix  = "1.3.6.1.2.1.25.2.3.1.6" # HOST-RESOURCES-MIB::hrStorageUsed
+
+# -------------------------------------------------------------
+# 1. 温度センサー (MIKROTIK-MIB)
+# ※ 取得値は 0.1°C 単位（ multiplier = 0.1 ）
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.14988.1.1.3.11" # MIKROTIK-MIB::mtxrHlProcessorTemperature (CPU温度)
+value_prefix = "1.3.6.1.4.1.14988.1.1.3.11"
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.14988.1.1.3.10" # MIKROTIK-MIB::mtxrHlTemperature (基板/デバイス温度)
+value_prefix = "1.3.6.1.4.1.14988.1.1.3.10"
+
+# -------------------------------------------------------------
+# 2. ファン (MIKROTIK-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.14988.1.1.3.9"  # MIKROTIK-MIB::mtxrHlFanSpeed (RPM)
+speed_prefix = "1.3.6.1.4.1.14988.1.1.3.9"
+
+# -------------------------------------------------------------
+# 3. 電圧/電源 (MIKROTIK-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.14988.1.1.3.8"  # MIKROTIK-MIB::mtxrHlVoltage (0.1V 単位)
+state_prefix = "1.3.6.1.4.1.14988.1.1.3.8"
+fallback_builtin_power = false

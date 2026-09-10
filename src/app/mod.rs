@@ -3,15 +3,18 @@ use crate::alert::event::AlertEvent;
 use crate::config::AppConfig;
 use crate::db::repository::Repository;
 use crate::error::AppError;
+use crate::notifications::NotificationSettingsProvider;
 use crate::ui::TuiRenderer;
 use crate::web::server::WebServer;
 use rusqlite::Connection;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub struct AppRunner {
     pub config: AppConfig,
     pub connection: Connection,
     alerts: AlertBroadcaster,
+    notifications: Option<Arc<dyn NotificationSettingsProvider>>,
 }
 
 impl AppRunner {
@@ -28,7 +31,20 @@ impl AppRunner {
             config,
             connection,
             alerts,
+            notifications: None,
         }
+    }
+
+    pub fn with_notification_provider(
+        mut self,
+        provider: Arc<dyn NotificationSettingsProvider>,
+    ) -> Self {
+        self.notifications = Some(provider);
+        self
+    }
+
+    pub fn notification_provider(&self) -> Option<Arc<dyn NotificationSettingsProvider>> {
+        self.notifications.clone()
     }
 
     /// 外部モジュールがアラートイベントを購読するためのレシーバーを返す。

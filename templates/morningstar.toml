@@ -1,0 +1,75 @@
+name = "Morningstar Solar Controllers & Inverters"
+enterprise_id = 33333
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2", # HOST-RESOURCES-MIB::hrProcessorLoad (標準フォールバック)
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.2.1.25.2.3.1.5" # HOST-RESOURCES-MIB::hrStorageSize
+used_prefix = "1.3.6.1.2.1.25.2.3.1.6"  # HOST-RESOURCES-MIB::hrStorageUsed
+
+# -------------------------------------------------------------
+# 1. 温度センサー (PROSTAR / SUNSAVER / SURESINE / TRISTAR)
+# -------------------------------------------------------------
+# ProStar MPPT & PWM シリーズ (.5 / .6)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.5.39.0" # batteryTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.5.39.0"
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.5.38.0" # heatsinkTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.5.38.0"
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.5.40.0" # ambientTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.5.40.0"
+
+# SunSaver MPPT シリーズ (.3)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.3.36.0" # batteryTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.3.36.0"
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.3.35.0" # heatsinkTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.3.35.0"
+
+# SureSine インバーター (.9)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.9.32.0" # heatsinkTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.9.32.0"
+
+# TriStar MPPT & 600V シリーズ (.2 / .7)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.2.48.0" # batteryTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.2.48.0"
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.2.49.0" # heatsinkTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.2.49.0"
+
+# TriStar PWM シリーズ (.8)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.8.37.0" # batteryTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.8.37.0"
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.33333.8.36.0" # heatsinkTemperature (°C)
+value_prefix = "1.3.6.1.4.1.33333.8.36.0"
+
+# -------------------------------------------------------------
+# 2. 充電・電源ステータス (Charge & Load State)
+# -------------------------------------------------------------
+# ProStar MPPT 充電制御状態
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.33333.5.45.0" # PROSTAR-MPPT::chargeState
+state_prefix = "1.3.6.1.4.1.33333.5.45.0"
+fallback_builtin_power = false
+
+# TriStar MPPT 充電制御状態
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.33333.2.46.0" # TRISTAR-MPPT::chargeState
+state_prefix = "1.3.6.1.4.1.33333.2.46.0"
+fallback_builtin_power = false

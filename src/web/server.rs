@@ -68,6 +68,10 @@ impl ScanJob {
 
 type JobStore = Arc<Mutex<HashMap<String, ScanJob>>>;
 
+pub use crate::notifications::NotificationSettingsProvider;
+
+type NotificationProvider = Option<Arc<dyn NotificationSettingsProvider>>;
+
 pub struct WebServer {
     pub host: String,
     pub port: u16,
@@ -77,6 +81,7 @@ pub struct WebServer {
     jobs: JobStore,
     edition: WebEdition,
     alerts: AlertBroadcaster,
+    notifications: NotificationProvider,
 }
 
 impl WebServer {
@@ -131,7 +136,16 @@ impl WebServer {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             edition,
             alerts,
+            notifications: None,
         }
+    }
+
+    pub fn with_notification_provider(
+        mut self,
+        provider: Arc<dyn NotificationSettingsProvider>,
+    ) -> Self {
+        self.notifications = Some(provider);
+        self
     }
 
     pub fn start(&self) -> Result<(), AppError> {
@@ -147,7 +161,7 @@ impl WebServer {
             let cfg = Arc::clone(&self.config);
             let alerts = self.alerts.clone();
             std::thread::spawn(move || {
-                run_polling_loop(cfg, repo, alerts);
+                run_polling_loop(cfg, repo, alerts, true);
             });
         }
         crate::flow::FlowCollector::start(
@@ -163,8 +177,16 @@ impl WebServer {
                     let cfg = Arc::clone(&self.config);
                     let cfg_path = self.config_path.clone();
                     let edition = self.edition;
-                    if let Err(err) = handle_connection(stream, repo, jobs, cfg, cfg_path, edition)
-                    {
+                    let notifications = self.notifications.clone();
+                    if let Err(err) = handle_connection(
+                        stream,
+                        repo,
+                        jobs,
+                        cfg,
+                        cfg_path,
+                        edition,
+                        notifications,
+                    ) {
                         eprintln!("web request failed: {err}");
                     }
                 }
@@ -268,6 +290,7 @@ fn handle_connection(
     cfg: Arc<Mutex<AppConfig>>,
     cfg_path: std::path::PathBuf,
     edition: WebEdition,
+    notifications: NotificationProvider,
 ) -> Result<(), AppError> {
     let req = parse_request(&stream)?;
 
@@ -313,10 +336,24 @@ fn handle_connection(
         ("GET", "/") | ("GET", "/dashboard") => respond_html(stream, page_dashboard(&repo, &cfg)),
         ("GET", "/discovery") => respond_html(stream, page_discovery(&repo, edition)),
         ("GET", "/diagnostics") => respond_html(stream, page_diagnostics("/diagnostics", &cfg)),
-        ("GET", "/settings") => respond_html(stream, page_settings(&cfg)),
+        ("GET", "/settings") => {
+            respond_html(stream, page_settings(&cfg, notifications.is_some()))
+        }
         ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
         ("GET", "/api/devices") => respond_json(stream, "200 OK", api_devices(&repo, &cfg)),
         ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
+        ("GET", "/api/notifications") => {
+            let (status, body) = api_get_notifications(notifications.as_deref());
+            respond_json(stream, &status, body)
+        }
+        ("POST", "/api/notifications") => {
+            let (status, body) = api_post_notifications(&req.body, notifications.as_deref());
+            respond_json(stream, &status, body)
+        }
+        ("POST", "/api/notifications/test") => {
+            let (status, body) = api_test_notification(&req.body, notifications.as_deref());
+            respond_json(stream, &status, body)
+        }
         ("POST", "/api/settings") => respond_json(
             stream,
             "200 OK",
@@ -812,6 +849,63 @@ fn api_post_settings(
     r#"{"ok":true}"#.to_string()
 }
 
+fn api_get_notifications(provider: Option<&dyn NotificationSettingsProvider>) -> (String, String) {
+    match provider {
+        Some(provider) => ("200 OK".to_string(), provider.load_json()),
+        None => (
+            "404 Not Found".to_string(),
+            r#"{"error":"notification settings are available in the Enterprise edition"}"#
+                .to_string(),
+        ),
+    }
+}
+
+fn api_post_notifications(
+    body: &str,
+    provider: Option<&dyn NotificationSettingsProvider>,
+) -> (String, String) {
+    let Some(provider) = provider else {
+        return (
+            "404 Not Found".to_string(),
+            r#"{"error":"notification settings are available in the Enterprise edition"}"#
+                .to_string(),
+        );
+    };
+
+    match provider.save_json(body) {
+        Ok(()) => ("200 OK".to_string(), r#"{"ok":true}"#.to_string()),
+        Err(err) => (
+            "400 Bad Request".to_string(),
+            format!(r#"{{"error":"{}"}}"#, escape_json(&err)),
+        ),
+    }
+}
+
+fn api_test_notification(
+    body: &str,
+    provider: Option<&dyn NotificationSettingsProvider>,
+) -> (String, String) {
+    let Some(provider) = provider else {
+        return (
+            "404 Not Found".to_string(),
+            r#"{"error":"notification settings are available in the Enterprise edition"}"#
+                .to_string(),
+        );
+    };
+
+    let channel = extract_json_str(body, "channel").unwrap_or_else(|| "all".to_string());
+    match provider.send_test(&channel) {
+        Ok(message) => (
+            "200 OK".to_string(),
+            format!(r#"{{"ok":true,"message":"{}"}}"#, escape_json(&message)),
+        ),
+        Err(err) => (
+            "502 Bad Gateway".to_string(),
+            format!(r#"{{"error":"{}"}}"#, escape_json(&err)),
+        ),
+    }
+}
+
 fn api_post_oid_overrides(
     body: &str,
     cfg: &Arc<Mutex<AppConfig>>,
@@ -871,30 +965,83 @@ fn api_post_oid_overrides(
 }
 
 fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), String> {
-    let hardware_oid_overrides_toml = format!(
-        "[{}]",
-        c.snmp
-            .hardware_oid_overrides
-            .iter()
-            .map(|v| format!("\"{}\"", v.replace('"', "")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let toml_content = format!(
-        "[polling]\ninterval_seconds = {}\n\n[snmp]\ndefault_community = \"{}\"\ncpu_oid_override = \"{}\"\nmemory_oid_override = \"{}\"\nhardware_oid_overrides = {}\n\n[display]\ntimezone = \"{}\"\n\n[alert]\nerror_rate_threshold = {}\nspike_threshold = {}\nhealth_warning_threshold = {}\nhealth_critical_threshold = {}\n\n[retention]\nhistory_days = {}\n",
-        c.polling.interval_seconds,
-        c.snmp.default_community,
-        c.snmp.cpu_oid_override,
-        c.snmp.memory_oid_override,
-        hardware_oid_overrides_toml,
-        c.display.timezone,
-        c.alert.error_rate_threshold,
-        c.alert.spike_threshold,
-        c.alert.health_warning_threshold,
-        c.alert.health_critical_threshold,
-        c.retention.history_days,
+    // [notifier] や [license] など、AppConfig が管理しないセクションを壊さないようマージ保存する。
+    let mut root: toml::value::Table = std::fs::read_to_string(cfg_path)
+        .ok()
+        .and_then(|content| content.parse::<toml::Table>().ok())
+        .unwrap_or_default();
+
+    fn section<'a>(root: &'a mut toml::value::Table, name: &str) -> &'a mut toml::value::Table {
+        let entry = root
+            .entry(name.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        if !entry.is_table() {
+            *entry = toml::Value::Table(toml::value::Table::new());
+        }
+        entry.as_table_mut().expect("section is a table")
+    }
+
+    let polling = section(&mut root, "polling");
+    polling.insert(
+        "interval_seconds".to_string(),
+        toml::Value::Integer(c.polling.interval_seconds as i64),
     );
 
+    let snmp = section(&mut root, "snmp");
+    snmp.insert(
+        "default_community".to_string(),
+        toml::Value::String(c.snmp.default_community.clone()),
+    );
+    snmp.insert(
+        "cpu_oid_override".to_string(),
+        toml::Value::String(c.snmp.cpu_oid_override.clone()),
+    );
+    snmp.insert(
+        "memory_oid_override".to_string(),
+        toml::Value::String(c.snmp.memory_oid_override.clone()),
+    );
+    snmp.insert(
+        "hardware_oid_overrides".to_string(),
+        toml::Value::Array(
+            c.snmp
+                .hardware_oid_overrides
+                .iter()
+                .map(|v| toml::Value::String(v.clone()))
+                .collect(),
+        ),
+    );
+
+    let display = section(&mut root, "display");
+    display.insert(
+        "timezone".to_string(),
+        toml::Value::String(c.display.timezone.clone()),
+    );
+
+    let alert = section(&mut root, "alert");
+    alert.insert(
+        "error_rate_threshold".to_string(),
+        toml::Value::Float(c.alert.error_rate_threshold),
+    );
+    alert.insert(
+        "spike_threshold".to_string(),
+        toml::Value::Integer(c.alert.spike_threshold as i64),
+    );
+    alert.insert(
+        "health_warning_threshold".to_string(),
+        toml::Value::Integer(c.alert.health_warning_threshold as i64),
+    );
+    alert.insert(
+        "health_critical_threshold".to_string(),
+        toml::Value::Integer(c.alert.health_critical_threshold as i64),
+    );
+
+    let retention = section(&mut root, "retention");
+    retention.insert(
+        "history_days".to_string(),
+        toml::Value::Integer(c.retention.history_days as i64),
+    );
+
+    let toml_content = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
     std::fs::write(cfg_path, &toml_content).map_err(|e| e.to_string())
 }
 
@@ -1952,7 +2099,7 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html.push_str("<th data-i18n='actions'>Actions</th>");
     html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table>");
     html.push_str("<section class='detail-section' style='margin-top:1.25rem'>");
-    html.push_str("<h2>Recent Alerts</h2>");
+    html.push_str("<h2 data-i18n='recent_alerts_title'>Recent Alerts</h2>");
     html.push_str("<table id='alert-table'><thead><tr><th data-i18n='time'>Time</th><th data-i18n='hostname'>Device</th><th data-i18n='type'>Type</th><th data-i18n='severity'>Severity</th><th data-i18n='details'>Details</th></tr></thead><tbody>");
     if recent_alerts.is_empty() {
         html.push_str("<tr><td colspan='5' class='empty'>No alerts recorded</td></tr>");
@@ -1964,8 +2111,9 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
                 _ => "sev-info",
             };
             html.push_str(&format!(
-                "<tr><td>{}</td><td><a href='/device/{}'>{}</a></td><td>{}</td><td><span class='{}'>{}</span></td><td>{}</td></tr>",
+              "<tr><td class='timestamp' data-timestamp='{}'>{}</td><td><a href='/device/{}'>{}</a></td><td>{}</td><td><span class='{}'>{}</span></td><td>{}</td></tr>",
                 escape_html(alert.created_at.as_deref().unwrap_or("")),
+              escape_html(alert.created_at.as_deref().unwrap_or("")),
                 escape_html(&alert.device_ip),
                 escape_html(&alert.device_name),
                 escape_html(&alert.alert_type),
@@ -1986,7 +2134,7 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html
 }
 
-fn page_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
+fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> String {
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
     html.push_str("<html lang='en'><head>");
@@ -1999,6 +2147,9 @@ fn page_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
     html.push_str("</head><body data-title-key='settings_title'>");
     html.push_str(NAV_HTML);
     html.push_str(SETTINGS_HTML);
+    if notifications_enabled {
+        html.push_str(NOTIFICATIONS_HTML);
+    }
     html.push_str("<script>\n");
     // 現在値をサーバー側でレンダリングして初期値として埋め込む
     if let Ok(c) = cfg.lock() {
@@ -2018,6 +2169,9 @@ fn page_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
     }
     html.push_str(I18N_JS);
     html.push_str(SETTINGS_JS);
+    if notifications_enabled {
+        html.push_str(NOTIFICATIONS_JS);
+    }
     html.push_str("</script></body></html>");
     html
 }
@@ -2084,6 +2238,7 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
 
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='traffic_protocols_title'>Traffic &amp; Protocols</h2>");
+    html.push_str("<p class='traffic-note' data-i18n='traffic_protocols_note'>Values are estimates based on received flows; device-side sampling is not corrected.</p>");
     html.push_str("<div id='traffic-protocols' class='traffic-protocols'></div>");
     html.push_str("</section>");
 
@@ -2692,6 +2847,7 @@ var I18N = {
     nav_discovery: 'Discovery',
     nav_diagnostics: 'Diagnostics',
     nav_settings: 'Settings',
+    recent_alerts_title: 'Recent Alerts',
     theme_label: 'Theme',
     theme_dark: 'Dark',
     theme_light: 'Light',
@@ -2746,6 +2902,21 @@ var I18N = {
     save_settings: 'Save Settings',
     reset_defaults: 'Reset to Defaults',
     settings_saved: 'Settings saved',
+    notifications: 'Alert Notifications (Slack / Teams)',
+    slack_enabled: 'Enable Slack notifications',
+    teams_enabled: 'Enable Teams notifications',
+    webhook_url_hint: 'Leave empty to fall back to the environment variable below. ${ENV_NAME} placeholders are expanded.',
+    webhook_env_hint: 'Environment variable used when no URL is set',
+    flap_window: 'Flap Guard Window (seconds)',
+    flap_window_hint: 'Alerts of the same kind are aggregated within this window',
+    retry_max_attempts: 'Retry Attempts',
+    retry_max_attempts_hint: 'Number of webhook delivery attempts (1 – 10)',
+    save_notifications: 'Save Notification Settings',
+    send_test: 'Send test notification',
+    send_test_all: 'Test all enabled channels',
+    notifications_saved: 'Notification settings saved',
+    sending_test: 'Sending test notification…',
+    test_sent: 'Test notification sent',
     device_discovery: 'Device Discovery',
     cidr_range: 'CIDR Range',
     cidr_range_placeholder: '192.168.1.0/24',
@@ -2878,6 +3049,7 @@ var I18N = {
     error_breakdown_hover_title: 'Error Breakdown (since previous poll)',
     traffic_protocols_title: 'Traffic & Protocols',
     traffic_protocols_empty: 'No flow records received yet.',
+    traffic_protocols_note: 'Values are estimates based on received flows; device-side sampling is not corrected.',
     traffic_protocols_share: 'Protocol Share',
     traffic_protocols_top_talkers: 'Top Talkers'
   },
@@ -2885,6 +3057,7 @@ var I18N = {
     nav_dashboard: 'ダッシュボード',
     nav_discovery: '探索',
     nav_diagnostics: '診断',
+    recent_alerts_title: '最近のアラート',
     nav_settings: '設定',
     theme_label: 'テーマ',
     theme_dark: 'ダーク',
@@ -2940,6 +3113,21 @@ var I18N = {
     save_settings: '設定を保存',
     reset_defaults: 'デフォルトに戻す',
     settings_saved: '設定を保存しました',
+    notifications: 'アラート通知（Slack / Teams）',
+    slack_enabled: 'Slack 通知を有効にする',
+    teams_enabled: 'Teams 通知を有効にする',
+    webhook_url_hint: '空の場合は下の環境変数から取得します。${環境変数名} 形式の展開にも対応します。',
+    webhook_env_hint: 'URL 未設定時に参照する環境変数名',
+    flap_window: 'フラップ抑制ウィンドウ（秒）',
+    flap_window_hint: '同種のアラートをこの期間内で集約して通知します',
+    retry_max_attempts: 'リトライ回数',
+    retry_max_attempts_hint: 'Webhook 送信の試行回数（1〜10）',
+    save_notifications: '通知設定を保存',
+    send_test: 'テスト通知を送信',
+    send_test_all: '有効なチャンネルを一括テスト',
+    notifications_saved: '通知設定を保存しました',
+    sending_test: 'テスト通知を送信中…',
+    test_sent: 'テスト通知を送信しました',
     device_discovery: 'デバイス探索',
     cidr_range: 'CIDR 範囲',
     cidr_range_placeholder: '192.168.1.0/24',
@@ -3072,6 +3260,7 @@ var I18N = {
     port_health_discards: 'ディスカード',
     traffic_protocols_title: 'トラフィックとプロトコル',
     traffic_protocols_empty: 'フローデータをまだ受信していません。',
+    traffic_protocols_note: '※表示値は受信フローに基づく概算値です。機器側のサンプリング設定等による補正は含まれません。',
     traffic_protocols_share: 'プロトコル構成比',
     traffic_protocols_top_talkers: 'Top Talkers'
   }
@@ -3192,6 +3381,9 @@ function formatTracePulseClock(value) {
 document.addEventListener('DOMContentLoaded', function() {
   applyTheme(currentTheme());
   applyLanguage(currentLanguage());
+  document.querySelectorAll('[data-timestamp]').forEach(function(el) {
+    el.textContent = formatTracePulseTimestamp(el.dataset.timestamp);
+  });
 });
 ";
 
@@ -3381,6 +3573,142 @@ function resetDefaults() {
 populateForm(INIT);
 ";
 
+const NOTIFICATIONS_HTML: &str = "<main>
+<div class='settings-section'>
+  <h2 data-i18n='notifications'>Alert Notifications (Slack / Teams)</h2>
+
+  <div class='field-row'>
+    <div class='field-group'>
+      <label><input type='checkbox' id='slack_enabled'> <span data-i18n='slack_enabled'>Enable Slack notifications</span></label>
+      <input type='text' id='slack_url' placeholder='https://hooks.slack.com/services/...'>
+      <div class='field-hint' data-i18n='webhook_url_hint'>Leave empty to fall back to the environment variable below. ${ENV_NAME} placeholders are expanded.</div>
+      <input type='text' id='slack_url_env' placeholder='TRACEPULSE_SLACK_WEBHOOK_URL'>
+      <div class='field-hint' data-i18n='webhook_env_hint'>Environment variable used when no URL is set</div>
+      <div class='actions'>
+        <button class='btn' style='background:#334155' onclick=\"testNotification('slack')\" data-i18n='send_test'>Send test notification</button>
+      </div>
+    </div>
+    <div class='field-group'>
+      <label><input type='checkbox' id='teams_enabled'> <span data-i18n='teams_enabled'>Enable Teams notifications</span></label>
+      <input type='text' id='teams_url' placeholder='https://outlook.office.com/webhook/...'>
+      <div class='field-hint' data-i18n='webhook_url_hint'>Leave empty to fall back to the environment variable below. ${ENV_NAME} placeholders are expanded.</div>
+      <input type='text' id='teams_url_env' placeholder='TRACEPULSE_TEAMS_WEBHOOK_URL'>
+      <div class='field-hint' data-i18n='webhook_env_hint'>Environment variable used when no URL is set</div>
+      <div class='actions'>
+        <button class='btn' style='background:#334155' onclick=\"testNotification('teams')\" data-i18n='send_test'>Send test notification</button>
+      </div>
+    </div>
+  </div>
+
+  <div class='field-row'>
+    <div class='field-group'>
+      <label data-i18n='flap_window'>Flap Guard Window (seconds)</label>
+      <input type='number' id='flap_window' min='0' max='600' step='1'>
+      <div class='field-hint' data-i18n='flap_window_hint'>Alerts of the same kind are aggregated within this window</div>
+    </div>
+    <div class='field-group'>
+      <label data-i18n='retry_max_attempts'>Retry Attempts</label>
+      <input type='number' id='retry_attempts' min='1' max='10' step='1'>
+      <div class='field-hint' data-i18n='retry_max_attempts_hint'>Number of webhook delivery attempts (1 – 10)</div>
+    </div>
+  </div>
+
+  <div class='actions'>
+    <button class='btn btn-primary' onclick='saveNotifications()' data-i18n='save_notifications'>Save Notification Settings</button>
+    <button class='btn' style='background:#334155' onclick=\"testNotification('all')\" data-i18n='send_test_all'>Test all enabled channels</button>
+    <span class='toast toast-ok' id='ntoast-ok'></span>
+    <span class='toast toast-err' id='ntoast-err'></span>
+  </div>
+</div>
+</main>";
+
+const NOTIFICATIONS_JS: &str = r"
+function showNotifyToast(ok, msg) {
+  var tok = document.getElementById('ntoast-ok');
+  var terr = document.getElementById('ntoast-err');
+  tok.style.display = 'none';
+  terr.style.display = 'none';
+  if (ok) {
+    tok.textContent = '\u2713 ' + msg;
+    tok.style.display = 'inline-block';
+    setTimeout(function(){ tok.style.display='none'; }, 5000);
+  } else {
+    terr.textContent = '\u2717 ' + msg;
+    terr.style.display = 'inline-block';
+    setTimeout(function(){ terr.style.display='none'; }, 8000);
+  }
+}
+
+function populateNotifications(d) {
+  document.getElementById('slack_enabled').checked = !!d.slack.enabled;
+  document.getElementById('slack_url').value = d.slack.webhook_url || '';
+  document.getElementById('slack_url_env').value = d.slack.webhook_url_env || '';
+  document.getElementById('teams_enabled').checked = !!d.teams.enabled;
+  document.getElementById('teams_url').value = d.teams.webhook_url || '';
+  document.getElementById('teams_url_env').value = d.teams.webhook_url_env || '';
+  document.getElementById('flap_window').value = d.flap_guard.window_seconds;
+  document.getElementById('retry_attempts').value = d.retry.max_attempts;
+}
+
+function notificationsPayload() {
+  return {
+    slack: {
+      enabled: document.getElementById('slack_enabled').checked,
+      webhook_url: document.getElementById('slack_url').value.trim(),
+      webhook_url_env: document.getElementById('slack_url_env').value.trim()
+    },
+    teams: {
+      enabled: document.getElementById('teams_enabled').checked,
+      webhook_url: document.getElementById('teams_url').value.trim(),
+      webhook_url_env: document.getElementById('teams_url_env').value.trim()
+    },
+    flap_guard: { window_seconds: parseInt(document.getElementById('flap_window').value) },
+    retry: {
+      max_attempts: parseInt(document.getElementById('retry_attempts').value)
+    }
+  };
+}
+
+function saveNotifications() {
+  return fetch('/api/notifications', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(notificationsPayload())
+  })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d.ok) { showNotifyToast(true, t('notifications_saved')); return true; }
+      showNotifyToast(false, d.error || 'Unknown error');
+      return false;
+    })
+    .catch(function(e){ showNotifyToast(false, e.toString()); return false; });
+}
+
+// テスト送信は保存済み設定ではなく画面の入力内容を使うため、先に保存してから送信する。
+function testNotification(channel) {
+  saveNotifications().then(function(saved){
+    if (!saved) { return; }
+    showNotifyToast(true, t('sending_test'));
+    return fetch('/api/notifications/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({channel: channel})
+    })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d.ok) { showNotifyToast(true, d.message || t('test_sent')); }
+        else { showNotifyToast(false, d.error || 'Unknown error'); }
+      })
+      .catch(function(e){ showNotifyToast(false, e.toString()); });
+  });
+}
+
+fetch('/api/notifications')
+  .then(function(r){ return r.json(); })
+  .then(function(d){ if (!d.error) { populateNotifications(d); } })
+  .catch(function(){});
+";
+
 const DIAGNOSTICS_JS: &str = r"
 function startDiagnostics(event) {
   event.preventDefault();
@@ -3566,10 +3894,11 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .talker-table th, .talker-table td { padding:.45rem .55rem; border-bottom:1px solid #334155; text-align:left; font-size:.8rem; }
   .talker-table th { color:#94a3b8; }
   .traffic-empty { color:#64748b; font-style:italic; padding:.75rem 0; }
+  .traffic-note { margin:-.35rem 0 .85rem; color:#94a3b8; font-size:.82rem; }
   @media (max-width:760px) { .traffic-protocols { grid-template-columns:1fr; } .traffic-donut-wrap { justify-content:center; } }
 </style>";
 
-const DEVICE_DETAIL_JS: &str = r"
+const DEVICE_DETAIL_JS: &str = r#"
 var COLORS = ['#38bdf8','#4ade80','#f59e0b','#f87171','#a78bfa','#34d399','#fb923c','#e879f9'];
 var REFRESH_MS = 30000;
 var TIME_ZONE = (function() { try { return localStorage.getItem('tracepulse-timezone') || 'utc'; } catch (e) { return 'utc'; } })();
@@ -3577,6 +3906,15 @@ var IFACE_LABELS = {};
 var IFACE_SELECTED = new Set();
 var LAST_DEVICE_DETAIL = null;
 var IFACE_SELECTION_READY = false;
+
+window.esc = window.esc || function(value) {
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\x22/g, '&quot;');
+};
+var esc = window.esc;
 
 function ifaceSelectionKey() {
   return 'tracepulse-iface-selection:' + DEVICE_IP;
@@ -4002,8 +4340,16 @@ function onErrorBreakdownIfaceChange(value) {
 function renderTrafficProtocols(data) {
   var box = document.getElementById('traffic-protocols');
   if (!box) return;
-  var protocols = data && data.protocols || [];
-  var talkers = data && data.top_talkers || [];
+
+  function includeTrafficItem(item) {
+    if (!item) return false;
+    if (!Object.prototype.hasOwnProperty.call(item, 'if_index')) return true;
+    if (typeof isInterfaceSelected !== 'function') return true;
+    return isInterfaceSelected(item.if_index);
+  }
+
+  var protocols = (data && Array.isArray(data.protocols) ? data.protocols : []).filter(includeTrafficItem);
+  var talkers = (data && Array.isArray(data.top_talkers) ? data.top_talkers : []).filter(includeTrafficItem);
   if (protocols.length === 0 && talkers.length === 0) {
     box.innerHTML = '<p class=\'traffic-empty\'>' + t('traffic_protocols_empty') + '</p>';
     return;
@@ -4190,7 +4536,7 @@ window.addEventListener('resize', function() {
     if (LAST_DEVICE_DETAIL) renderDetail(LAST_DEVICE_DETAIL);
   }, 200);
 });
-";
+"#;
 
 const DASHBOARD_CSS: &str = "<style>
   #dash-table th { cursor:pointer; user-select:none; white-space:nowrap; }
@@ -4718,7 +5064,10 @@ function svgEl(tag) {
 
 function esc(value) {
   return String(value === null || value === undefined ? '' : value)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\x22/g, '&quot;');
 }
 
 // ポートのエラー状態（Warning 以上）をエッジ線の色・線種に反映する
@@ -5605,17 +5954,21 @@ fn extract_json_str(chunk: &str, key: &str) -> Option<String> {
 
 // ─── Background polling loop ──────────────────────────────────────────────────
 
-fn run_polling_loop(
+/// `verbose` が false の間は進捗を標準出力へ書かない（TUI の描画を壊さないため）。
+pub(crate) fn run_polling_loop(
     config: Arc<Mutex<AppConfig>>,
     repo: Arc<Mutex<Repository>>,
     alerts: crate::alert::AlertBroadcaster,
+    verbose: bool,
 ) {
     use crate::db::models::{AlertEvent, DeviceMetrics, InterfaceSample};
     use crate::monitor::calculate_bandwidth_utilization_from_delta;
     use crate::snmp::SnmpClient;
     use std::time::Duration;
 
-    println!("Polling engine started");
+    if verbose {
+        println!("Polling engine started");
+    }
     const OFFLINE_GRACE_INTERVALS: i64 = 3;
 
     loop {
@@ -5683,13 +6036,16 @@ fn run_polling_loop(
                             "offline"
                         }
                     };
-                    println!("polling: {} ({}) -> {}", device.name, device.ip, status);
+                    if verbose {
+                        println!("polling: {} ({}) -> {}", device.name, device.ip, status);
+                    }
 
                     let mut result = PollResult {
                         ip: device.ip.clone(),
                         name: device.name.clone(),
                         community: device.community.clone(),
                         device_id,
+                        previous_status: device.status.clone(),
                         status: status.to_string(),
                         metrics: None,
                         samples: vec![],
@@ -5712,10 +6068,12 @@ fn run_polling_loop(
                         let indexes = client
                             .discover_interface_indexes(&dev_config)
                             .unwrap_or_else(|_| vec![1, 2, 3]);
-                        println!(
-                            "polling: {} ({}) if_indexes={:?}",
-                            device.name, device.ip, indexes
-                        );
+                        if verbose {
+                            println!(
+                                "polling: {} ({}) if_indexes={:?}",
+                                device.name, device.ip, indexes
+                            );
+                        }
                         for if_index in indexes.iter() {
                             match client.query_interface(&dev_config, *if_index, None) {
                                 Ok(iface) => {
@@ -5745,10 +6103,12 @@ fn run_polling_loop(
                                     });
                                 }
                                 Err(e) => {
-                                    eprintln!(
-                                        "polling: query_interface failed {} if_index={}: {}",
-                                        device.ip, if_index, e
-                                    );
+                                    if verbose {
+                                        eprintln!(
+                                            "polling: query_interface failed {} if_index={}: {}",
+                                            device.ip, if_index, e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -5768,6 +6128,24 @@ fn run_polling_loop(
             if let Ok(r) = repo.lock() {
                 let _ = r.update_device_status(&result.ip, &result.status);
 
+                let dev_config = DeviceConfig {
+                    id: Some(result.device_id),
+                    name: result.name.clone(),
+                    ip: result.ip.clone(),
+                    community: result.community.clone(),
+                    device_type: "network".to_string(),
+                    status: result.status.clone(),
+                    last_seen_at: None,
+                };
+
+                // ダウン継続中に毎周期通知しないよう、遷移した瞬間だけ配信する。
+                if result.status == "offline" && result.previous_status != "offline" {
+                    alerts.publish(crate::alert::AlertEvent::device_offline(
+                        &dev_config,
+                        "SNMP probe failed",
+                    ));
+                }
+
                 if let Some(metrics) = result.metrics {
                     let _ = r.save_device_metrics(&metrics);
                 }
@@ -5785,15 +6163,6 @@ fn run_polling_loop(
                         );
                     }
                     let _ = r.save_sample(&sample);
-                    let dev_config = DeviceConfig {
-                        id: Some(result.device_id),
-                        name: result.name.clone(),
-                        ip: result.ip.clone(),
-                        community: result.community.clone(),
-                        device_type: "network".to_string(),
-                        status: result.status.clone(),
-                        last_seen_at: None,
-                    };
                     publish_predictive_alerts(&alerts, &dev_config, &sample, &*r);
                 }
 
@@ -5801,18 +6170,20 @@ fn run_polling_loop(
                 match r.check_interface_spikes(result.device_id, spike_threshold) {
                     Ok(spikes) => {
                         for spike in spikes {
-                            println!(
-                                "polling: SPIKE on {} ({}) {} (if-{}) total_delta={} in_errors={} out_errors={} in_discards={} out_discards={}",
-                                result.name,
-                                result.ip,
-                                spike.if_name,
-                                spike.if_index,
-                                spike.total_delta,
-                                spike.in_errors_delta,
-                                spike.out_errors_delta,
-                                spike.in_discards_delta,
-                                spike.out_discards_delta
-                            );
+                            if verbose {
+                                println!(
+                                    "polling: SPIKE on {} ({}) {} (if-{}) total_delta={} in_errors={} out_errors={} in_discards={} out_discards={}",
+                                    result.name,
+                                    result.ip,
+                                    spike.if_name,
+                                    spike.if_index,
+                                    spike.total_delta,
+                                    spike.in_errors_delta,
+                                    spike.out_errors_delta,
+                                    spike.in_discards_delta,
+                                    spike.out_discards_delta
+                                );
+                            }
                             let alert = AlertEvent {
                                 id: None,
                                 device_id: result.device_id,
@@ -5832,9 +6203,18 @@ fn run_polling_loop(
                                 created_at: None,
                             };
                             let _ = r.save_alert(&alert);
+                            alerts.publish(crate::alert::AlertEvent::from_interface_spike(
+                                &dev_config,
+                                &spike,
+                                spike_threshold,
+                            ));
                         }
                     }
-                    Err(e) => eprintln!("spike check failed for {}: {}", result.ip, e),
+                    Err(e) => {
+                        if verbose {
+                            eprintln!("spike check failed for {}: {}", result.ip, e);
+                        }
+                    }
                 }
             }
         }
@@ -5847,6 +6227,7 @@ struct PollResult {
     name: String,
     community: String,
     device_id: i64,
+    previous_status: String,
     status: String,
     metrics: Option<crate::db::models::DeviceMetrics>,
     samples: Vec<crate::db::models::InterfaceSample>,
@@ -5911,6 +6292,7 @@ impl PollResult {
             name: String::new(),
             community: "public".to_string(),
             device_id: 0,
+            previous_status: "offline".to_string(),
             status: "offline".to_string(),
             metrics: None,
             samples: vec![],
@@ -5924,13 +6306,45 @@ mod tests {
         CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebEdition, WebTopologyEdge,
         WebTopologyInterface, WebTopologyReport, annotate_edge_health,
         classify_interface_diagnostic, effective_interface_link_status, evaluate_port_health,
-        merge_duplicate_edges, page_discovery, parse_cdp_edges,
+        merge_duplicate_edges, page_discovery, parse_cdp_edges, persist_config,
     };
+      use crate::config::AppConfig;
     use crate::db::models::InterfacePortDelta;
     use crate::db::repository::Repository;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn persist_config_preserves_unmanaged_toml_keys() {
+      let path = std::env::temp_dir().join(format!(
+        "tracepulse-config-merge-{}.toml",
+        std::process::id()
+      ));
+      std::fs::write(
+        &path,
+        "[polling]\ninterval_seconds = 10\ncustom_polling_key = true\n\n[notifier]\nendpoint = 'https://example.invalid'\n",
+      )
+      .expect("test config should be written");
+
+      let mut config = AppConfig::default();
+      config.polling.interval_seconds = 45;
+      persist_config(&config, &path).expect("config should be persisted");
+
+      let content = std::fs::read_to_string(&path).expect("test config should be readable");
+      let root: toml::Table = content.parse().expect("persisted config should be valid TOML");
+      let polling = root["polling"].as_table().expect("polling should be a table");
+      let notifier = root["notifier"].as_table().expect("notifier should be preserved");
+
+      assert_eq!(polling["interval_seconds"].as_integer(), Some(45));
+      assert_eq!(polling["custom_polling_key"].as_bool(), Some(true));
+      assert_eq!(
+        notifier["endpoint"].as_str(),
+        Some("https://example.invalid")
+      );
+
+      let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn offline_device_forces_interface_status_down() {

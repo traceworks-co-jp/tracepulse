@@ -1,0 +1,56 @@
+name = "HPE / HP Enterprise & Comware"
+enterprise_id = 11
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.11.2.14.11.5.1.9.6.1.0",   # STATISTICS-MIB::hpSwitchCpuStat.0 (ProCurve / Provision)
+    "1.3.6.1.4.1.25506.2.6.1.1.1.1.6",     # HH3C-ENTITY-EXT-MIB::hh3cEntityExtCpuUsage (Comware / H3C)
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.11.2.14.11.5.1.1.2.1.1.1.5" # NETSWITCH-MIB::hpLocalMemTotalBytes
+used_prefix  = "1.3.6.1.4.1.11.2.14.11.5.1.1.2.1.1.1.7" # NETSWITCH-MIB::hpLocalMemAllocBytes
+util_prefix  = "1.3.6.1.4.1.25506.2.6.1.1.1.1.8"        # HH3C-ENTITY-EXT-MIB::hh3cEntityExtMemUsage (Comware direct %)
+
+# -------------------------------------------------------------
+# 1. 温度センサー
+# -------------------------------------------------------------
+# パターン1: HP ProCurve / Provision (HP-ICF-CHASSIS & ENTITY-SENSORS-MIB)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.11.2.14.11.1.2.6.1.7" # hpicfSensorDescr
+value_prefix = "1.3.6.1.2.1.99.1.1.1.4"          # ENTITY-SENSORS-MIB::entPhySensorValue
+state_prefix = "1.3.6.1.4.1.11.2.14.11.1.2.6.1.4" # hpicfSensorStatus (4: good, 2: bad, 3: warning)
+
+# パターン2: HP Comware / H3C (HH3C-ENTITY-EXT-MIB)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.7"        # ENTITY-MIB::entPhysicalName
+value_prefix = "1.3.6.1.4.1.25506.2.6.1.1.1.1.12" # hh3cEntityExtTemperature (°C)
+
+# -------------------------------------------------------------
+# 2. ファン
+# -------------------------------------------------------------
+# パターン1: HP ProCurve / Provision (HP-ICF-CHASSIS: hpicfSensorObjectId ...8.3.2)
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.11.2.14.11.1.2.6.1.7" # hpicfSensorDescr
+state_prefix = "1.3.6.1.4.1.11.2.14.11.1.2.6.1.4" # hpicfSensorStatus (4: good)
+
+# パターン2: HP Comware / H3C (HH3C-ENTITY-EXT-MIB: PhysicalClass = 7)
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.7"        # ENTITY-MIB::entPhysicalName
+state_prefix = "1.3.6.1.4.1.25506.2.6.1.1.1.1.19" # hh3cEntityExtErrorStatus (2: normal, 41: fanError)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット
+# -------------------------------------------------------------
+# パターン1: HP ProCurve / Provision (HP-ICF-CHASSIS: hpicfSensorObjectId ...8.3.1)
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.11.2.14.11.1.2.6.1.7" # hpicfSensorDescr
+state_prefix = "1.3.6.1.4.1.11.2.14.11.1.2.6.1.4" # hpicfSensorStatus (4: good)
+fallback_builtin_power = false
+
+# パターン2: HP Comware / H3C (HH3C-ENTITY-EXT-MIB: PhysicalClass = 6)
+[[sensors.power]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.7"        # ENTITY-MIB::entPhysicalName
+state_prefix = "1.3.6.1.4.1.25506.2.6.1.1.1.1.19" # hh3cEntityExtErrorStatus (2: normal, 51: psuError, 61: rpsError)
+fallback_builtin_power = false

@@ -1,0 +1,35 @@
+name = "Check Point NGFW"
+enterprise_id = 2620
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.2620.1.6.7.2.4.0", # CHECKPOINT-MIB::procUsage.0 (全コア平均)
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.2620.1.6.7.4.3.0" # CHECKPOINT-MIB::memTotalReal.0
+free_prefix  = "1.3.6.1.4.1.2620.1.6.7.4.5.0" # CHECKPOINT-MIB::memFreeReal.0
+
+# -------------------------------------------------------------
+# 1. 温度センサー (CHECKPOINT-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.2620.1.6.7.8.1.1.2" # tempertureSensorName
+value_prefix = "1.3.6.1.4.1.2620.1.6.7.8.1.1.3" # tempertureSensorValue (°C)
+
+# -------------------------------------------------------------
+# 2. ファン (CHECKPOINT-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.2620.1.6.7.8.2.1.2" # fanSpeedSensorName
+state_prefix = "1.3.6.1.4.1.2620.1.6.7.8.2.1.6" # fanSpeedSensorStatus (0: Ok, 1: Out of range, 2: Reading error)
+speed_prefix = "1.3.6.1.4.1.2620.1.6.7.8.2.1.3" # fanSpeedSensorValue (RPM)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (CHECKPOINT-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.2620.1.6.7.9.1.1.1" # powerSupplyName
+state_prefix = "1.3.6.1.4.1.2620.1.6.7.9.1.1.2" # powerSupplyStatus ("Up", "Down", "Unknown")
+fallback_builtin_power = false

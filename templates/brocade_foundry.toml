@@ -1,0 +1,58 @@
+name = "Brocade Foundry / ICX"
+enterprise_id = 1991
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.1991.1.1.2.1.52.0", # FOUNDRY-SN-AGENT-MIB::snAgGblCpuUtil1MinAvg.0
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.1991.1.1.2.1.53.0" # FOUNDRY-SN-AGENT-MIB::snAgGblDynMemUtil.0 (直接パーセンテージ取得)
+
+# -------------------------------------------------------------
+# 1. 温度センサー (FOUNDRY-SN-AGENT-MIB)
+# ※ 取得値は 0.5℃ 単位のため、ポーリングエンジン側で ×0.5 の乗算が必要
+# -------------------------------------------------------------
+# パターン1: スタック対応テーブル (snAgentTemp2Table)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.2.13.3.1.4" # snAgentTemp2Descr
+value_prefix = "1.3.6.1.4.1.1991.1.1.2.13.3.1.5" # snAgentTemp2Value
+
+# パターン2: 単体（従来型）テーブル (snAgentTempTable)
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.2.13.1.1.3" # snAgentTempDescr
+value_prefix = "1.3.6.1.4.1.1991.1.1.2.13.1.1.4" # snAgentTempValue
+
+# パターン3: シャーシ直下温度
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.1.1.18" # snChasActualTemperature
+value_prefix = "1.3.6.1.4.1.1991.1.1.1.1.18"
+
+# -------------------------------------------------------------
+# 2. ファン (FOUNDRY-SN-AGENT-MIB)
+# -------------------------------------------------------------
+# パターン1: スタック対応テーブル (snChasFan2Table)
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.1.3.2.1.2" # snChasFan2Index
+state_prefix = "1.3.6.1.4.1.1991.1.1.1.3.2.1.4" # snChasFan2OperStatus (2: normal, 3: failure)
+
+# パターン2: 単体（従来型）テーブル (snChasFanTable)
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.1.3.1.1.1" # snChasFanIndex
+state_prefix = "1.3.6.1.4.1.1991.1.1.1.3.1.1.3" # snChasFanOperStatus (2: normal, 3: failure)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (FOUNDRY-SN-AGENT-MIB)
+# -------------------------------------------------------------
+# パターン1: スタック対応テーブル (snChasPwrSupply2Table)
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.1.2.2.1.2" # snChasPwrSupply2Index
+state_prefix = "1.3.6.1.4.1.1991.1.1.1.2.2.1.4" # snChasPwrSupply2OperStatus (2: normal, 3: failure)
+fallback_builtin_power = false
+
+# パターン2: 単体（従来型）テーブル (snChasPwrSupplyTable)
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.1991.1.1.1.2.1.1.1" # snChasPwrSupplyIndex
+state_prefix = "1.3.6.1.4.1.1991.1.1.1.2.1.1.3" # snChasPwrSupplyOperStatus (2: normal, 3: failure)
+fallback_builtin_power = false

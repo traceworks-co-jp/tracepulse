@@ -3,12 +3,15 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{BarChart, Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState},
+    widgets::{
+        BarChart, Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap,
+    },
 };
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -22,6 +25,7 @@ use crate::db::repository::Repository;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::monitor::{PollingEngine, calculate_bandwidth_utilization_from_delta};
+use crate::notifications::{NotificationSettingsProvider, NotificationStatus};
 use crate::snmp::client::SnmpClient;
 
 pub struct TuiRenderer {
@@ -182,12 +186,29 @@ pub struct PollTask {
     pub finished: Arc<AtomicBool>,
 }
 
+#[derive(Clone)]
+pub struct NotificationTestTask {
+    pub channel: String,
+    pub finished: Arc<AtomicBool>,
+    pub result: Arc<Mutex<Option<Result<String, String>>>>,
+}
+
+/// [n] キーで開く通知設定の確認・テスト送信ポップアップの状態。編集は Web GUI / config.toml 側で行う。
+pub struct NotificationStatusState {
+    pub status: NotificationStatus,
+    pub selected: usize,
+    pub test: Option<NotificationTestTask>,
+    pub message: Option<String>,
+    pub message_is_error: bool,
+}
+
 pub enum TuiMode {
     Normal,
     DiscoveryModal(DiscoveryModalState),
     Scanning(ScanTask),
     Polling(PollTask),
     PortErrorBreakdown(PortErrorBreakdownState),
+    Notifications(NotificationStatusState),
 }
 
 pub struct DeviceSummary {
@@ -220,6 +241,28 @@ pub fn effective_interface_link_status(device_status: &str, sample_link_status: 
         "down".to_string()
     } else {
         sample_link_status.to_string()
+    }
+}
+
+fn format_tui_timestamp(value: &str, timezone: &str) -> String {
+    let utc = DateTime::parse_from_rfc3339(value)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                .map(|timestamp| Utc.from_utc_datetime(&timestamp))
+        });
+
+    match utc {
+        Ok(timestamp) if timezone.eq_ignore_ascii_case("jst") => FixedOffset::east_opt(9 * 3600)
+            .map(|offset| {
+                timestamp
+                    .with_timezone(&offset)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+            .unwrap_or_else(|| value.to_string()),
+        Ok(timestamp) => timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+        Err(_) => value.to_string(),
     }
 }
 
@@ -311,6 +354,30 @@ fn start_scan(cidr: &str, community: &str) -> Result<ScanTask, AppError> {
     Ok(task)
 }
 
+fn start_notification_test(
+    provider: Arc<dyn NotificationSettingsProvider>,
+    channel: String,
+) -> NotificationTestTask {
+    let finished = Arc::new(AtomicBool::new(false));
+    let result = Arc::new(Mutex::new(None));
+
+    let task = NotificationTestTask {
+        channel: channel.clone(),
+        finished: Arc::clone(&finished),
+        result: Arc::clone(&result),
+    };
+
+    std::thread::spawn(move || {
+        let outcome = provider.send_test(&channel);
+        if let Ok(mut slot) = result.lock() {
+            *slot = Some(outcome);
+        }
+        finished.store(true, Ordering::SeqCst);
+    });
+
+    task
+}
+
 fn start_poll_task(
     runner_config: crate::config::AppConfig,
     broadcaster: crate::alert::broadcaster::AlertBroadcaster,
@@ -334,6 +401,7 @@ fn start_poll_task(
     std::thread::spawn(move || {
         if total > 0 {
             let engine = PollingEngine::with_broadcaster(runner_config, repository, broadcaster);
+            let reachability_client = SnmpClient::new(engine.config.snmp.default_community.clone());
 
             for dev in db_devices {
                 let cfg = DeviceConfig {
@@ -350,7 +418,20 @@ fn start_poll_task(
                     last_seen_at: dev.last_seen_at.clone(),
                 };
 
+                if reachability_client
+                    .probe_device_once(&cfg, Duration::from_millis(600))
+                    .is_err()
+                {
+                    let _ = engine.repository.update_device_status(&cfg.ip, "offline");
+                    if !dev.status.eq_ignore_ascii_case("offline") {
+                        engine.publish_alert(AlertEvent::device_offline(&cfg, "SNMP timeout"));
+                    }
+                    polled.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+
                 if let Ok((system, interfaces)) = engine.poll_device(&cfg) {
+                    let _ = engine.repository.update_device_status(&cfg.ip, "online");
                     if let Some(device_id) = dev.id {
                         let now = chrono::Utc::now().to_rfc3339();
                         let metrics = DeviceMetrics {
@@ -416,6 +497,8 @@ impl TuiRenderer {
         execute!(stdout, EnterAlternateScreen).map_err(|e| AppError::Io(e.to_string()))?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).map_err(|e| AppError::Io(e.to_string()))?;
+        // レイアウトの margin により端の行・列は描画されないため、切替前の画面の残骸を消す。
+        terminal.clear().map_err(|e| AppError::Io(e.to_string()))?;
 
         let res = self.run_app(&mut terminal);
 
@@ -445,6 +528,24 @@ impl TuiRenderer {
                 .map_err(|e| AppError::Database(e.to_string()))?,
         );
 
+        // TUI モードでも定期監視とアラート配信を行う（Web モードと同じポーリングループ）。
+        {
+            let polling_config = Arc::new(Mutex::new(self.runner.config.clone()));
+            let polling_repository = Arc::new(Mutex::new(Repository::new(
+                rusqlite::Connection::open(crate::exe_dir().join("data.db"))
+                    .map_err(|e| AppError::Database(e.to_string()))?,
+            )));
+            let polling_alerts = self.runner.alert_broadcaster();
+            std::thread::spawn(move || {
+                crate::web::server::run_polling_loop(
+                    polling_config,
+                    polling_repository,
+                    polling_alerts,
+                    false,
+                );
+            });
+        }
+
         let mut alert_rx = self.runner.subscribe_alerts();
         let mut devices = self.load_device_summaries(&repository)?;
         let mut alerts = repository.get_recent_alerts(50).unwrap_or_default();
@@ -470,7 +571,7 @@ impl TuiRenderer {
         let mut pane = Pane::Devices;
         let mut interface_idx: usize = 0;
         let mut status_msg = String::from(
-            "Ready. Press [↑/↓/j/k] Scroll | [Tab] Switch Pane (Devices/Interfaces) | [Enter] Breakdown | [r] Poll | [d] Discovery | [q] Quit",
+            "Ready. [↑/↓/j/k] Scroll | [Tab] Switch Pane (Devices/Interfaces) | [Enter] Breakdown\n[p] Protocol | [r] Poll | [d] Discovery | [q] Quit",
         );
 
         loop {
@@ -528,14 +629,40 @@ impl TuiRenderer {
                     alerts = repository.get_recent_alerts(50).unwrap_or_default();
 
                     status_msg = String::from(
-                        "Manual polling completed. Press [↑/↓/j/k] Select | [r] Poll | [d] Discovery | [q] Quit",
+                        "Manual polling completed.\n[↑/↓/j/k] Select | [r] Poll | [d] Discovery | [q] Quit",
                     );
                     mode = TuiMode::Normal;
                 }
             }
+            // テスト通知の完了チェック
+            if let TuiMode::Notifications(ref mut state) = mode {
+                let finished = state
+                    .test
+                    .as_ref()
+                    .map(|task| task.finished.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                if finished {
+                    let outcome = state
+                        .test
+                        .as_ref()
+                        .and_then(|task| task.result.lock().ok().and_then(|mut slot| slot.take()));
+                    state.test = None;
+                    match outcome {
+                        Some(Ok(message)) => {
+                            state.message = Some(message);
+                            state.message_is_error = false;
+                        }
+                        Some(Err(err)) => {
+                            state.message = Some(err);
+                            state.message_is_error = true;
+                        }
+                        None => {}
+                    }
+                }
+            }
+
             // アラートのリアルタイム受信（非ブロッキング）
-            while let Ok(evt) = alert_rx.try_recv() {
-                alerts.insert(
+            while let Ok(evt) = alert_rx.try_recv() {                alerts.insert(
                     0,
                     RecentAlert {
                         id: None,
@@ -688,6 +815,10 @@ impl TuiRenderer {
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         };
+                        let talker_text = format!(
+                            "Note: values are estimates from received flows; sampling is not corrected.\n{}",
+                            talker_text
+                        );
                         let talker_area = Rect {
                             x: chunks[1].x + 2,
                             y: chunks[1].y + chunks[1].height.saturating_sub(8),
@@ -696,7 +827,7 @@ impl TuiRenderer {
                         };
                         f.render_widget(
                             Paragraph::new(talker_text)
-                                .block(Block::default().borders(Borders::ALL).title(" Top Talkers (Top 5) "))
+                                .block(Block::default().borders(Borders::ALL).title(" Top Talkers (Top 5, estimated) "))
                                 .style(Style::default().fg(Color::White)),
                             talker_area,
                         );
@@ -824,10 +955,10 @@ impl TuiRenderer {
                         let time_str = alert
                             .created_at
                             .as_deref()
-                            .unwrap_or("")
-                            .chars()
-                            .take(19)
-                            .collect::<String>();
+                            .map(|timestamp| {
+                                format_tui_timestamp(timestamp, &self.runner.config.display.timezone)
+                            })
+                            .unwrap_or_else(|| "-".to_string());
 
                         let dev_str = format!("{} ({})", alert.device_name, alert.device_ip);
 
@@ -862,6 +993,7 @@ impl TuiRenderer {
 
                     // 4. フッター / ステータスバー
                     let footer = Paragraph::new(status_msg.clone())
+                        .wrap(Wrap { trim: true })
                         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
                     f.render_widget(footer, chunks[3]);
 
@@ -1094,6 +1226,125 @@ impl TuiRenderer {
                                 .style(Style::default().fg(Color::DarkGray));
                             f.render_widget(hint_p, inner_layout[4]);
                         }
+                        TuiMode::Notifications(ref state) => {
+                            let popup_area = centered_rect(72, 55, f.area());
+                            f.render_widget(Clear, popup_area);
+
+                            let block = Block::default()
+                                .borders(Borders::ALL)
+                                .title(" Alert Notifications (view only - edit in Web GUI or config.toml) ")
+                                .style(Style::default().bg(Color::Reset));
+                            f.render_widget(block, popup_area);
+
+                            let inner_layout = Layout::default()
+                                .direction(Direction::Vertical)
+                                .margin(2)
+                                .constraints([
+                                    Constraint::Length(5), // Channel table
+                                    Constraint::Length(3), // Delivery settings
+                                    Constraint::Length(3), // Test result
+                                    Constraint::Min(1),    // Instruction
+                                ])
+                                .split(popup_area);
+
+                            let channel_header = Row::new(
+                                ["Channel", "Enabled", "Webhook (masked)", "Source"]
+                                    .iter()
+                                    .map(|h| {
+                                        Cell::from(*h).style(
+                                            Style::default()
+                                                .fg(Color::Cyan)
+                                                .add_modifier(Modifier::BOLD),
+                                        )
+                                    }),
+                            )
+                            .style(Style::default().bg(Color::DarkGray))
+                            .height(1);
+
+                            let channel_rows = state.status.channels.iter().map(|channel| {
+                                let (enabled_text, enabled_style) = if channel.enabled {
+                                    ("yes", Style::default().fg(Color::Green))
+                                } else {
+                                    ("no", Style::default().fg(Color::DarkGray))
+                                };
+                                Row::new(vec![
+                                    Cell::from(channel.name.clone()),
+                                    Cell::from(enabled_text).style(enabled_style),
+                                    Cell::from(channel.webhook.clone()),
+                                    Cell::from(channel.source.clone()),
+                                ])
+                                .height(1)
+                            });
+
+                            let channel_table = Table::new(
+                                channel_rows,
+                                [
+                                    Constraint::Percentage(14),
+                                    Constraint::Percentage(11),
+                                    Constraint::Percentage(43),
+                                    Constraint::Percentage(32),
+                                ],
+                            )
+                            .header(channel_header)
+                            .block(Block::default().borders(Borders::ALL).title(" Channels "))
+                            .highlight_style(
+                                Style::default()
+                                    .bg(Color::Blue)
+                                    .fg(Color::White)
+                                    .add_modifier(Modifier::BOLD),
+                            )
+                            .highlight_symbol("> ");
+
+                            let mut channel_state = TableState::default();
+                            if !state.status.channels.is_empty() {
+                                channel_state.select(Some(
+                                    state.selected.min(state.status.channels.len() - 1),
+                                ));
+                            }
+                            f.render_stateful_widget(
+                                channel_table,
+                                inner_layout[0],
+                                &mut channel_state,
+                            );
+
+                            let delivery_p = Paragraph::new(format!(
+                                "Flap guard window: {} s    Retry attempts: {}",
+                                state.status.flap_window_seconds, state.status.retry_max_attempts
+                            ))
+                            .block(Block::default().borders(Borders::ALL).title(" Delivery "))
+                            .style(Style::default().fg(Color::White));
+                            f.render_widget(delivery_p, inner_layout[1]);
+
+                            let (result_text, result_style) = if let Some(task) = &state.test {
+                                (
+                                    format!("Sending test notification to {}...", task.channel),
+                                    Style::default().fg(Color::Yellow),
+                                )
+                            } else if let Some(message) = &state.message {
+                                let style = if state.message_is_error {
+                                    Style::default().fg(Color::LightRed)
+                                } else {
+                                    Style::default().fg(Color::Green)
+                                };
+                                (message.clone(), style)
+                            } else {
+                                (
+                                    "No test sent yet.".to_string(),
+                                    Style::default().fg(Color::DarkGray),
+                                )
+                            };
+                            let result_p = Paragraph::new(result_text)
+                                .block(Block::default().borders(Borders::ALL).title(" Test Result "))
+                                .style(result_style);
+                            f.render_widget(result_p, inner_layout[2]);
+
+                            let hint_p = Paragraph::new(
+                                "[↑/↓/j/k] Select Channel | [t/Enter] Send Test\n[a] Test All Enabled | [Esc/n] Close",
+                            )
+                            .wrap(Wrap { trim: true })
+                            .style(Style::default().fg(Color::DarkGray));
+                            f.render_widget(hint_p, inner_layout[3]);
+                        }
                         TuiMode::Normal => {}
                     }
                 })
@@ -1146,6 +1397,22 @@ impl TuiRenderer {
                                         error_msg: None,
                                     });
                                 }
+                                KeyCode::Char('n') => match self.runner.notification_provider() {
+                                    Some(provider) => {
+                                        mode = TuiMode::Notifications(NotificationStatusState {
+                                            status: provider.status(),
+                                            selected: 0,
+                                            test: None,
+                                            message: None,
+                                            message_is_error: false,
+                                        });
+                                    }
+                                    None => {
+                                        status_msg = String::from(
+                                            "Alert notifications are available in the Enterprise edition.",
+                                        );
+                                    }
+                                },
                                 KeyCode::Up | KeyCode::Char('k') => match pane {
                                     Pane::Devices => {
                                         if selected_device_idx > 0 {
@@ -1242,6 +1509,43 @@ impl TuiRenderer {
                             TuiMode::PortErrorBreakdown(_) => match key.code {
                                 KeyCode::Esc | KeyCode::Enter => {
                                     mode = TuiMode::Normal;
+                                }
+                                _ => {}
+                            },
+                            TuiMode::Notifications(ref mut state) => match key.code {
+                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                                    mode = TuiMode::Normal;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    if state.selected > 0 {
+                                        state.selected -= 1;
+                                    }
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if state.selected + 1 < state.status.channels.len() {
+                                        state.selected += 1;
+                                    }
+                                }
+                                KeyCode::Char('t') | KeyCode::Enter | KeyCode::Char('a')
+                                    if state.test.is_none() =>
+                                {
+                                    let target = if key.code == KeyCode::Char('a') {
+                                        Some("all".to_string())
+                                    } else {
+                                        state
+                                            .status
+                                            .channels
+                                            .get(state.selected)
+                                            .map(|channel| channel.key.clone())
+                                    };
+
+                                    if let (Some(target), Some(provider)) =
+                                        (target, self.runner.notification_provider())
+                                    {
+                                        state.message = None;
+                                        state.test =
+                                            Some(start_notification_test(provider, target));
+                                    }
                                 }
                                 _ => {}
                             },
@@ -1428,6 +1732,20 @@ mod tests {
         assert_eq!(effective_interface_link_status("offline", "UP"), "down");
         assert_eq!(effective_interface_link_status("offline", "1"), "down");
         assert_eq!(effective_interface_link_status("OFFLINE", "UP"), "down");
+    }
+
+    #[test]
+    fn formats_alert_timestamps_in_configured_timezone() {
+        let timestamp = "2026-09-07T10:42:18+00:00";
+
+        assert_eq!(
+            format_tui_timestamp(timestamp, "utc"),
+            "2026-09-07 10:42:18"
+        );
+        assert_eq!(
+            format_tui_timestamp(timestamp, "jst"),
+            "2026-09-07 19:42:18"
+        );
     }
 
     #[test]

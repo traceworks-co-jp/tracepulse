@@ -1,0 +1,41 @@
+name = "F5 BIG-IP"
+enterprise_id = 3375
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.3375.2.1.7.5.2.1.35", # sysMultiHostCpuUsageratio5m (5分平均)
+    "1.3.6.1.4.1.3375.2.1.7.5.2.1.27", # sysMultiHostCpuUsageratio1m (1分平均)
+    "1.3.6.1.4.1.3375.2.1.7.5.2.1.19", # sysMultiHostCpuUsageratio5s (5秒平均)
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.4.1.3375.2.1.7.4.2.1.2" # sysHostStatTotalMemory
+used_prefix  = "1.3.6.1.4.1.3375.2.1.7.4.2.1.3" # sysHostStatUsedMemory
+
+# -------------------------------------------------------------
+# 1. シャーシ / ブレード 温度センサー (F5-BIGIP-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.3375.2.1.3.2.3.2.1.1" # sysChassisTempIndex
+value_prefix = "1.3.6.1.4.1.3375.2.1.3.2.3.2.1.2" # sysChassisTempTemperature
+
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.3375.2.1.3.2.4.2.1.3" # sysBladeTempLocation
+value_prefix = "1.3.6.1.4.1.3375.2.1.3.2.4.2.1.2" # sysBladeTempTemperature
+
+# -------------------------------------------------------------
+# 2. シャーシ ファン (F5-BIGIP-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.3375.2.1.3.2.1.2.1.1" # sysChassisFanIndex
+state_prefix = "1.3.6.1.4.1.3375.2.1.3.2.1.2.1.2" # sysChassisFanStatus (0:bad, 1:good, 2:notpresent)
+speed_prefix = "1.3.6.1.4.1.3375.2.1.3.2.1.2.1.3" # sysChassisFanSpeed (RPM)
+
+# -------------------------------------------------------------
+# 3. シャーシ 電源ユニット (F5-BIGIP-SYSTEM-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.3375.2.1.3.2.2.2.1.1" # sysChassisPowerSupplyIndex
+state_prefix = "1.3.6.1.4.1.3375.2.1.3.2.2.2.1.2" # sysChassisPowerSupplyStatus (0:bad, 1:good, 2:notpresent)
+fallback_builtin_power = false

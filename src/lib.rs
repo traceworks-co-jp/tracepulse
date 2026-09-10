@@ -8,6 +8,7 @@ pub mod device;
 pub mod error;
 pub mod flow;
 pub mod monitor;
+pub mod notifications;
 pub mod snmp;
 pub mod tests;
 pub mod ui;

@@ -1,0 +1,37 @@
+name = "Mellanox Spectrum / Onyx"
+enterprise_id = 33049
+
+[cpu]
+candidates = [
+    "1.3.6.1.2.1.25.3.3.1.2", # HOST-RESOURCES-MIB::hrProcessorLoad
+]
+
+[memory]
+mode = "calculated"
+total_prefix = "1.3.6.1.2.1.25.2.3.1.5" # HOST-RESOURCES-MIB::hrStorageSize
+used_prefix  = "1.3.6.1.2.1.25.2.3.1.6" # HOST-RESOURCES-MIB::hrStorageUsed
+
+# -------------------------------------------------------------
+# 1. 温度センサー (ENTITY-SENSORS-MIB)
+# ※ 取得値の precision=1 のため、0.1 の乗算を行って °C に換算
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.2" # ENTITY-MIB::entPhysicalDescr
+value_prefix = "1.3.6.1.2.1.99.1.1.1.4"   # ENTITY-SENSORS-MIB::entPhySensorValue
+state_prefix = "1.3.6.1.2.1.99.1.1.1.5"   # ENTITY-SENSORS-MIB::entPhySensorOperStatus (1: ok, 2: unavailable, 3: nonoperational)
+
+# -------------------------------------------------------------
+# 2. ファン (ENTITY-SENSORS-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.2" # ENTITY-MIB::entPhysicalDescr
+state_prefix = "1.3.6.1.2.1.99.1.1.1.5"   # ENTITY-SENSORS-MIB::entPhySensorOperStatus
+speed_prefix = "1.3.6.1.2.1.99.1.1.1.4"   # ENTITY-SENSORS-MIB::entPhySensorValue (RPM)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (ENTITY-STATE-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.7"  # ENTITY-MIB::entPhysicalName
+state_prefix = "1.3.6.1.2.1.131.1.1.1.3"  # ENTITY-STATE-MIB::entStateOper (2: disabled, 3: enabled)
+fallback_builtin_power = false

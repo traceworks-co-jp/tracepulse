@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>TracePulse - Third Party Licenses</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #eee;
+        }
+
+        h1 {
+            border-bottom: 2px solid #444;
+            padding-bottom: 10px;
+        }
+
+        .license {
+            background: #2a2a2a;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 5px;
+        }
+
+        pre {
+            background: #111;
+            padding: 10px;
+            overflow-x: auto;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>TracePulse Third-Party Licenses</h1>
+    <p>This software utilizes the following open-source libraries:</p>
+    {{#each licenses}}
+    <div class="license">
+        <h2>{{name}}</h2>
+        <p>Used by:
+        <ul>
+            {{#each used_by}}
+            <li><strong>{{crate.name}}</strong> {{crate.version}}</li>
+            {{/each}}
+        </ul>
+        </p>
+        <pre>{{text}}</pre>
+    </div>
+    {{/each}}
+</body>
+
+</html>

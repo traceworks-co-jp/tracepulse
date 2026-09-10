@@ -1,0 +1,37 @@
+name = "Aruba CX"
+enterprise_id = 47196
+
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.47196.4.1.1.3.22.1.0.1.1.11", # arubaWiredSystemInfoCpuAvgFiveMin (5分平均)
+    "1.3.6.1.4.1.47196.4.1.1.3.22.1.0.1.1.10", # arubaWiredSystemInfoCpuAvgOneMin (1分平均)
+    "1.3.6.1.4.1.47196.4.1.1.3.22.1.0.1.1.3",  # arubaWiredSystemInfoCpu (瞬間値)
+]
+
+[memory]
+mode = "direct"
+util_prefix = "1.3.6.1.4.1.47196.4.1.1.3.22.1.0.1.1.4" # arubaWiredSystemInfoMemory (直接パーセンテージ取得)
+
+# -------------------------------------------------------------
+# 1. 温度センサー (ARUBAWIRED-TEMPSENSOR-MIB)
+# -------------------------------------------------------------
+[[sensors.temperature]]
+descr_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.3.1.1.5" # センサー名 Index
+value_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.3.1.1.7" # arubaWiredTempSensorTemperature (ミリ度表示: ×0.001)
+state_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.3.1.1.6" # arubaWiredTempSensorState ("normal")
+
+# -------------------------------------------------------------
+# 2. ファン (ARUBAWIRED-FAN-MIB)
+# -------------------------------------------------------------
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.5.1.1.4"  # ファン名 Index
+state_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.5.1.1.10" # arubaWiredFanStateEnum (4: Ok)
+speed_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.5.1.1.8"  # arubaWiredFanRPM (RPM)
+
+# -------------------------------------------------------------
+# 3. 電源ユニット (ARUBAWIRED-POWERSUPPLY-MIB)
+# -------------------------------------------------------------
+[[sensors.power]]
+descr_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.2.1.1.3"  # PSU名 Index
+state_prefix = "1.3.6.1.4.1.47196.4.1.1.3.11.2.1.1.11" # arubaWiredPSUStateEnum (1: Ok)
+fallback_builtin_power = false
