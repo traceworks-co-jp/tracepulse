@@ -1,17 +1,16 @@
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{
-        BarChart, Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap,
-    },
+    text::{Line, Text},
+    widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap},
 };
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -20,7 +19,7 @@ use std::time::Duration;
 
 use crate::alert::event::AlertEvent;
 use crate::app::AppRunner;
-use crate::db::models::{Device, DeviceMetrics, InterfacePortDelta, RecentAlert};
+use crate::db::models::{Device, DeviceMetrics, InterfacePortDelta, RecentAlert, TopTalker};
 use crate::db::repository::Repository;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
@@ -38,6 +37,39 @@ pub enum Pane {
     Devices,
     Interfaces,
     Protocol,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProtocolSort {
+    Bps,
+    Pps,
+    Bytes,
+}
+
+impl ProtocolSort {
+    fn next(self) -> Self {
+        match self {
+            Self::Bps => Self::Pps,
+            Self::Pps => Self::Bytes,
+            Self::Bytes => Self::Bps,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Bps => "Bps",
+            Self::Pps => "PPS",
+            Self::Bytes => "Bytes",
+        }
+    }
+
+    fn query_key(self) -> &'static str {
+        match self {
+            Self::Bps => "bps",
+            Self::Pps => "pps",
+            Self::Bytes => "bytes",
+        }
+    }
 }
 
 /// [Enter] キーで開く破損パケット内訳（EtherLike-MIB Error Breakdown）ポップアップの状態
@@ -204,6 +236,8 @@ pub struct NotificationStatusState {
 
 pub enum TuiMode {
     Normal,
+    FilterInput(String),
+    FlowInspector(TopTalker),
     DiscoveryModal(DiscoveryModalState),
     Scanning(ScanTask),
     Polling(PollTask),
@@ -264,6 +298,171 @@ fn format_tui_timestamp(value: &str, timezone: &str) -> String {
         Ok(timestamp) => timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
         Err(_) => value.to_string(),
     }
+}
+
+fn format_tui_rate(value: f64) -> String {
+    if value >= 1_000_000.0 {
+        format!("{:.1}M", value / 1_000_000.0)
+    } else if value >= 1_000.0 {
+        format!("{:.1}K", value / 1_000.0)
+    } else {
+        format!("{:.0}b", value)
+    }
+}
+
+fn format_tui_bytes(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        format!("{}B", value)
+    }
+}
+
+fn tui_progress_bar(percentage: f64, width: usize) -> String {
+    let filled = ((percentage.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    format!(
+        "{}{}",
+        "#".repeat(filled),
+        ".".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn format_tui_flags(flags: u8) -> String {
+    let mut names = Vec::new();
+    if flags & 0x02 != 0 {
+        names.push("S");
+    }
+    if flags & 0x10 != 0 {
+        names.push("A");
+    }
+    if flags & 0x01 != 0 {
+        names.push("F");
+    }
+    if flags & 0x04 != 0 {
+        names.push("R");
+    }
+    if flags & 0x08 != 0 {
+        names.push("P");
+    }
+    if flags & 0x20 != 0 {
+        names.push("U");
+    }
+    if names.is_empty() {
+        "-".to_string()
+    } else {
+        names.join(",")
+    }
+}
+
+fn truncate_tui(value: &str, width: usize) -> String {
+    let mut result: String = value.chars().take(width).collect();
+    if value.chars().count() > width && width >= 2 {
+        result.truncate(width - 1);
+        result.push('~');
+    }
+    format!("{result:<width$}")
+}
+
+fn flow_header_line() -> String {
+    format!(
+        "{:<20}{:<4}{:<22}{:<7}{:>9}{:>9}{:>7}{:<8}{:<20}",
+        "SOURCE IP:PORT",
+        "->",
+        "DESTINATION IP:PORT",
+        "PROTO",
+        "BYTES",
+        "BPS",
+        "PPS",
+        "FLAGS",
+        "IN/OUT IF"
+    )
+}
+
+fn flow_row_line(talker: &TopTalker, selected: bool) -> String {
+    let source = format!(
+        "{}{}",
+        if selected { ">" } else { " " },
+        truncate_tui(&format!("{}:{}", talker.source_ip, talker.source_port), 19).trim_end()
+    );
+    let destination = truncate_tui(
+        &format!("{}:{}", talker.destination_ip, talker.destination_port),
+        22,
+    )
+    .trim_end()
+    .to_string();
+    let ingress = talker
+        .ingress_if_name
+        .clone()
+        .or_else(|| talker.ingress_if_index.map(|value| format!("if-{value}")))
+        .unwrap_or_else(|| "-".to_string());
+    let egress = talker
+        .egress_if_name
+        .clone()
+        .or_else(|| talker.egress_if_index.map(|value| format!("if-{value}")))
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "{:<20}{:<4}{:<22}{:<7}{:>9}{:>9}{:>7}{:<8}{:<20}",
+        source,
+        "->",
+        destination,
+        talker.protocol.chars().take(6).collect::<String>(),
+        format_tui_bytes(talker.bytes),
+        format_tui_rate(talker.bps as f64),
+        talker.pps,
+        format_tui_flags(talker.tcp_flags),
+        format!("{}/{}", ingress, egress)
+            .chars()
+            .take(20)
+            .collect::<String>(),
+    )
+}
+
+fn protocol_app_header_line() -> String {
+    format!("{:<36}│ {}", "Top Protocols", "Top Applications")
+}
+
+fn protocol_app_row_line(protocol: &str, application: &str) -> String {
+    format!("{:<36}│ {}", protocol, application)
+}
+
+fn tui_filter_matches(filter: &str, values: &[&str]) -> bool {
+    let needle = filter.trim().to_lowercase();
+    needle.is_empty()
+        || values
+            .iter()
+            .any(|value| value.to_lowercase().contains(&needle))
+}
+
+fn tui_text(language: &str, key: &str) -> &'static str {
+    if language.eq_ignore_ascii_case("ja") {
+        match key {
+            "device_list" => "デバイス一覧",
+            "interface_topology" => "インターフェース / トポロジー",
+            "protocol_traffic" => "プロトコルとトラフィック",
+            "alert_stream" => "アラートストリーム",
+            "top_talkers" => "上位通信フロー",
+            "no_flows" => "フローデータをまだ受信していません。",
+            "corrected_note" => "インジェスト時のサンプリング率補正済みです。",
+            _ => "TracePulse",
+        }
+    } else {
+        match key {
+            "device_list" => "Device List",
+            "interface_topology" => "Interface & Topology",
+            "protocol_traffic" => "Protocol & Traffic View",
+            "alert_stream" => "Alert Stream",
+            "top_talkers" => "Top Talkers",
+            "no_flows" => "No flow records received yet.",
+            "corrected_note" => "Values corrected by ingest sampling rate.",
+            _ => "TracePulse",
+        }
+    }
+}
+
+fn tui_help_text() -> String {
+    "Ready. [↑/↓/j/k] Move | [Tab] Devices/Interfaces | [Enter] Details\n[p] Protocol | [c] Clear | [1/2/3] Window | [s] Sort | [Space] Pause\n[/] Filter | [r] Poll | [d] Discovery | [n] Notify | [q] Quit".to_string()
 }
 
 fn guess_local_cidr() -> String {
@@ -514,15 +713,17 @@ impl TuiRenderer {
         &self,
         terminal: &mut Terminal<B>,
     ) -> Result<(), AppError> {
-        let flow_repository = Repository::new(
-            rusqlite::Connection::open(crate::exe_dir().join("data.db"))
-                .map_err(|e| AppError::Database(e.to_string()))?,
-        );
-        let flow_repository = Arc::new(Mutex::new(flow_repository));
-        crate::flow::FlowCollector::start(
-            Arc::clone(&flow_repository),
-            crate::flow::FlowCollectorConfig::default(),
-        );
+        if self.runner.flow_repository().is_none() {
+            let repository = Repository::new(
+                rusqlite::Connection::open(crate::exe_dir().join("data.db"))
+                    .expect("SQLite flow repository should open"),
+            );
+            let repository = Arc::new(Mutex::new(repository));
+            crate::flow::FlowCollector::start(
+                Arc::clone(&repository),
+                crate::flow::FlowCollectorConfig::from_app_config(&self.runner.config),
+            );
+        }
         let repository = Repository::new(
             rusqlite::Connection::open(crate::exe_dir().join("data.db"))
                 .map_err(|e| AppError::Database(e.to_string()))?,
@@ -569,10 +770,16 @@ impl TuiRenderer {
 
         let mut mode = TuiMode::Normal;
         let mut pane = Pane::Devices;
+        let mut protocol_filter: Option<i32> = None;
+        let mut protocol_window = 60_i64;
+        let mut protocol_sort = ProtocolSort::Bps;
+        let mut filter_query = String::new();
+        let mut protocol_talker_idx = 0_usize;
+        let tui_language = self.runner.config.display.language.as_str();
+        let mut tui_paused = false;
         let mut interface_idx: usize = 0;
-        let mut status_msg = String::from(
-            "Ready. [↑/↓/j/k] Scroll | [Tab] Switch Pane (Devices/Interfaces) | [Enter] Breakdown\n[p] Protocol | [r] Poll | [d] Discovery | [q] Quit",
-        );
+        let mut status_msg = tui_help_text();
+        let flow_repository = self.runner.flow_repository();
 
         loop {
             // スキャン完了チェック
@@ -662,7 +869,8 @@ impl TuiRenderer {
             }
 
             // アラートのリアルタイム受信（非ブロッキング）
-            while let Ok(evt) = alert_rx.try_recv() {                alerts.insert(
+            while let Ok(evt) = alert_rx.try_recv() {
+                alerts.insert(
                     0,
                     RecentAlert {
                         id: None,
@@ -680,8 +888,10 @@ impl TuiRenderer {
                 }
             }
 
-            terminal
+            if !tui_paused {
+                terminal
                 .draw(|f| {
+                    let footer_height = if matches!(mode, TuiMode::FilterInput(_)) { 3 } else { 3 };
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .margin(1)
@@ -690,7 +900,7 @@ impl TuiRenderer {
                                 Constraint::Percentage(32), // 上ペイン: Device List
                                 Constraint::Percentage(42), // 中ペイン: Interface & Topology
                                 Constraint::Percentage(20), // 下ペイン: Alert Stream
-                                Constraint::Length(2),      // フッター / ステータスバー
+                                Constraint::Length(footer_height), // フッター / フィルター入力
                             ]
                             .as_ref(),
                         )
@@ -712,7 +922,9 @@ impl TuiRenderer {
                         .style(Style::default().bg(Color::DarkGray))
                         .height(1);
 
-                    let rows = devices.iter().map(|item| {
+                    let rows = devices.iter().filter(|item| {
+                        tui_filter_matches(&filter_query, &[&item.device.ip, &item.device.name, &item.device.status])
+                    }).map(|item| {
                         let status_str = item.device.status.to_lowercase();
                         let status_style = match status_str.as_str() {
                             "online" | "active" | "healthy" => Style::default().fg(Color::Green),
@@ -761,7 +973,7 @@ impl TuiRenderer {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(" 1. Device List (Registered Devices) "),
+                            .title(format!(" 1. {} (Registered Devices) ", tui_text(tui_language, "device_list"))),
                     )
                     .highlight_style(
                         Style::default()
@@ -780,56 +992,90 @@ impl TuiRenderer {
                         .unwrap_or_else(|| "No Device Selected".to_string());
 
                     if pane == Pane::Protocol {
-                        let shares = repository.protocol_shares(60).unwrap_or_default();
-                        let chart_data: Vec<(&str, u64)> = shares
-                            .iter()
-                            .map(|share| (share.protocol.as_str(), share.percentage.round() as u64))
-                            .collect();
-                        let chart = BarChart::default()
-                            .block(Block::default().borders(Borders::ALL).title(" 2. Protocol View (bps / share %) "))
-                            .data(&chart_data)
-                            .bar_width(7)
-                            .bar_gap(2)
-                            .value_style(Style::default().fg(Color::Yellow))
-                            .label_style(Style::default().fg(Color::Cyan))
-                            .bar_style(Style::default().fg(Color::Blue));
-                        f.render_widget(chart, chunks[1]);
-
-                        let talkers = repository.top_talkers(60, 5).unwrap_or_default();
-                        let talker_text = if talkers.is_empty() {
-                            "No flow records received yet.".to_string()
+                        let exporter_ip = devices.get(selected_device_idx).map(|item| item.device.ip.as_str());
+                        let filter_label = protocol_filter
+                            .and_then(|if_index| current_interfaces.iter().find(|iface| iface.if_index == if_index))
+                            .map(|iface| format!("Filter: {}", iface.if_name))
+                            .unwrap_or_else(|| "Filter: All Interfaces".to_string());
+                        let shares = flow_repository.as_ref()
+                            .and_then(|repo| repo.protocol_shares_for_context(protocol_window, exporter_ip, protocol_filter).ok())
+                            .unwrap_or_else(|| repository.protocol_shares_for_context(protocol_window, exporter_ip, protocol_filter).unwrap_or_default());
+                        let (summary, active_exporters) = flow_repository.as_ref()
+                            .and_then(|repo| repo.flow_summary_for_context(protocol_window, exporter_ip, protocol_filter).ok())
+                            .unwrap_or_else(|| repository.flow_summary_for_context(protocol_window, exporter_ip, protocol_filter).unwrap_or((crate::db::models::FlowSummary { total_bps: 0.0, total_pps: 0.0, active_flows: 0, top_protocol: "-".to_string() }, 0)));
+                        let applications = flow_repository.as_ref()
+                            .and_then(|repo| repo.flow_applications_for_context(protocol_window, 3, exporter_ip, protocol_filter).ok())
+                            .unwrap_or_else(|| repository.flow_applications_for_context(protocol_window, 3, exporter_ip, protocol_filter).unwrap_or_default());
+                        let protocol_lines = shares.iter().map(|share| {
+                            format!("{:<5} {:<16} {:>5.1}%", share.protocol, tui_progress_bar(share.percentage, 16), share.percentage)
+                        }).collect::<Vec<_>>();
+                        let application_lines = applications.iter().enumerate().map(|(index, app)| {
+                            format!("{}. {:<14} {:<12} {:>5.1}%", index + 1, truncate_tui(&app.app_name, 14).trim(), tui_progress_bar(app.percentage, 12), app.percentage)
+                        }).collect::<Vec<_>>();
+                        let mut talkers = flow_repository.as_ref()
+                            .and_then(|repo| repo.top_talkers_for_context(protocol_window, 5, exporter_ip, protocol_filter, protocol_sort.query_key()).ok())
+                            .unwrap_or_else(|| repository.top_talkers_for_context(protocol_window, 5, exporter_ip, protocol_filter, protocol_sort.query_key()).unwrap_or_default());
+                        match protocol_sort {
+                            ProtocolSort::Bps => talkers.sort_by(|a, b| b.bps.cmp(&a.bps)),
+                            ProtocolSort::Pps => talkers.sort_by(|a, b| b.pps.cmp(&a.pps)),
+                            ProtocolSort::Bytes => talkers.sort_by(|a, b| b.bytes.cmp(&a.bytes)),
+                        }
+                        let visible_talkers: Vec<&TopTalker> = talkers.iter().filter(|talker| {
+                            tui_filter_matches(&filter_query, &[
+                                &talker.source_ip, &talker.destination_ip, &talker.protocol,
+                                &talker.app_name,
+                            ])
+                        }).collect();
+                        if protocol_talker_idx >= visible_talkers.len() {
+                            protocol_talker_idx = visible_talkers.len().saturating_sub(1);
+                        }
+                        let mut lines = vec![
+                            "TracePulse TUI Monitor [Live 5s]          Protocol: NetFlow/IPFIX/sFlow".to_string(),
+                            format!("Throughput: {:>8} | Packets: {:>8} | Active Flows: {:>6} | Active Exporters: {:>3}", format_tui_rate(summary.total_bps), format_tui_rate(summary.total_pps), summary.active_flows, active_exporters),
+                            "────────────────────────────────────────────────────────────────────────────────".to_string(),
+                            protocol_app_header_line(),
+                        ];
+                        for index in 0..protocol_lines.len().max(application_lines.len()).min(3) {
+                            let left = protocol_lines.get(index).map(String::as_str).unwrap_or("");
+                            let right = application_lines.get(index).map(String::as_str).unwrap_or("");
+                            lines.push(protocol_app_row_line(left, right));
+                        }
+                        lines.extend([
+                            String::new(),
+                            format!("{} (Sort: {} down)", tui_text(tui_language, "top_talkers"), protocol_sort.label()),
+                            flow_header_line(),
+                        ]);
+                        let mut selected_row = None;
+                        if talkers.is_empty() {
+                            lines.push(tui_text(tui_language, "no_flows").to_string());
                         } else {
-                            talkers
-                                .iter()
-                                .map(|talker| {
-                                    format!(
-                                        "{}:{} -> {}:{} {} {} bps",
-                                        talker.source_ip,
-                                        talker.source_port,
-                                        talker.destination_ip,
-                                        talker.destination_port,
-                                        talker.protocol,
-                                        talker.bps
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        };
-                        let talker_text = format!(
-                            "Note: values are estimates from received flows; sampling is not corrected.\n{}",
-                            talker_text
-                        );
-                        let talker_area = Rect {
-                            x: chunks[1].x + 2,
-                            y: chunks[1].y + chunks[1].height.saturating_sub(8),
-                            width: chunks[1].width.saturating_sub(4),
-                            height: 6.min(chunks[1].height),
-                        };
+                            for (index, talker) in visible_talkers.iter().enumerate() {
+                                if index == protocol_talker_idx {
+                                    selected_row = Some(lines.len());
+                                }
+                                lines.push(flow_row_line(talker, false));
+                            }
+                        }
+                        lines.push(tui_text(tui_language, "corrected_note").to_string());
+                        let styled_lines = lines.into_iter().enumerate().map(|(index, line)| {
+                            let line = Line::from(line);
+                            if selected_row == Some(index) {
+                                line.style(Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD))
+                            } else {
+                                line
+                            }
+                        }).collect::<Vec<_>>();
+                        let visible_height = chunks[1].height.saturating_sub(2) as usize;
+                        let scroll_offset = selected_row
+                            .map(|row| row.saturating_sub(visible_height.saturating_sub(1)))
+                            .unwrap_or(0);
                         f.render_widget(
-                            Paragraph::new(talker_text)
-                                .block(Block::default().borders(Borders::ALL).title(" Top Talkers (Top 5, estimated) "))
+                            Paragraph::new(Text::from(styled_lines))
+                                .block(Block::default().borders(Borders::ALL).title(format!(" {} - [{} / {}s] ", tui_text(tui_language, "protocol_traffic"), filter_label, protocol_window)))
+                                .scroll((scroll_offset.min(u16::MAX as usize) as u16, 0))
+                                .wrap(Wrap { trim: true })
                                 .style(Style::default().fg(Color::White)),
-                            talker_area,
+                            chunks[1],
                         );
                     } else {
                     let if_header_cells = [
@@ -846,7 +1092,9 @@ impl TuiRenderer {
                         .style(Style::default().bg(Color::DarkGray))
                         .height(1);
 
-                    let if_rows = current_interfaces.iter().map(|iface| {
+                    let if_rows = current_interfaces.iter().filter(|iface| {
+                        tui_filter_matches(&filter_query, &[&iface.if_name, &iface.if_index.to_string(), &iface.link_status, &iface.neighbor])
+                    }).map(|iface| {
                         let is_up = iface.link_status.to_lowercase() == "up" || iface.link_status == "1";
                         let status_style = if is_up {
                             Style::default().fg(Color::Green)
@@ -920,7 +1168,8 @@ impl TuiRenderer {
                         Block::default()
                             .borders(Borders::ALL)
                             .title(format!(
-                                " 2. Interface & Topology (Selected: {}){} ",
+                                " 2. {} (Selected: {}){} ",
+                                tui_text(tui_language, "interface_topology"),
                                 selected_device_name,
                                 if pane == Pane::Interfaces { " [FOCUS: Enter=Error Breakdown]" } else { "" }
                             )),
@@ -986,7 +1235,7 @@ impl TuiRenderer {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(" 3. Alert Stream (Recent L1/L2 & Bandwidth Errors) "),
+                            .title(format!(" 3. {} (Recent L1/L2 & Bandwidth Errors) ", tui_text(tui_language, "alert_stream"))),
                     );
 
                     f.render_widget(alert_table, chunks[2]);
@@ -999,6 +1248,43 @@ impl TuiRenderer {
 
                     // モーダル・ダイアログ オーバーレイ描画
                     match mode {
+                        TuiMode::FlowInspector(ref talker) => {
+                            let popup_area = centered_rect(78, 65, f.area());
+                            f.render_widget(Clear, popup_area);
+                            let ingress = talker.ingress_if_name.clone()
+                                .or_else(|| talker.ingress_if_index.map(|value| format!("if-{value}")))
+                                .unwrap_or_else(|| "-".to_string());
+                            let egress = talker.egress_if_name.clone()
+                                .or_else(|| talker.egress_if_index.map(|value| format!("if-{value}")))
+                                .unwrap_or_else(|| "-".to_string());
+                            let inspector_text = format!(
+                                "Source             : {}:{}\nDestination        : {}:{}\nProtocol / App     : {} / {}\n\nRaw Bytes          : {}\nPackets            : {}\nBps / PPS          : {} / {}\nTCP Flags          : {} (S=SYN A=ACK R=RST F=FIN)\nIn IF              : {}\nOut IF             : {}\n\nActive Timeout     : not retained in rollup\nInactive Timeout   : not retained in rollup\nSampling Rate      : corrected at ingest; rate not retained here\n\nPress [Esc] or [Enter] to close",
+                                talker.source_ip, talker.source_port,
+                                talker.destination_ip, talker.destination_port,
+                                talker.protocol, talker.app_name,
+                                talker.bytes, talker.packets,
+                                format_tui_rate(talker.bps as f64), talker.pps,
+                                format_tui_flags(talker.tcp_flags), ingress, egress,
+                            );
+                            f.render_widget(
+                                Paragraph::new(inspector_text)
+                                    .block(Block::default().borders(Borders::ALL).title(" Flow Inspector "))
+                                    .style(Style::default().fg(Color::White))
+                                    .wrap(Wrap { trim: false }),
+                                popup_area,
+                            );
+                        }
+                        TuiMode::FilterInput(ref query) => {
+                            f.render_widget(Clear, chunks[3]);
+                            let prompt = Paragraph::new(format!(
+                                "Filter: {}\n[Enter] Apply  [Esc] Cancel  [c] Clear",
+                                query
+                            ))
+                                .block(Block::default().borders(Borders::ALL).title(" Incremental Filter "))
+                                .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                            f.render_widget(prompt, chunks[3]);
+                            f.set_cursor_position((chunks[3].x + 1 + 8 + query.chars().count() as u16, chunks[3].y + 1));
+                        }
                         TuiMode::DiscoveryModal(ref modal) => {
                             let popup_area = centered_rect(60, 55, f.area());
                             f.render_widget(Clear, popup_area);
@@ -1349,11 +1635,28 @@ impl TuiRenderer {
                     }
                 })
                 .map_err(|e| AppError::Io(e.to_string()))?;
+            }
 
             // キー入力待ち (50ms タイムアウト)
             if event::poll(Duration::from_millis(50)).map_err(|e| AppError::Io(e.to_string()))? {
                 if let Event::Key(key) = event::read().map_err(|e| AppError::Io(e.to_string()))? {
                     if key.kind == KeyEventKind::Press {
+                        if status_msg.starts_with("Alert notifications are available") {
+                            status_msg = tui_help_text();
+                        }
+                        if key.code == KeyCode::Char(' ')
+                            && !matches!(mode, TuiMode::FilterInput(_))
+                        {
+                            tui_paused = !tui_paused;
+                            continue;
+                        }
+                        if key.code == KeyCode::Char('/')
+                            && !matches!(mode, TuiMode::FilterInput(_))
+                        {
+                            tui_paused = false;
+                            mode = TuiMode::FilterInput(filter_query.clone());
+                            continue;
+                        }
                         match mode {
                             TuiMode::Normal => match key.code {
                                 KeyCode::Char('q') => break,
@@ -1365,7 +1668,8 @@ impl TuiRenderer {
                                     };
                                     if pane == Pane::Interfaces {
                                         if interface_idx >= current_interfaces.len() {
-                                            interface_idx = current_interfaces.len().saturating_sub(1);
+                                            interface_idx =
+                                                current_interfaces.len().saturating_sub(1);
                                         }
                                         if !current_interfaces.is_empty() {
                                             if_table_state.select(Some(interface_idx));
@@ -1373,11 +1677,38 @@ impl TuiRenderer {
                                     }
                                 }
                                 KeyCode::Char('p') => {
-                                    pane = if pane == Pane::Protocol {
-                                        Pane::Interfaces
+                                    if pane == Pane::Protocol {
+                                        protocol_filter = None;
+                                        pane = Pane::Interfaces;
                                     } else {
-                                        Pane::Protocol
-                                    };
+                                        protocol_filter = if pane == Pane::Interfaces {
+                                            current_interfaces
+                                                .get(interface_idx)
+                                                .map(|iface| iface.if_index)
+                                        } else {
+                                            None
+                                        };
+                                        pane = Pane::Protocol;
+                                    }
+                                }
+                                KeyCode::Char('c') if pane == Pane::Protocol => {
+                                    protocol_filter = None;
+                                    filter_query.clear();
+                                }
+                                KeyCode::Char('c') => {
+                                    filter_query.clear();
+                                }
+                                KeyCode::Char('1') if pane == Pane::Protocol => {
+                                    protocol_window = 60;
+                                }
+                                KeyCode::Char('2') if pane == Pane::Protocol => {
+                                    protocol_window = 300;
+                                }
+                                KeyCode::Char('3') if pane == Pane::Protocol => {
+                                    protocol_window = 3600;
+                                }
+                                KeyCode::Char('s') if pane == Pane::Protocol => {
+                                    protocol_sort = protocol_sort.next();
                                 }
                                 KeyCode::Char('d') => {
                                     let default_comm =
@@ -1438,7 +1769,11 @@ impl TuiRenderer {
                                             if_table_state.select(Some(interface_idx));
                                         }
                                     }
-                                    Pane::Protocol => {}
+                                    Pane::Protocol => {
+                                        if protocol_talker_idx > 0 {
+                                            protocol_talker_idx -= 1;
+                                        }
+                                    }
                                 },
                                 KeyCode::Down | KeyCode::Char('j') => match pane {
                                     Pane::Devices => {
@@ -1469,8 +1804,68 @@ impl TuiRenderer {
                                             if_table_state.select(Some(interface_idx));
                                         }
                                     }
-                                    Pane::Protocol => {}
+                                    Pane::Protocol => {
+                                        protocol_talker_idx = protocol_talker_idx.saturating_add(1);
+                                    }
                                 },
+                                KeyCode::Enter if pane == Pane::Protocol => {
+                                    let exporter_ip = devices
+                                        .get(selected_device_idx)
+                                        .map(|item| item.device.ip.as_str());
+                                    let mut talkers = flow_repository
+                                        .as_ref()
+                                        .and_then(|repo| {
+                                            repo.top_talkers_for_context(
+                                                protocol_window,
+                                                5,
+                                                exporter_ip,
+                                                protocol_filter,
+                                                protocol_sort.query_key(),
+                                            )
+                                            .ok()
+                                        })
+                                        .unwrap_or_else(|| {
+                                            repository
+                                                .top_talkers_for_context(
+                                                    protocol_window,
+                                                    5,
+                                                    exporter_ip,
+                                                    protocol_filter,
+                                                    protocol_sort.query_key(),
+                                                )
+                                                .unwrap_or_default()
+                                        });
+                                    match protocol_sort {
+                                        ProtocolSort::Bps => {
+                                            talkers.sort_by(|a, b| b.bps.cmp(&a.bps))
+                                        }
+                                        ProtocolSort::Pps => {
+                                            talkers.sort_by(|a, b| b.pps.cmp(&a.pps))
+                                        }
+                                        ProtocolSort::Bytes => {
+                                            talkers.sort_by(|a, b| b.bytes.cmp(&a.bytes))
+                                        }
+                                    }
+                                    let visible = talkers
+                                        .into_iter()
+                                        .filter(|talker| {
+                                            tui_filter_matches(
+                                                &filter_query,
+                                                &[
+                                                    &talker.source_ip,
+                                                    &talker.destination_ip,
+                                                    &talker.protocol,
+                                                    &talker.app_name,
+                                                ],
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    if let Some(talker) =
+                                        visible.into_iter().nth(protocol_talker_idx)
+                                    {
+                                        mode = TuiMode::FlowInspector(talker);
+                                    }
+                                }
                                 KeyCode::Enter if pane == Pane::Interfaces => {
                                     if let Some(iface) = current_interfaces.get(interface_idx) {
                                         let device_id = devices
@@ -1503,6 +1898,31 @@ impl TuiRenderer {
                                             status_msg = format!("Poll failed: {}", err);
                                         }
                                     }
+                                }
+                                _ => {}
+                            },
+                            TuiMode::FilterInput(ref mut query) => match key.code {
+                                KeyCode::Esc | KeyCode::Enter => {
+                                    mode = TuiMode::Normal;
+                                }
+                                KeyCode::Char('c') => {
+                                    query.clear();
+                                    filter_query.clear();
+                                    mode = TuiMode::Normal;
+                                }
+                                KeyCode::Backspace => {
+                                    query.pop();
+                                    filter_query.clone_from(query);
+                                }
+                                KeyCode::Char(character) => {
+                                    query.push(character);
+                                    filter_query.clone_from(query);
+                                }
+                                _ => {}
+                            },
+                            TuiMode::FlowInspector(_) => match key.code {
+                                KeyCode::Esc | KeyCode::Enter => {
+                                    mode = TuiMode::Normal;
                                 }
                                 _ => {}
                             },

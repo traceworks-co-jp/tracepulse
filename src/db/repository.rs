@@ -1,6 +1,7 @@
 use crate::db::models::{
-    AlertEvent, Device, DeviceMetrics, FlowRecord, InterfacePortDelta, InterfaceSample,
-    InterfaceSpike, ProtocolShare, RecentAlert, TopTalker,
+    AlertEvent, Device, DeviceMetrics, FlowApplicationShare, FlowEndpointShare, FlowRecord,
+    FlowSummary, FlowTimeseries, InterfacePortDelta, InterfaceSample, InterfaceSpike,
+    ProtocolShare, RecentAlert, TopTalker,
 };
 use crate::error::AppError;
 use rusqlite::params;
@@ -202,9 +203,10 @@ impl Repository {
 
     pub fn save_flow_record(&self, flow: &FlowRecord) -> Result<i64, AppError> {
         let id = self.connection.execute(
-            "INSERT INTO flow_records (source_ip, destination_ip, source_port, destination_port, protocol, bytes, packets, observed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO flow_records (exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol, bytes, packets, ingress_if_index, egress_if_index, tcp_flags, sampling_rate, dscp, bgp_next_hop, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
+                flow.exporter_ip,
                 flow.source_ip,
                 flow.destination_ip,
                 flow.source_port,
@@ -212,15 +214,85 @@ impl Repository {
                 flow.protocol,
                 flow.bytes,
                 flow.packets,
+                flow.ingress_if_index,
+                flow.egress_if_index,
+                flow.tcp_flags,
+                flow.sampling_rate,
+                flow.dscp,
+                flow.bgp_next_hop.map(|value| value.to_string()),
                 flow.observed_at,
             ],
+        )?;
+        let bucket = flow
+            .observed_at
+            .get(..16)
+            .map(|value| format!("{value}:00Z"))
+            .unwrap_or_else(|| flow.observed_at.clone());
+        self.connection.execute(
+            "INSERT INTO aggregated_conversations_1m_v2 (bucket_start, exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol, bytes, packets, tcp_flags, ingress_if_index, egress_if_index)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(bucket_start, exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol) DO UPDATE SET
+                 bytes = bytes + excluded.bytes,
+                 packets = packets + excluded.packets,
+                 tcp_flags = tcp_flags | excluded.tcp_flags,
+                 ingress_if_index = COALESCE(excluded.ingress_if_index, ingress_if_index),
+                 egress_if_index = COALESCE(excluded.egress_if_index, egress_if_index)",
+            params![bucket, flow.exporter_ip, flow.source_ip, flow.destination_ip, flow.source_port, flow.destination_port, flow.protocol, flow.bytes, flow.packets, flow.tcp_flags, flow.ingress_if_index, flow.egress_if_index],
         )?;
         Ok(id as i64)
     }
 
+    pub fn aggregate_flow_records_1m(&self, records: &[FlowRecord]) -> Result<(), AppError> {
+        let mut buckets: HashMap<(String, String), (u64, u64, u64)> = HashMap::new();
+        for flow in records {
+            let bucket = flow
+                .observed_at
+                .get(..16)
+                .map(|value| format!("{value}:00Z"))
+                .unwrap_or_else(|| flow.observed_at.clone());
+            let entry = buckets.entry((bucket, flow.protocol.clone())).or_default();
+            entry.0 = entry.0.saturating_add(flow.bytes);
+            entry.1 = entry.1.saturating_add(flow.packets);
+            entry.2 = entry.2.saturating_add(1);
+        }
+
+        for ((bucket, protocol), (bytes, packets, flow_count)) in buckets {
+            self.connection.execute(
+                "INSERT INTO aggregated_flows_1m (bucket_start, protocol, bytes, packets, flow_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(bucket_start, protocol) DO UPDATE SET
+                     bytes = bytes + excluded.bytes,
+                     packets = packets + excluded.packets,
+                     flow_count = flow_count + excluded.flow_count",
+                params![bucket, protocol, bytes, packets, flow_count],
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn protocol_shares(&self, limit_seconds: i64) -> Result<Vec<ProtocolShare>, AppError> {
+        if limit_seconds > 300 {
+            let mut stmt = self.connection.prepare(
+                "SELECT protocol, SUM(bytes), SUM(packets), SUM(bytes) * 8.0 / MAX(1, ?1), SUM(packets) * 1.0 / MAX(1, ?1), SUM(bytes) * 100.0 / MAX(1, (SELECT SUM(bytes) FROM aggregated_flows_1m WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds'))) FROM aggregated_flows_1m WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds') GROUP BY protocol ORDER BY SUM(bytes) DESC",
+            )?;
+            let rows = stmt
+                .query_map(params![limit_seconds], |row| {
+                    Ok(ProtocolShare {
+                        protocol: row.get(0)?,
+                        bytes: row.get::<_, i64>(1)?.max(0) as u64,
+                        bps: row.get(3)?,
+                        pps: row.get(4)?,
+                        percentage: row.get(5)?,
+                    })
+                })
+                .map_err(AppError::from)?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
         let mut stmt = self.connection.prepare(
-            "SELECT protocol, SUM(bytes), SUM(bytes) * 8.0 / MAX(1, ?1),
+                "SELECT protocol, SUM(bytes), SUM(packets), SUM(bytes) * 8.0 / MAX(1, ?1),
+                    SUM(packets) * 1.0 / MAX(1, ?1),
                     SUM(bytes) * 100.0 / MAX(1, (SELECT SUM(bytes) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')))
              FROM flow_records
              WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
@@ -231,8 +303,71 @@ impl Repository {
                 Ok(ProtocolShare {
                     protocol: row.get(0)?,
                     bytes: row.get::<_, i64>(1)? as u64,
-                    bps: row.get(2)?,
-                    percentage: row.get(3)?,
+                    bps: row.get(3)?,
+                    pps: row.get(4)?,
+                    percentage: row.get(5)?,
+                })
+            })?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn protocol_shares_for_context(
+        &self,
+        limit_seconds: i64,
+        exporter_ip: Option<&str>,
+        if_index: Option<i32>,
+    ) -> Result<Vec<ProtocolShare>, AppError> {
+        if limit_seconds > 300 {
+            let mut stmt = self.connection.prepare(
+                "SELECT protocol, SUM(bytes), SUM(packets), SUM(bytes) * 8.0 / MAX(1, ?1),
+                        SUM(packets) * 1.0 / MAX(1, ?1),
+                        SUM(bytes) * 100.0 / MAX(1, (SELECT SUM(bytes) FROM aggregated_conversations_1m_v2
+                            WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                              AND (?2 IS NULL OR exporter_ip = ?2)
+                              AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)))
+                 FROM aggregated_conversations_1m_v2
+                 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                   AND (?2 IS NULL OR exporter_ip = ?2)
+                   AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)
+                 GROUP BY protocol ORDER BY SUM(bytes) DESC",
+            )?;
+            let rows = stmt
+                .query_map(params![limit_seconds, exporter_ip, if_index], |row| {
+                    Ok(ProtocolShare {
+                        protocol: row.get(0)?,
+                        bytes: row.get::<_, i64>(1)?.max(0) as u64,
+                        bps: row.get(3)?,
+                        pps: row.get(4)?,
+                        percentage: row.get(5)?,
+                    })
+                })?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
+        let mut stmt = self.connection.prepare(
+            "SELECT protocol, SUM(bytes), SUM(packets), SUM(bytes) * 8.0 / MAX(1, ?1),
+                    SUM(packets) * 1.0 / MAX(1, ?1),
+                    SUM(bytes) * 100.0 / MAX(1, (SELECT SUM(bytes) FROM flow_records
+                        WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+                          AND (?2 IS NULL OR exporter_ip = ?2)
+                          AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)))
+             FROM flow_records
+             WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+               AND (?2 IS NULL OR exporter_ip = ?2)
+               AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)
+             GROUP BY protocol ORDER BY SUM(bytes) DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![limit_seconds, exporter_ip, if_index], |row| {
+                Ok(ProtocolShare {
+                    protocol: row.get(0)?,
+                    bytes: row.get::<_, i64>(1)?.max(0) as u64,
+                    bps: row.get(3)?,
+                    pps: row.get(4)?,
+                    percentage: row.get(5)?,
                 })
             })?
             .filter_map(|row| row.ok())
@@ -245,12 +380,65 @@ impl Repository {
         limit_seconds: i64,
         limit: usize,
     ) -> Result<Vec<TopTalker>, AppError> {
+        if limit_seconds > 300 {
+            let mut stmt = self.connection.prepare(
+                "WITH grouped AS (
+                    SELECT exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol,
+                           SUM(bytes) AS total_bytes, SUM(packets) AS total_packets,
+                           MAX(ingress_if_index) AS ingress_if_index,
+                           MAX(egress_if_index) AS egress_if_index,
+                           MAX(tcp_flags) AS tcp_flags
+                    FROM aggregated_conversations_1m_v2
+                    WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                    GROUP BY exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol
+                )
+                SELECT g.exporter_ip, g.source_ip, g.destination_ip, g.source_port, g.destination_port, g.protocol,
+                       g.total_bytes, g.total_packets, g.total_bytes * 8 / MAX(1, ?1),
+                       g.ingress_if_index, g.egress_if_index, g.tcp_flags,
+                       (SELECT i.if_name FROM interface_samples i JOIN devices d ON d.id = i.device_id
+                        WHERE d.ip = g.exporter_ip AND i.if_index = g.ingress_if_index
+                        ORDER BY i.sampled_at DESC LIMIT 1),
+                       (SELECT i.if_name FROM interface_samples i JOIN devices d ON d.id = i.device_id
+                        WHERE d.ip = g.exporter_ip AND i.if_index = g.egress_if_index
+                        ORDER BY i.sampled_at DESC LIMIT 1)
+                FROM grouped g
+                ORDER BY g.total_bytes DESC LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(params![limit_seconds, limit as i64], |row| {
+                    let protocol: String = row.get(5)?;
+                    let destination_port = row.get::<_, i64>(4)? as u16;
+                    let packets = row.get::<_, i64>(7)?.max(0) as u64;
+                    Ok(TopTalker {
+                        source_ip: row.get(1)?,
+                        destination_ip: row.get(2)?,
+                        source_port: row.get::<_, i64>(3)? as u16,
+                        destination_port,
+                        app_name: application_name(protocol.clone(), destination_port),
+                        protocol,
+                        bytes: row.get::<_, i64>(6)?.max(0) as u64,
+                        packets,
+                        pps: packets / limit_seconds.max(1) as u64,
+                        bps: row.get::<_, i64>(8)?.max(0) as u64,
+                        ingress_if_index: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
+                        egress_if_index: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
+                        tcp_flags: row.get::<_, i64>(11)?.min(u8::MAX as i64) as u8,
+                        ingress_if_name: row.get(12)?,
+                        egress_if_name: row.get(13)?,
+                    })
+                })?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
         let mut stmt = self.connection.prepare(
-            "SELECT source_ip, destination_ip, source_port, destination_port, protocol,
-                    SUM(bytes), SUM(bytes) * 8 / MAX(1, ?1)
+                "SELECT source_ip, destination_ip, source_port, destination_port, protocol,
+                    SUM(bytes), SUM(packets), SUM(bytes) * 8 / MAX(1, ?1),
+                    MAX(ingress_if_index), MAX(egress_if_index), MAX(tcp_flags),
+                    NULL, NULL
              FROM flow_records
              WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
-             GROUP BY source_ip, destination_ip, source_port, destination_port, protocol
+             GROUP BY exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol
              ORDER BY SUM(bytes) DESC LIMIT ?2",
         )?;
         let rows = stmt
@@ -262,12 +450,434 @@ impl Repository {
                     destination_port: row.get::<_, i64>(3)? as u16,
                     protocol: row.get(4)?,
                     bytes: row.get::<_, i64>(5)? as u64,
-                    bps: row.get::<_, i64>(6)? as u64,
+                    packets: row.get::<_, i64>(6)? as u64,
+                    pps: row.get::<_, i64>(6)? as u64 / limit_seconds.max(1) as u64,
+                    bps: row.get::<_, i64>(7)? as u64,
+                    app_name: application_name(row.get(4)?, row.get::<_, i64>(3)? as u16),
+                    ingress_if_index: row.get::<_, Option<i64>>(8)?.map(|value| value as u32),
+                    egress_if_index: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
+                    tcp_flags: row.get::<_, i64>(10)?.min(u8::MAX as i64) as u8,
+                    ingress_if_name: row.get(11)?,
+                    egress_if_name: row.get(12)?,
                 })
             })?
             .filter_map(|row| row.ok())
             .collect();
         Ok(rows)
+    }
+
+    pub fn top_talkers_for_context(
+        &self,
+        limit_seconds: i64,
+        limit: usize,
+        exporter_ip: Option<&str>,
+        if_index: Option<i32>,
+        sort_key: &str,
+    ) -> Result<Vec<TopTalker>, AppError> {
+        let order_by = match sort_key {
+            "pps" => "total_packets",
+            "bytes" => "total_bytes",
+            _ => "total_bytes",
+        };
+        if limit_seconds > 300 {
+            let sql = format!(
+                "WITH grouped AS (
+                    SELECT exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol,
+                           SUM(bytes) AS total_bytes, SUM(packets) AS total_packets,
+                           MAX(ingress_if_index) AS ingress_if_index, MAX(egress_if_index) AS egress_if_index,
+                           MAX(tcp_flags) AS tcp_flags
+                    FROM aggregated_conversations_1m_v2
+                    WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                      AND (?3 IS NULL OR exporter_ip = ?3)
+                      AND (?4 IS NULL OR ingress_if_index = ?4 OR egress_if_index = ?4)
+                    GROUP BY exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol
+                )
+                SELECT g.exporter_ip, g.source_ip, g.destination_ip, g.source_port, g.destination_port, g.protocol,
+                       g.total_bytes, g.total_packets, g.total_bytes * 8 / MAX(1, ?1),
+                       g.ingress_if_index, g.egress_if_index, g.tcp_flags,
+                       (SELECT i.if_name FROM interface_samples i JOIN devices d ON d.id = i.device_id
+                        WHERE d.ip = g.exporter_ip AND i.if_index = g.ingress_if_index
+                        ORDER BY i.sampled_at DESC LIMIT 1),
+                       (SELECT i.if_name FROM interface_samples i JOIN devices d ON d.id = i.device_id
+                        WHERE d.ip = g.exporter_ip AND i.if_index = g.egress_if_index
+                        ORDER BY i.sampled_at DESC LIMIT 1)
+                FROM grouped g ORDER BY g.{order_by} DESC LIMIT ?2"
+            );
+            let mut stmt = self.connection.prepare(&sql)?;
+            let rows = stmt
+                .query_map(
+                    params![limit_seconds, limit as i64, exporter_ip, if_index],
+                    |row| {
+                        let protocol: String = row.get(5)?;
+                        let destination_port = row.get::<_, i64>(4)? as u16;
+                        let packets = row.get::<_, i64>(7)?.max(0) as u64;
+                        Ok(TopTalker {
+                            source_ip: row.get(1)?,
+                            destination_ip: row.get(2)?,
+                            source_port: row.get::<_, i64>(3)? as u16,
+                            destination_port,
+                            app_name: application_name(protocol.clone(), destination_port),
+                            protocol,
+                            bytes: row.get::<_, i64>(6)?.max(0) as u64,
+                            packets,
+                            pps: packets / limit_seconds.max(1) as u64,
+                            bps: row.get::<_, i64>(8)?.max(0) as u64,
+                            ingress_if_index: row
+                                .get::<_, Option<i64>>(9)?
+                                .map(|value| value as u32),
+                            egress_if_index: row
+                                .get::<_, Option<i64>>(10)?
+                                .map(|value| value as u32),
+                            tcp_flags: row.get::<_, i64>(11)?.min(u8::MAX as i64) as u8,
+                            ingress_if_name: row.get(12)?,
+                            egress_if_name: row.get(13)?,
+                        })
+                    },
+                )?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
+        let sql = format!(
+                        "WITH grouped AS (
+                                        SELECT exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol,
+                                                     SUM(bytes) AS total_bytes, SUM(packets) AS total_packets,
+                                                     MAX(ingress_if_index) AS ingress_if_index,
+                                                     MAX(egress_if_index) AS egress_if_index,
+                                                     MAX(tcp_flags) AS tcp_flags
+                                        FROM flow_records
+                                        WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+                                            AND (?3 IS NULL OR exporter_ip = ?3)
+                                            AND (?4 IS NULL OR ingress_if_index = ?4 OR egress_if_index = ?4)
+                                        GROUP BY exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol
+                                )
+                                SELECT g.exporter_ip, g.source_ip, g.destination_ip, g.source_port, g.destination_port, g.protocol,
+                                             g.total_bytes, g.total_packets, g.total_bytes * 8 / MAX(1, ?1),
+                                             g.ingress_if_index, g.egress_if_index, g.tcp_flags,
+                                             (SELECT i.if_name FROM interface_samples i JOIN devices d ON d.id = i.device_id
+                                                WHERE d.ip = g.exporter_ip AND i.if_index = g.ingress_if_index
+                                                ORDER BY i.sampled_at DESC LIMIT 1),
+                                             (SELECT i.if_name FROM interface_samples i JOIN devices d ON d.id = i.device_id
+                                                WHERE d.ip = g.exporter_ip AND i.if_index = g.egress_if_index
+                                                ORDER BY i.sampled_at DESC LIMIT 1)
+                                FROM grouped g
+                                ORDER BY g.{order_by} DESC LIMIT ?2"
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        let rows = stmt
+            .query_map(
+                params![limit_seconds, limit as i64, exporter_ip, if_index],
+                |row| {
+                    Ok(TopTalker {
+                        source_ip: row.get(1)?,
+                        destination_ip: row.get(2)?,
+                        source_port: row.get::<_, i64>(3)? as u16,
+                        destination_port: row.get::<_, i64>(4)? as u16,
+                        protocol: row.get(5)?,
+                        bytes: row.get::<_, i64>(6)?.max(0) as u64,
+                        packets: row.get::<_, i64>(7)?.max(0) as u64,
+                        pps: row.get::<_, i64>(7)?.max(0) as u64 / limit_seconds.max(1) as u64,
+                        bps: row.get::<_, i64>(8)?.max(0) as u64,
+                        app_name: application_name(row.get(5)?, row.get::<_, i64>(4)? as u16),
+                        ingress_if_index: row.get::<_, Option<i64>>(9)?.map(|value| value as u32),
+                        egress_if_index: row.get::<_, Option<i64>>(10)?.map(|value| value as u32),
+                        tcp_flags: row.get::<_, i64>(11)?.min(u8::MAX as i64) as u8,
+                        ingress_if_name: row.get(12)?,
+                        egress_if_name: row.get(13)?,
+                    })
+                },
+            )?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn flow_applications_for_context(
+        &self,
+        limit_seconds: i64,
+        limit: usize,
+        exporter_ip: Option<&str>,
+        if_index: Option<i32>,
+    ) -> Result<Vec<FlowApplicationShare>, AppError> {
+        if limit_seconds > 300 {
+            let total: i64 = self.connection.query_row(
+                "SELECT COALESCE(SUM(bytes), 0) FROM aggregated_conversations_1m_v2
+                 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                   AND (?2 IS NULL OR exporter_ip = ?2)
+                   AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)",
+                params![limit_seconds, exporter_ip, if_index],
+                |row| row.get(0),
+            )?;
+            let mut stmt = self.connection.prepare(
+                "SELECT protocol, destination_port, SUM(bytes) FROM aggregated_conversations_1m_v2
+                 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                   AND (?2 IS NULL OR exporter_ip = ?2)
+                   AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)
+                 GROUP BY protocol, destination_port ORDER BY SUM(bytes) DESC LIMIT ?4",
+            )?;
+            let rows = stmt
+                .query_map(
+                    params![limit_seconds, exporter_ip, if_index, limit as i64],
+                    |row| {
+                        let protocol: String = row.get(0)?;
+                        let port = row.get::<_, i64>(1)? as u16;
+                        let bytes = row.get::<_, i64>(2)?.max(0) as u64;
+                        Ok(FlowApplicationShare {
+                            app_name: application_name(protocol, port),
+                            bytes,
+                            percentage: bytes as f64 * 100.0 / total.max(1) as f64,
+                            bps: bytes as f64 * 8.0 / limit_seconds.max(1) as f64,
+                        })
+                    },
+                )?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
+        let mut stmt = self.connection.prepare(
+            "SELECT CASE WHEN destination_port = 443 THEN 'HTTPS' WHEN destination_port = 53 THEN 'DNS'
+                    WHEN destination_port = 161 THEN 'SNMP' ELSE protocol END,
+                    SUM(bytes), SUM(bytes) * 100.0 / MAX(1, (SELECT SUM(bytes) FROM flow_records
+                        WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+                          AND (?2 IS NULL OR exporter_ip = ?2)
+                          AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3))),
+                    SUM(bytes) * 8.0 / MAX(1, ?1), destination_port, protocol
+             FROM flow_records
+             WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+               AND (?2 IS NULL OR exporter_ip = ?2)
+               AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)
+             GROUP BY protocol, destination_port
+             ORDER BY SUM(bytes) DESC LIMIT ?4",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![limit_seconds, exporter_ip, if_index, limit as i64],
+                |row| {
+                    Ok(FlowApplicationShare {
+                        app_name: row.get(0)?,
+                        bytes: row.get::<_, i64>(1)?.max(0) as u64,
+                        percentage: row.get(2)?,
+                        bps: row.get(3)?,
+                    })
+                },
+            )?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn flow_summary(&self, limit_seconds: i64) -> Result<FlowSummary, AppError> {
+        if limit_seconds > 300 {
+            let (bytes, packets): (i64, i64) = self.connection.query_row(
+                "SELECT COALESCE(SUM(bytes),0), COALESCE(SUM(packets),0) FROM aggregated_flows_1m WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')",
+                params![limit_seconds], |row| Ok((row.get(0)?, row.get(1)?))
+            )?;
+            let top_protocol = self.connection.query_row(
+                "SELECT protocol FROM aggregated_flows_1m WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds') GROUP BY protocol ORDER BY SUM(bytes) DESC LIMIT 1",
+                params![limit_seconds], |row| row.get::<_, String>(0)
+            ).unwrap_or_else(|_| "-".to_string());
+            return Ok(FlowSummary {
+                total_bps: bytes.max(0) as f64 * 8.0 / limit_seconds as f64,
+                total_pps: packets.max(0) as f64 / limit_seconds as f64,
+                active_flows: packets.max(0) as u64,
+                top_protocol,
+            });
+        }
+        let (bytes, packets, active): (i64, i64, i64) = self.connection.query_row(
+            "SELECT COALESCE(SUM(bytes),0), COALESCE(SUM(packets),0), COUNT(*) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')",
+            params![limit_seconds],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let top_protocol = self.connection.query_row(
+            "SELECT protocol FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds') GROUP BY protocol ORDER BY SUM(bytes) DESC LIMIT 1",
+            params![limit_seconds],
+            |row| row.get::<_, String>(0),
+        ).unwrap_or_else(|_| "-".to_string());
+        Ok(FlowSummary {
+            total_bps: bytes.max(0) as f64 * 8.0 / limit_seconds.max(1) as f64,
+            total_pps: packets.max(0) as f64 / limit_seconds.max(1) as f64,
+            active_flows: active.max(0) as u64,
+            top_protocol,
+        })
+    }
+
+    pub fn flow_summary_for_context(
+        &self,
+        limit_seconds: i64,
+        exporter_ip: Option<&str>,
+        if_index: Option<i32>,
+    ) -> Result<(FlowSummary, u64), AppError> {
+        if limit_seconds > 300 {
+            let (bytes, packets, active, exporters): (i64, i64, i64, i64) = self.connection.query_row(
+                "SELECT COALESCE(SUM(bytes),0), COALESCE(SUM(packets),0), COUNT(*), COUNT(DISTINCT exporter_ip)
+                 FROM aggregated_conversations_1m_v2
+                 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')
+                   AND (?2 IS NULL OR exporter_ip = ?2)
+                   AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)",
+                params![limit_seconds, exporter_ip, if_index],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?),)
+            )?;
+            return Ok((
+                FlowSummary {
+                    total_bps: bytes.max(0) as f64 * 8.0 / limit_seconds.max(1) as f64,
+                    total_pps: packets.max(0) as f64 / limit_seconds.max(1) as f64,
+                    active_flows: active.max(0) as u64,
+                    top_protocol: "-".to_string(),
+                },
+                exporters.max(0) as u64,
+            ));
+        }
+        let (bytes, packets, active, exporters): (i64, i64, i64, i64) = self.connection.query_row(
+            "SELECT COALESCE(SUM(bytes),0), COALESCE(SUM(packets),0), COUNT(*), COUNT(DISTINCT exporter_ip)
+             FROM flow_records
+             WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')
+               AND (?2 IS NULL OR exporter_ip = ?2)
+               AND (?3 IS NULL OR ingress_if_index = ?3 OR egress_if_index = ?3)",
+            params![limit_seconds, exporter_ip, if_index],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?),)
+        )?;
+        Ok((
+            FlowSummary {
+                total_bps: bytes.max(0) as f64 * 8.0 / limit_seconds.max(1) as f64,
+                total_pps: packets.max(0) as f64 / limit_seconds.max(1) as f64,
+                active_flows: active.max(0) as u64,
+                top_protocol: "-".to_string(),
+            },
+            exporters.max(0) as u64,
+        ))
+    }
+
+    pub fn flow_applications(
+        &self,
+        limit_seconds: i64,
+        limit: usize,
+    ) -> Result<Vec<FlowApplicationShare>, AppError> {
+        if limit_seconds > 300 {
+            let total: i64 = self.connection.query_row("SELECT COALESCE(SUM(bytes),0) FROM aggregated_conversations_1m_v2 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')", params![limit_seconds], |row| row.get(0))?;
+            let mut stmt = self.connection.prepare("SELECT protocol, destination_port, SUM(bytes) FROM aggregated_conversations_1m_v2 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds') GROUP BY protocol, destination_port ORDER BY SUM(bytes) DESC LIMIT ?2")?;
+            let rows = stmt
+                .query_map(params![limit_seconds, limit as i64], |row| {
+                    let protocol: String = row.get(0)?;
+                    let port = row.get::<_, i64>(1)? as u16;
+                    let bytes = row.get::<_, i64>(2)?.max(0) as u64;
+                    Ok(FlowApplicationShare {
+                        app_name: application_name(protocol, port),
+                        bytes,
+                        percentage: bytes as f64 * 100.0 / total.max(1) as f64,
+                        bps: bytes as f64 * 8.0 / limit_seconds as f64,
+                    })
+                })?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
+        let total: i64 = self.connection.query_row(
+            "SELECT COALESCE(SUM(bytes),0) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')",
+            params![limit_seconds], |row| row.get(0))?;
+        let mut stmt = self.connection.prepare(
+            "SELECT protocol, destination_port, SUM(bytes) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds') GROUP BY protocol, destination_port ORDER BY SUM(bytes) DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![limit_seconds, limit as i64], |row| {
+                let protocol: String = row.get(0)?;
+                let port: u16 = row.get::<_, i64>(1)? as u16;
+                let bytes = row.get::<_, i64>(2)?.max(0) as u64;
+                Ok(FlowApplicationShare {
+                    app_name: application_name(protocol, port),
+                    bytes,
+                    percentage: bytes as f64 * 100.0 / total.max(1) as f64,
+                    bps: bytes as f64 * 8.0 / limit_seconds.max(1) as f64,
+                })
+            })?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn flow_endpoints(
+        &self,
+        limit_seconds: i64,
+        source: bool,
+        limit: usize,
+    ) -> Result<Vec<FlowEndpointShare>, AppError> {
+        if limit_seconds > 300 {
+            let total: i64 = self.connection.query_row("SELECT COALESCE(SUM(bytes),0) FROM aggregated_conversations_1m_v2 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds')", params![limit_seconds], |row| row.get(0))?;
+            let column = if source {
+                "source_ip"
+            } else {
+                "destination_ip"
+            };
+            let sql = format!(
+                "SELECT {column}, SUM(bytes) FROM aggregated_conversations_1m_v2 WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds') GROUP BY {column} ORDER BY SUM(bytes) DESC LIMIT ?2"
+            );
+            let mut stmt = self.connection.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![limit_seconds, limit as i64], |row| {
+                    let bytes = row.get::<_, i64>(1)?.max(0) as u64;
+                    Ok(FlowEndpointShare {
+                        ip: row.get(0)?,
+                        bps: bytes as f64 * 8.0 / limit_seconds as f64,
+                        percentage: bytes as f64 * 100.0 / total.max(1) as f64,
+                    })
+                })?
+                .filter_map(|row| row.ok())
+                .collect();
+            return Ok(rows);
+        }
+        let total: i64 = self.connection.query_row("SELECT COALESCE(SUM(bytes),0) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds')", params![limit_seconds], |row| row.get(0))?;
+        let column = if source {
+            "source_ip"
+        } else {
+            "destination_ip"
+        };
+        let sql = format!(
+            "SELECT {column}, SUM(bytes) FROM flow_records WHERE observed_at >= datetime('now', '-' || ?1 || ' seconds') GROUP BY {column} ORDER BY SUM(bytes) DESC LIMIT ?2"
+        );
+        let mut stmt = self.connection.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![limit_seconds, limit as i64], |row| {
+                let bytes = row.get::<_, i64>(1)?.max(0) as u64;
+                Ok(FlowEndpointShare {
+                    ip: row.get(0)?,
+                    bps: bytes as f64 * 8.0 / limit_seconds.max(1) as f64,
+                    percentage: bytes as f64 * 100.0 / total.max(1) as f64,
+                })
+            })?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn flow_timeseries(&self, limit_seconds: i64) -> Result<Vec<FlowTimeseries>, AppError> {
+        let mut stmt = self.connection.prepare("SELECT bucket_start, protocol, SUM(bytes) FROM aggregated_flows_1m WHERE bucket_start >= datetime('now', '-' || ?1 || ' seconds') GROUP BY bucket_start, protocol ORDER BY bucket_start")?;
+        let mut by_time: HashMap<String, (f64, f64, f64)> = HashMap::new();
+        for row in stmt
+            .query_map(params![limit_seconds], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?.max(0) as f64,
+                ))
+            })?
+            .filter_map(|row| row.ok())
+        {
+            let entry = by_time.entry(row.0).or_default();
+            match row.1.as_str() {
+                "UDP" => entry.0 += row.2 * 8.0 / 60.0,
+                "TCP" => entry.1 += row.2 * 8.0 / 60.0,
+                "ICMP" => entry.2 += row.2 * 8.0 / 60.0,
+                _ => {}
+            }
+        }
+        Ok(by_time
+            .into_iter()
+            .map(|(timestamp, (udp_bps, tcp_bps, icmp_bps))| FlowTimeseries {
+                timestamp,
+                udp_bps,
+                tcp_bps,
+                icmp_bps,
+            })
+            .collect())
     }
 
     pub fn save_alert(&self, alert: &AlertEvent) -> Result<i64, AppError> {
@@ -295,8 +905,45 @@ impl Repository {
             "DELETE FROM interface_samples WHERE sampled_at < datetime('now', '-' || ?1 || ' days')",
             params![history_days.to_string()],
         )?;
+        let _ = self.connection.execute(
+            "DELETE FROM flow_records WHERE observed_at < datetime('now', '-5 minutes')",
+            [],
+        )?;
+        let _ = self.connection.execute(
+            "DELETE FROM aggregated_flows_1m WHERE bucket_start < datetime('now', '-24 hours')",
+            [],
+        )?;
+        let _ = self.connection.execute(
+            "DELETE FROM aggregated_conversations_1m_v2 WHERE bucket_start < datetime('now', '-24 hours')",
+            [],
+        )?;
+        self.enforce_flow_database_limit()?;
 
         Ok(deleted)
+    }
+
+    fn enforce_flow_database_limit(&self) -> Result<(), AppError> {
+        const MAX_DATABASE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+        let page_size: i64 = self
+            .connection
+            .query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        let page_count: i64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        if page_size.saturating_mul(page_count) <= MAX_DATABASE_BYTES {
+            return Ok(());
+        }
+
+        self.connection.execute(
+            "DELETE FROM aggregated_flows_1m WHERE bucket_start IN (SELECT bucket_start FROM aggregated_flows_1m ORDER BY bucket_start ASC LIMIT 1440)",
+            [],
+        )?;
+        self.connection.execute(
+            "DELETE FROM flow_records WHERE id IN (SELECT id FROM flow_records ORDER BY observed_at ASC LIMIT 10000)",
+            [],
+        )?;
+        self.connection.execute_batch("PRAGMA incremental_vacuum")?;
+        Ok(())
     }
 
     /// デバイスの各インターフェースについて、直近2サンプルの差分からスパイクを抽出する。
@@ -867,6 +1514,34 @@ impl Repository {
 
         Ok(deltas)
     }
+}
+
+fn application_name(protocol: String, destination_port: u16) -> String {
+    let custom_name = crate::exe_dir().join("config").join("services.toml");
+    if let Ok(content) = std::fs::read_to_string(custom_name) {
+        if let Ok(value) = content.parse::<toml::Value>() {
+            if let Some(name) = value
+                .get("services")
+                .and_then(|services| services.get(destination_port.to_string()))
+                .and_then(toml::Value::as_str)
+            {
+                return format!("{name} ({protocol}/{destination_port})");
+            }
+        }
+    }
+    let name = match destination_port {
+        22 => "SSH",
+        53 => "DNS",
+        80 => "HTTP",
+        123 => "NTP",
+        161 => "SNMP",
+        443 => "HTTPS",
+        3306 => "MySQL",
+        5432 => "PostgreSQL",
+        8080 => "HTTP-Alt",
+        _ => return format!("{protocol}/{destination_port}"),
+    };
+    format!("{name} ({protocol}/{destination_port})")
 }
 
 /// SNMP Counter32 は 2^32 を超えるとラップアラウンドするため、減少時はラップを考慮して差分を算出する。

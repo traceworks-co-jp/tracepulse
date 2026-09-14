@@ -1,0 +1,92 @@
+name: "🐛 Bug Report"
+description: Report a problem to help improve TracePulse
+title: "[BUG] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a problem. Please provide enough detail to reproduce it.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What problem occurred?
+      placeholder: Describe the problem clearly and concisely.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime_mode
+    attributes:
+      label: Runtime Mode
+      options:
+        - TUI mode
+        - Web UI mode
+        - Background operation
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: TracePulse Version or Commit Hash
+      description: Which binary version or commit was running?
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+
+  - type: input
+    id: device_type
+    attributes:
+      label: Monitored Device Type
+      description: What kind of device was being monitored? This field is optional.
+      placeholder: Cisco, Yamaha, PC, etc.
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Enter the steps that trigger the problem.
+      placeholder: |
+        1. Start TracePulse with ...
+        2. Open ...
+        3. Perform ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or Error Information
+      description: Paste relevant terminal logs or browser console output here.
+      render: shell
+
+  - type: checkboxes
+    id: duplicate_check
+    attributes:
+      label: Issue Search
+      options:
+        - label: I have searched existing issues and confirmed that this is not a duplicate.
+          required: true

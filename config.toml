@@ -4,6 +4,12 @@ interval_seconds = 30
 [snmp]
 default_community = "public"
 
+[flow]
+bind_addr = "0.0.0.0"
+netflow_port = 2055
+ipfix_port = 4739
+sflow_port = 6343
+
 [display]
 timezone = "utc" # "utc" または "jst"
 

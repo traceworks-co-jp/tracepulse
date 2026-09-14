@@ -41,3 +41,20 @@ pub fn default_history_days() -> u32 {
 pub fn default_timezone() -> String {
     "utc".to_string()
 }
+
+pub fn default_language() -> String {
+    "en".to_string()
+}
+
+pub fn default_flow_bind_addr() -> String {
+    "0.0.0.0".to_string()
+}
+pub fn default_netflow_port() -> u16 {
+    2055
+}
+pub fn default_ipfix_port() -> u16 {
+    4739
+}
+pub fn default_sflow_port() -> u16 {
+    6343
+}

@@ -6,6 +6,10 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
     let connection = Connection::open(path)?;
 
     connection.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+    )?;
+
+    connection.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +67,7 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
 
         CREATE TABLE IF NOT EXISTS flow_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exporter_ip TEXT,
             source_ip TEXT NOT NULL,
             destination_ip TEXT NOT NULL,
             source_port INTEGER NOT NULL,
@@ -70,7 +75,53 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             protocol TEXT NOT NULL,
             bytes INTEGER NOT NULL DEFAULT 0,
             packets INTEGER NOT NULL DEFAULT 0,
+            ingress_if_index INTEGER,
+            egress_if_index INTEGER,
+            tcp_flags INTEGER NOT NULL DEFAULT 0,
+            sampling_rate INTEGER NOT NULL DEFAULT 1,
+            dscp INTEGER NOT NULL DEFAULT 0,
+            bgp_next_hop TEXT,
             observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS aggregated_flows_1m (
+            bucket_start TEXT NOT NULL,
+            protocol TEXT NOT NULL,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            packets INTEGER NOT NULL DEFAULT 0,
+            flow_count INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (bucket_start, protocol)
+        );
+
+        CREATE TABLE IF NOT EXISTS aggregated_conversations_1m (
+            bucket_start TEXT NOT NULL,
+            source_ip TEXT NOT NULL,
+            destination_ip TEXT NOT NULL,
+            source_port INTEGER NOT NULL,
+            destination_port INTEGER NOT NULL,
+            protocol TEXT NOT NULL,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            packets INTEGER NOT NULL DEFAULT 0,
+            tcp_flags INTEGER NOT NULL DEFAULT 0,
+            ingress_if_index INTEGER,
+            egress_if_index INTEGER,
+            PRIMARY KEY (bucket_start, source_ip, destination_ip, source_port, destination_port, protocol)
+        );
+
+        CREATE TABLE IF NOT EXISTS aggregated_conversations_1m_v2 (
+            bucket_start TEXT NOT NULL,
+            exporter_ip TEXT NOT NULL,
+            source_ip TEXT NOT NULL,
+            destination_ip TEXT NOT NULL,
+            source_port INTEGER NOT NULL,
+            destination_port INTEGER NOT NULL,
+            protocol TEXT NOT NULL,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            packets INTEGER NOT NULL DEFAULT 0,
+            tcp_flags INTEGER NOT NULL DEFAULT 0,
+            ingress_if_index INTEGER,
+            egress_if_index INTEGER,
+            PRIMARY KEY (bucket_start, exporter_ip, source_ip, destination_ip, source_port, destination_port, protocol)
         );
 
         CREATE INDEX IF NOT EXISTS idx_device_metrics_device_sampled
@@ -81,14 +132,48 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             ON alert_events(device_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_flow_records_observed
             ON flow_records(observed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_aggregated_flows_bucket
+            ON aggregated_flows_1m(bucket_start DESC);
+        CREATE INDEX IF NOT EXISTS idx_aggregated_conversations_bucket
+            ON aggregated_conversations_1m(bucket_start DESC);
+        CREATE INDEX IF NOT EXISTS idx_aggregated_conversations_v2_bucket
+            ON aggregated_conversations_1m_v2(bucket_start DESC, exporter_ip);
         "#,
     )?;
 
     ensure_interface_sample_columns(&connection)?;
     ensure_device_metrics_nullable(&connection)?;
     ensure_device_metrics_columns(&connection)?;
+    ensure_flow_record_columns(&connection)?;
 
     Ok(connection)
+}
+
+fn ensure_flow_record_columns(connection: &Connection) -> Result<(), AppError> {
+    let mut stmt = connection.prepare("PRAGMA table_info(flow_records)")?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|row| row.ok())
+        .collect();
+    for (name, definition) in [
+        ("ingress_if_index", "INTEGER"),
+        ("exporter_ip", "TEXT"),
+        ("egress_if_index", "INTEGER"),
+        ("tcp_flags", "INTEGER NOT NULL DEFAULT 0"),
+        ("sampling_rate", "INTEGER NOT NULL DEFAULT 1"),
+        ("dscp", "INTEGER NOT NULL DEFAULT 0"),
+        ("bgp_next_hop", "TEXT"),
+    ] {
+        if !columns.iter().any(|column| column == name) {
+            connection.execute(
+                &format!("ALTER TABLE flow_records ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_flow_records_protocol_time ON flow_records(observed_at, protocol)", [])?;
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_flow_records_pair_time ON flow_records(observed_at, source_ip, destination_ip)", [])?;
+    Ok(())
 }
 
 fn ensure_interface_sample_columns(connection: &Connection) -> Result<(), AppError> {

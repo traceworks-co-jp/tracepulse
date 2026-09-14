@@ -16,3 +16,8 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 snmp = "0.2.2"
 ratatui = "0.28"
 crossterm = "0.28"
+socket2 = "0.5"
+windows-sys = { version = "0.59", features = [
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

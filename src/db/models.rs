@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
@@ -103,6 +104,7 @@ pub struct InterfacePortDelta {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowRecord {
+    pub exporter_ip: Option<String>,
     pub source_ip: String,
     pub destination_ip: String,
     pub source_port: u16,
@@ -110,6 +112,12 @@ pub struct FlowRecord {
     pub protocol: String,
     pub bytes: u64,
     pub packets: u64,
+    pub ingress_if_index: Option<u32>,
+    pub egress_if_index: Option<u32>,
+    pub tcp_flags: u8,
+    pub sampling_rate: u32,
+    pub dscp: u8,
+    pub bgp_next_hop: Option<IpAddr>,
     pub observed_at: String,
 }
 
@@ -119,6 +127,7 @@ pub struct ProtocolShare {
     pub bytes: u64,
     pub percentage: f64,
     pub bps: f64,
+    pub pps: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,4 +139,43 @@ pub struct TopTalker {
     pub protocol: String,
     pub bytes: u64,
     pub bps: u64,
+    pub packets: u64,
+    pub pps: u64,
+    pub app_name: String,
+    pub ingress_if_index: Option<u32>,
+    pub egress_if_index: Option<u32>,
+    pub ingress_if_name: Option<String>,
+    pub egress_if_name: Option<String>,
+    pub tcp_flags: u8,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowSummary {
+    pub total_bps: f64,
+    pub total_pps: f64,
+    pub active_flows: u64,
+    pub top_protocol: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowApplicationShare {
+    pub app_name: String,
+    pub bytes: u64,
+    pub percentage: f64,
+    pub bps: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowEndpointShare {
+    pub ip: String,
+    pub bps: f64,
+    pub percentage: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowTimeseries {
+    pub timestamp: String,
+    pub udp_bps: f64,
+    pub tcp_bps: f64,
+    pub icmp_bps: f64,
 }

@@ -1,0 +1,5 @@
+# Custom application names for Traffic & Protocols.
+# Keys are destination ports. Custom entries override built-in names.
+[services]
+# "8443" = "HTTPS-Alt"
+# "5353" = "mDNS"

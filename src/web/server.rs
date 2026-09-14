@@ -70,6 +70,14 @@ type JobStore = Arc<Mutex<HashMap<String, ScanJob>>>;
 
 pub use crate::notifications::NotificationSettingsProvider;
 
+pub trait EnterpriseAnalyticsProvider: Send + Sync {
+    fn sankey_json(&self) -> String;
+    fn geoip_json(&self) -> String;
+    fn scope_json(&self) -> String;
+    fn set_scope_json(&self, body: &str) -> String;
+    fn bgp_qos_json(&self) -> String;
+}
+
 type NotificationProvider = Option<Arc<dyn NotificationSettingsProvider>>;
 
 pub struct WebServer {
@@ -82,6 +90,8 @@ pub struct WebServer {
     edition: WebEdition,
     alerts: AlertBroadcaster,
     notifications: NotificationProvider,
+    enterprise_analytics: Option<Arc<dyn EnterpriseAnalyticsProvider>>,
+    flow_repository: Option<Arc<dyn crate::flow::FlowRepository>>,
 }
 
 impl WebServer {
@@ -137,6 +147,8 @@ impl WebServer {
             edition,
             alerts,
             notifications: None,
+            enterprise_analytics: None,
+            flow_repository: None,
         }
     }
 
@@ -145,6 +157,22 @@ impl WebServer {
         provider: Arc<dyn NotificationSettingsProvider>,
     ) -> Self {
         self.notifications = Some(provider);
+        self
+    }
+
+    pub fn with_flow_repository(
+        mut self,
+        repository: Arc<dyn crate::flow::FlowRepository>,
+    ) -> Self {
+        self.flow_repository = Some(repository);
+        self
+    }
+
+    pub fn with_enterprise_analytics(
+        mut self,
+        provider: Arc<dyn EnterpriseAnalyticsProvider>,
+    ) -> Self {
+        self.enterprise_analytics = Some(provider);
         self
     }
 
@@ -164,31 +192,45 @@ impl WebServer {
                 run_polling_loop(cfg, repo, alerts, true);
             });
         }
-        crate::flow::FlowCollector::start(
-            Arc::clone(&self.repository),
-            crate::flow::FlowCollectorConfig::default(),
-        );
+        let flow_config = self
+            .config
+            .lock()
+            .map(|config| crate::flow::FlowCollectorConfig::from_app_config(&config))
+            .unwrap_or_default();
+        if let Some(flow_repository) = &self.flow_repository {
+            crate::flow::FlowCollector::start_with_repository(
+                Arc::clone(flow_repository),
+                flow_config,
+            );
+        } else {
+            crate::flow::FlowCollector::start(Arc::clone(&self.repository), flow_config);
+        }
 
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
+                    let _ = stream.set_nodelay(true);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
                     let repo = Arc::clone(&self.repository);
                     let jobs = Arc::clone(&self.jobs);
                     let cfg = Arc::clone(&self.config);
                     let cfg_path = self.config_path.clone();
                     let edition = self.edition;
                     let notifications = self.notifications.clone();
-                    if let Err(err) = handle_connection(
-                        stream,
-                        repo,
-                        jobs,
-                        cfg,
-                        cfg_path,
-                        edition,
-                        notifications,
-                    ) {
-                        eprintln!("web request failed: {err}");
-                    }
+                    let enterprise_analytics = self.enterprise_analytics.clone();
+                    std::thread::spawn(move || {
+                        let _ = handle_connection(
+                            stream,
+                            repo,
+                            jobs,
+                            cfg,
+                            cfg_path,
+                            edition,
+                            notifications,
+                            enterprise_analytics,
+                        );
+                    });
                 }
                 Err(err) => {
                     eprintln!("accept failed: {err}");
@@ -273,12 +315,43 @@ fn respond(
     Ok(())
 }
 
+fn respond_static(
+    mut stream: TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<(), AppError> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: public, max-age=86400\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn respond_app_js(mut stream: TcpStream, body: &str) -> Result<(), AppError> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache, must-revalidate\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
 fn respond_json(stream: TcpStream, status: &str, body: String) -> Result<(), AppError> {
     respond(stream, status, "application/json; charset=utf-8", body)
 }
 
 fn respond_html(stream: TcpStream, body: String) -> Result<(), AppError> {
     respond(stream, "200 OK", "text/html; charset=utf-8", body)
+}
+
+fn respond_js(stream: TcpStream, body: &str) -> Result<(), AppError> {
+    respond_app_js(stream, body)
 }
 
 // ─── Router ──────────────────────────────────────────────────────────────────
@@ -291,8 +364,60 @@ fn handle_connection(
     cfg_path: std::path::PathBuf,
     edition: WebEdition,
     notifications: NotificationProvider,
+    enterprise_analytics: Option<Arc<dyn EnterpriseAnalyticsProvider>>,
 ) -> Result<(), AppError> {
     let req = parse_request(&stream)?;
+    let clean_path = req.path.split('?').next().unwrap_or(&req.path);
+
+    if req.method == "GET" && clean_path == "/static/js/device-detail.js" {
+        return respond_js(stream, DEVICE_DETAIL_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/dashboard.js" {
+        return respond_js(stream, DASHBOARD_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/enterprise-analytics.js" {
+        return respond_js(stream, ENTERPRISE_ANALYTICS_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/geo-map.js" {
+        return respond_js(stream, GEO_MAP_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/echarts.min.js" {
+        return respond_static(
+            stream,
+            "200 OK",
+            "application/javascript; charset=utf-8",
+            ECHARTS_BUNDLE_JS,
+        );
+    }
+    if req.method == "GET" && clean_path == "/static/world.json" {
+        return respond_static(
+            stream,
+            "200 OK",
+            "application/json; charset=utf-8",
+            WORLD_GEOJSON,
+        );
+    }
+    if req.method == "GET" && clean_path == "/static/js/settings.js" {
+        return respond_js(stream, SETTINGS_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/notifications.js" {
+        return respond_js(stream, NOTIFICATIONS_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/diagnostics.js" {
+        return respond_js(stream, DIAGNOSTICS_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/discovery.js" {
+        return respond_js(stream, DISCOVERY_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/topology.js" {
+        return respond_js(stream, TOPOLOGY_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/theme.js" {
+        return respond_js(stream, THEME_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/i18n.js" {
+        return respond_js(stream, I18N_BUNDLE_JS);
+    }
 
     // Route: GET /api/discovery/scan/<job_id>
     if req.method == "GET" && req.path.starts_with("/api/discovery/scan/") {
@@ -311,9 +436,63 @@ fn handle_connection(
         return respond_json(stream, "200 OK", body);
     }
 
-    if req.method == "GET" && req.path == "/api/flow/analytics" {
-        let body = api_flow_analytics(&repo);
+    if req.method == "GET" && req.path.starts_with("/api/flow/analytics") {
+        let (window_seconds, limit) = flow_analytics_options(&req.path);
+        let body = api_flow_analytics(&repo, window_seconds, limit);
         return respond_json(stream, "200 OK", body);
+    }
+    if req.method == "GET" && req.path == "/api/enterprise/sankey" {
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.sankey_json()),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path == "/api/enterprise/geoip" {
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.geoip_json()),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path == "/api/enterprise/bgp-qos" {
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.bgp_qos_json()),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path == "/api/enterprise/scope" {
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.scope_json()),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "POST" && req.path == "/api/enterprise/scope" {
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.set_scope_json(&req.body)),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path == "/api/system/metrics" {
+        return respond_json(stream, "200 OK", api_system_metrics());
     }
 
     if req.method == "DELETE" && req.path.starts_with("/api/device/") {
@@ -328,6 +507,10 @@ fn handle_connection(
         return respond_html(stream, page_device_detail(&ip, &repo));
     }
 
+    if req.method == "GET" && req.path == "/geo-map" {
+        return respond_html(stream, page_geo_map());
+    }
+
     if req.method == "GET" && req.path.starts_with("/diagnostics") {
         return respond_html(stream, page_diagnostics(&req.path, &cfg));
     }
@@ -336,9 +519,7 @@ fn handle_connection(
         ("GET", "/") | ("GET", "/dashboard") => respond_html(stream, page_dashboard(&repo, &cfg)),
         ("GET", "/discovery") => respond_html(stream, page_discovery(&repo, edition)),
         ("GET", "/diagnostics") => respond_html(stream, page_diagnostics("/diagnostics", &cfg)),
-        ("GET", "/settings") => {
-            respond_html(stream, page_settings(&cfg, notifications.is_some()))
-        }
+        ("GET", "/settings") => respond_html(stream, page_settings(&cfg, notifications.is_some())),
         ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
         ("GET", "/api/devices") => respond_json(stream, "200 OK", api_devices(&repo, &cfg)),
         ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
@@ -400,21 +581,85 @@ fn api_summary(repo: &Arc<Mutex<Repository>>) -> String {
     )
 }
 
-fn api_flow_analytics(repo: &Arc<Mutex<Repository>>) -> String {
+fn api_system_metrics() -> String {
+    let (received, parsed, dropped, latency) = crate::flow::metrics();
+    let latency = latency.map_or_else(|| "null".to_string(), |value| format!("{value:.3}"));
+    let process_memory = crate::flow::process_memory_bytes()
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
+    let live_memory = crate::flow::live_memory_bytes();
+    format!(
+        r#"{{"received_flows_total":{received},"parsed_flows_total":{parsed},"dropped_flows_total":{dropped},"db_write_latency_ms":{latency},"process_memory_bytes":{process_memory},"live_buffer_bytes":{live_memory},"live_buffer_limit_bytes":{}}}"#,
+        512_u64 * 1024 * 1024
+    )
+}
+
+fn flow_analytics_options(path: &str) -> (i64, usize) {
+    let query = path.split_once('?').map(|(_, value)| value).unwrap_or("");
+    let mut window_seconds = 60_i64;
+    let mut limit = 10_usize;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        match key {
+            "window" => {
+                window_seconds = match value {
+                    "5m" => 300,
+                    "1h" => 3600,
+                    "24h" => 86400,
+                    _ => value
+                        .strip_suffix('s')
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(60),
+                };
+            }
+            "limit" => limit = value.parse::<usize>().unwrap_or(10).clamp(1, 100),
+            _ => {}
+        }
+    }
+    (window_seconds.clamp(1, 86400), limit)
+}
+
+fn api_flow_analytics(repo: &Arc<Mutex<Repository>>, window_seconds: i64, limit: usize) -> String {
+    if window_seconds <= 60 {
+        let records = crate::flow::live_records(window_seconds);
+        if !records.is_empty() {
+            return api_live_flow_analytics(&records, window_seconds, limit);
+        }
+    }
     let Ok(repo) = repo.lock() else {
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
-    let shares = repo.protocol_shares(60).unwrap_or_default();
-    let talkers = repo.top_talkers(60, 5).unwrap_or_default();
+    let shares = repo.protocol_shares(window_seconds).unwrap_or_default();
+    let talkers = repo.top_talkers(window_seconds, limit).unwrap_or_default();
+    let summary =
+        repo.flow_summary(window_seconds)
+            .unwrap_or_else(|_| crate::db::models::FlowSummary {
+                total_bps: 0.0,
+                total_pps: 0.0,
+                active_flows: 0,
+                top_protocol: "-".to_string(),
+            });
+    let applications = repo
+        .flow_applications(window_seconds, limit)
+        .unwrap_or_default();
+    let sources = repo
+        .flow_endpoints(window_seconds, true, limit)
+        .unwrap_or_default();
+    let destinations = repo
+        .flow_endpoints(window_seconds, false, limit)
+        .unwrap_or_default();
+    let timeseries = repo.flow_timeseries(window_seconds).unwrap_or_default();
     let shares_json = shares
         .iter()
         .map(|share| {
             format!(
-                r#"{{"protocol":"{}","bytes":{},"percentage":{:.2},"bps":{:.0}}}"#,
+                r#"{{"protocol":"{}","bytes":{},"percentage":{:.2},"bps":{:.0},"pps":{:.2}}}"#,
                 escape_json(&share.protocol),
                 share.bytes,
                 share.percentage,
                 share.bps,
+                share.pps,
             )
         })
         .collect::<Vec<_>>()
@@ -423,22 +668,264 @@ fn api_flow_analytics(repo: &Arc<Mutex<Repository>>) -> String {
     .iter()
     .map(|talker| {
       format!(
-        r#"{{"source_ip":"{}","destination_ip":"{}","source_port":{},"destination_port":{},"protocol":"{}","bytes":{},"bps":{}}}"#,
+        r#"{{"source_ip":"{}","destination_ip":"{}","source_port":{},"destination_port":{},"protocol":"{}","app_name":"{}","bytes":{},"packets":{},"bps":{},"pps":{},"tcp_flags":[{}],"ingress_if_index":{},"ingress_if_name":{},"egress_if_index":{},"egress_if_name":{}}}"#,
         escape_json(&talker.source_ip),
         escape_json(&talker.destination_ip),
         talker.source_port,
         talker.destination_port,
         escape_json(&talker.protocol),
+        escape_json(&talker.app_name),
         talker.bytes,
+        talker.packets,
         talker.bps,
+        talker.pps,
+        tcp_flags_json(talker.tcp_flags),
+        talker.ingress_if_index.map_or_else(|| "null".to_string(), |value| value.to_string()),
+        format!("\"{}\"", escape_json(&flow_interface_name(talker.ingress_if_index, talker.ingress_if_name.as_deref()))),
+        talker.egress_if_index.map_or_else(|| "null".to_string(), |value| value.to_string()),
+        format!("\"{}\"", escape_json(&flow_interface_name(talker.egress_if_index, talker.egress_if_name.as_deref()))),
       )
     })
     .collect::<Vec<_>>()
     .join(",");
+    let applications_json = applications
+        .iter()
+        .map(|item| {
+            format!(
+                r#"{{"app_name":"{}","bytes":{},"percentage":{:.2},"bps":{:.0}}}"#,
+                escape_json(&item.app_name),
+                item.bytes,
+                item.percentage,
+                item.bps
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let endpoints_json = |items: &Vec<crate::db::models::FlowEndpointShare>| {
+        items
+            .iter()
+            .map(|item| {
+                format!(
+                    r#"{{"ip":"{}","bps":{:.0},"percentage":{:.2}}}"#,
+                    escape_json(&item.ip),
+                    item.bps,
+                    item.percentage
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let timeseries_json = timeseries
+        .iter()
+        .map(|item| {
+            format!(
+                r#"{{"timestamp":"{}","udp_bps":{:.0},"tcp_bps":{:.0},"icmp_bps":{:.0}}}"#,
+                escape_json(&item.timestamp),
+                item.udp_bps,
+                item.tcp_bps,
+                item.icmp_bps
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        r#"{{"window_seconds":60,"protocols":[{}],"top_talkers":[{}]}}"#,
-        shares_json, talkers_json
+        r#"{{"window_seconds":{},"summary":{{"total_bps":{:.0},"total_pps":{:.2},"active_flows":{},"top_protocol":"{}"}},"timeseries":[{}],"protocols":[{}],"applications":[{}],"top_sources":[{}],"top_destinations":[{}],"top_talkers":[{}]}}"#,
+        window_seconds,
+        summary.total_bps,
+        summary.total_pps,
+        summary.active_flows,
+        escape_json(&summary.top_protocol),
+        timeseries_json,
+        shares_json,
+        applications_json,
+        endpoints_json(&sources),
+        endpoints_json(&destinations),
+        talkers_json
     )
+}
+
+fn api_live_flow_analytics(
+    records: &[crate::db::models::FlowRecord],
+    window_seconds: i64,
+    limit: usize,
+) -> String {
+    let mut protocols: HashMap<String, (u64, u64)> = HashMap::new();
+    let mut conversations: HashMap<(String, String, u16, u16, String), (u64, u64, u8)> =
+        HashMap::new();
+    let mut applications: HashMap<(String, u16), u64> = HashMap::new();
+    let mut sources: HashMap<String, u64> = HashMap::new();
+    let mut destinations: HashMap<String, u64> = HashMap::new();
+    let mut timeseries: HashMap<String, (u64, u64, u64)> = HashMap::new();
+    for record in records {
+        let protocol = protocols.entry(record.protocol.clone()).or_default();
+        protocol.0 = protocol.0.saturating_add(record.bytes);
+        protocol.1 = protocol.1.saturating_add(record.packets);
+        let key = (
+            record.source_ip.clone(),
+            record.destination_ip.clone(),
+            record.source_port,
+            record.destination_port,
+            record.protocol.clone(),
+        );
+        let conversation = conversations.entry(key).or_default();
+        conversation.0 = conversation.0.saturating_add(record.bytes);
+        conversation.1 = conversation.1.saturating_add(record.packets);
+        conversation.2 |= record.tcp_flags;
+        *applications
+            .entry((record.protocol.clone(), record.destination_port))
+            .or_default() += record.bytes;
+        *sources.entry(record.source_ip.clone()).or_default() += record.bytes;
+        *destinations
+            .entry(record.destination_ip.clone())
+            .or_default() += record.bytes;
+        let bucket = record
+            .observed_at
+            .get(..16)
+            .unwrap_or(&record.observed_at)
+            .to_string();
+        let traffic = timeseries.entry(bucket).or_default();
+        match record.protocol.as_str() {
+            "UDP" => traffic.0 += record.bytes,
+            "TCP" => traffic.1 += record.bytes,
+            "ICMP" => traffic.2 += record.bytes,
+            _ => {}
+        }
+    }
+    let total_bytes: u64 = protocols.values().map(|value| value.0).sum();
+    let total_packets: u64 = protocols.values().map(|value| value.1).sum();
+    let protocol_json = protocols
+        .iter()
+        .map(|(protocol, (bytes, packets))| {
+            format!(
+                r#"{{"protocol":"{}","bytes":{},"percentage":{:.2},"bps":{:.0},"pps":{:.2}}}"#,
+                escape_json(protocol),
+                bytes,
+                *bytes as f64 * 100.0 / total_bytes.max(1) as f64,
+                *bytes as f64 * 8.0 / window_seconds.max(1) as f64,
+                *packets as f64 / window_seconds.max(1) as f64
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut conversation_rows: Vec<_> = conversations
+        .into_iter()
+        .map(
+            |(
+                (source, destination, source_port, destination_port, protocol),
+                (bytes, packets, flags),
+            )| {
+                (
+                    bytes,
+                    source,
+                    destination,
+                    source_port,
+                    destination_port,
+                    protocol,
+                    packets,
+                    flags,
+                )
+            },
+        )
+        .collect();
+    conversation_rows.sort_by(|left, right| right.0.cmp(&left.0));
+    let talker_json = conversation_rows.into_iter().take(limit).map(|(bytes, source, destination, source_port, destination_port, protocol, packets, flags)| format!(r#"{{"source_ip":"{}","destination_ip":"{}","source_port":{},"destination_port":{},"protocol":"{}","bytes":{},"packets":{},"bps":{:.0},"pps":{:.2},"tcp_flags":[{}]}}"#, escape_json(&source), escape_json(&destination), source_port, destination_port, escape_json(&protocol), bytes, packets, bytes as f64 * 8.0 / window_seconds.max(1) as f64, packets as f64 / window_seconds.max(1) as f64, tcp_flags_json(flags))).collect::<Vec<_>>().join(",");
+    let applications_json = applications
+        .into_iter()
+        .map(|((protocol, port), bytes)| {
+            format!(
+                r#"{{"app_name":"{}","bytes":{},"percentage":{:.2},"bps":{:.0}}}"#,
+                escape_json(&application_name_for_live(&protocol, port)),
+                bytes,
+                bytes as f64 * 100.0 / total_bytes.max(1) as f64,
+                bytes as f64 * 8.0 / window_seconds.max(1) as f64
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let endpoint_json = |items: HashMap<String, u64>| {
+        items
+            .into_iter()
+            .take(limit)
+            .map(|(ip, bytes)| {
+                format!(
+                    r#"{{"ip":"{}","bps":{:.0},"percentage":{:.2}}}"#,
+                    escape_json(&ip),
+                    bytes as f64 * 8.0 / window_seconds.max(1) as f64,
+                    bytes as f64 * 100.0 / total_bytes.max(1) as f64
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let timeseries_json = timeseries
+        .into_iter()
+        .map(|(timestamp, (udp, tcp, icmp))| {
+            format!(
+                r#"{{"timestamp":"{}","udp_bps":{:.0},"tcp_bps":{:.0},"icmp_bps":{:.0}}}"#,
+                escape_json(&timestamp),
+                udp as f64 * 8.0 / 60.0,
+                tcp as f64 * 8.0 / 60.0,
+                icmp as f64 * 8.0 / 60.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{"window_seconds":{},"summary":{{"total_bps":{:.0},"total_pps":{:.2},"active_flows":{},"top_protocol":"-"}},"timeseries":[{}],"protocols":[{}],"applications":[{}],"top_sources":[{}],"top_destinations":[{}],"top_talkers":[{}]}}"#,
+        window_seconds,
+        total_bytes as f64 * 8.0 / window_seconds.max(1) as f64,
+        total_packets as f64 / window_seconds.max(1) as f64,
+        records.len(),
+        timeseries_json,
+        protocol_json,
+        applications_json,
+        endpoint_json(sources),
+        endpoint_json(destinations),
+        talker_json
+    )
+}
+
+fn application_name_for_live(protocol: &str, port: u16) -> String {
+    match port {
+        22 => format!("SSH ({protocol}/{port})"),
+        53 => format!("DNS ({protocol}/{port})"),
+        80 => format!("HTTP ({protocol}/{port})"),
+        443 => format!("HTTPS ({protocol}/{port})"),
+        _ => format!("{protocol}/{port}"),
+    }
+}
+
+fn tcp_flags_json(flags: u8) -> String {
+    let mut names = Vec::new();
+    if flags & 0x02 != 0 {
+        names.push("\"SYN\"");
+    }
+    if flags & 0x10 != 0 {
+        names.push("\"ACK\"");
+    }
+    if flags & 0x04 != 0 {
+        names.push("\"RST\"");
+    }
+    if flags & 0x01 != 0 {
+        names.push("\"FIN\"");
+    }
+    if flags & 0x08 != 0 {
+        names.push("\"PSH\"");
+    }
+    if flags & 0x20 != 0 {
+        names.push("\"URG\"");
+    }
+    names.join(",")
+}
+
+fn flow_interface_name(index: Option<u32>, name: Option<&str>) -> String {
+    match index {
+        Some(0) => "Internal/Local".to_string(),
+        Some(value) => name
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("if-{value}")),
+        None => "-".to_string(),
+    }
 }
 
 fn api_devices(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> String {
@@ -2076,7 +2563,7 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-    html.push_str(THEME_BOOTSTRAP_JS);
+    html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Dashboard</title>");
     html.push_str(COMMON_CSS);
     html.push_str(DASHBOARD_CSS);
@@ -2090,6 +2577,28 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html.push_str(&format!("<div class='{spike_card_cls}'><div class='card-num'>{spikes_count}</div><div class='card-label' data-i18n='error_spikes'>Error Spikes</div></div>"));
     html.push_str("</div>");
     html.push_str("<p id='last-refreshed' style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'></p>");
+    html.push_str("<section class='enterprise-analytics-panel'>");
+    html.push_str("<div class='enterprise-analytics-toolbar'><label for='enterprise-scope'>Scope</label><select id='enterprise-scope' onchange='setEnterpriseScope(this.value)'><option value=''>All Devices</option><option value='10.0.0.0/8'>Core (10.0.0.0/8)</option><option value='192.168.0.0/16'>Edge (192.168.0.0/16)</option></select></div>");
+    html.push_str("<div class='enterprise-analytics-grid'>");
+    html.push_str("<article class='enterprise-sankey-article'>");
+    html.push_str("<div class='enterprise-card-heading'>");
+    html.push_str("<div class='sankey-title-group'><h2>Sankey Flow</h2><div class='sankey-help-wrap'><button class='sankey-help-btn' type='button' aria-label='Help' title='Sankey Flow について'>ℹ️</button><div class='sankey-help-popover'><div class='sankey-help-title'>Sankey Flow について</div><div class='sankey-help-body'><p>トラフィックがどのポートを通過し、どこへ向かったかの「流動経路」と「流量」を示しています。</p><ul><li><strong>左 ➔ 右:</strong> 送信元 IP ➔ 入力 IF ➔ 出力 IF ➔ 宛先 IP</li><li><strong>帯の太さ:</strong> トラフィック量（Bps / PPS）</li></ul></div></div></div></div>");
+    html.push_str("</div>");
+    html.push_str("<div class='sankey-headers'>");
+    html.push_str("<div class='sankey-col-header col-src'><span class='col-dot dot-src'></span><span class='col-title'>Source IP</span><span class='col-sub'>送信元</span></div>");
+    html.push_str("<div class='sankey-col-header col-ing'><span class='col-dot dot-ing'></span><span class='col-title'>Ingress IF</span><span class='col-sub'>入力IF</span></div>");
+    html.push_str("<div class='sankey-col-header col-egr'><span class='col-dot dot-egr'></span><span class='col-title'>Egress IF</span><span class='col-sub'>出力IF</span></div>");
+    html.push_str("<div class='sankey-col-header col-dst'><span class='col-dot dot-dst'></span><span class='col-title'>Destination IP</span><span class='col-sub'>宛先</span></div>");
+    html.push_str("</div>");
+    html.push_str("<div id='enterprise-sankey' class='enterprise-sankey'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading flow records...</span></div></div>");
+    html.push_str("</article>");
+    html.push_str("<article class='enterprise-geo-article'><div class='enterprise-card-heading'><h2>GeoIP / ASN</h2><a class='enterprise-map-link' href='/geo-map'>Open full-screen map ↗</a></div><div id='enterprise-geoip-list' class='enterprise-geoip-list'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading GeoIP / ASN data...</span></div></div></article>");
+    html.push_str(
+        "<article class='enterprise-bgp-article'><h2>BGP / QoS</h2><div id='enterprise-bgp-qos'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>",
+    );
+    html.push_str("<article class='enterprise-threat-article'><h2>Threat Badges</h2><div id='enterprise-threat-badges'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>");
+    html.push_str("</div>");
+    html.push_str("</section>");
     html.push_str("<table id='dash-table'><thead><tr>");
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");
     html.push_str("<th id='th-name' onclick='sortBy(\"name\")' data-i18n='hostname'>Name <span class='sort-icon' id='sort-name'></span></th>");
@@ -2128,10 +2637,15 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html.push_str("<script>\nvar DEVICES = [");
     html.push_str(&devices_json.join(","));
     html.push_str("];\n");
-    html.push_str(I18N_JS);
-    html.push_str(DASHBOARD_JS);
-    html.push_str("</script></body></html>");
+    html.push_str("</script><script src='/static/js/echarts.min.js'></script><script src='/static/js/i18n.js?v=2'></script><script src='/static/js/dashboard.js?v=2'></script><script src='/static/js/enterprise-analytics.js?v=6'></script></body></html>");
     html
+}
+
+fn page_geo_map() -> String {
+    format!(
+        "{}<html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>TracePulse - GeoIP Map</title>{}<style>html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0b1220;color:#e2e8f0;font-family:system-ui,sans-serif}}#geo-map{{position:absolute;top:0;left:0;width:100vw;height:100vh;z-index:1}}.geo-map-nav{{position:fixed;z-index:10;top:16px;left:20px;display:flex;align-items:center;gap:12px;padding:8px 14px;background:rgba(15,23,42,.85);border:1px solid #334155;border-radius:6px;backdrop-filter:blur(6px)}}.geo-map-nav a{{color:#38bdf8;text-decoration:none;font-size:13px;font-weight:600}}.geo-map-nav span{{color:#94a3b8;font-size:13px}}#geo-panel{{position:fixed;z-index:20;top:0;right:0;width:min(380px,90vw);height:100%;padding:24px;background:rgba(17,28,48,.95);border-left:1px solid #334155;transform:translateX(100%);transition:transform .25s ease;box-sizing:border-box;overflow-y:auto;backdrop-filter:blur(8px)}}#geo-panel.open{{transform:translateX(0)}}.geo-panel-close{{float:right;background:#334155;color:#fff;border:0;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px}}</style></head><body><div class='geo-map-nav'><a href='/'>&#8592; Dashboard</a><span>|</span><strong>GeoIP Traffic Map</strong></div><div id='geo-map'></div><aside id='geo-panel'></aside><script src='/static/js/echarts.min.js'></script><script src='/static/js/geo-map.js?v=4'></script></body></html>",
+        HTML_DOCTYPE, COMMON_CSS
+    )
 }
 
 fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> String {
@@ -2140,7 +2654,7 @@ fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> St
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-    html.push_str(THEME_BOOTSTRAP_JS);
+    html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Settings</title>");
     html.push_str(COMMON_CSS);
     html.push_str(SETTINGS_CSS);
@@ -2167,12 +2681,11 @@ fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> St
     } else {
         html.push_str("var INIT = {interval:30,community:'public',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
     }
-    html.push_str(I18N_JS);
-    html.push_str(SETTINGS_JS);
+    html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/settings.js'></script>");
     if notifications_enabled {
-        html.push_str(NOTIFICATIONS_JS);
+        html.push_str("<script src='/static/js/notifications.js'></script>");
     }
-    html.push_str("</script></body></html>");
+    html.push_str("</body></html>");
     html
 }
 
@@ -2182,7 +2695,7 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-    html.push_str(THEME_BOOTSTRAP_JS);
+    html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str(&format!(
         "<title>TracePulse \u{2013} {}</title>",
         escape_json(ip)
@@ -2213,14 +2726,14 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
          <a href='/' style='color:#94a3b8;font-size:.85rem;text-decoration:none' data-i18n='nav_dashboard'>&#8592; Dashboard</a>\
          <h1 id='dev-title' style='margin:0'>Loading...</h1>\
          <span id='dev-status' class='status-unknown'>unknown</span>\
-         <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Auto refresh: 30s</span>\
+         <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Device data auto-refresh: 30s</span>\
          </div>",
     ));
 
     // セクション: インターフェース一覧
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='interface_status'>Interface Status</h2>");
-    html.push_str("<div class='table-scroll'><table id='if-table'><thead><tr>\
+    html.push_str("<div class='table-scroll interface-table-scroll'><table id='if-table'><thead><tr>\
         <th>#</th><th data-i18n='interface'>Interface</th><th data-i18n='status'>Link</th>\
         <th data-i18n='diagnostic_status'>Diagnostic Status</th>\
         <th data-i18n='in_errors'>In Errors</th><th data-i18n='out_errors'>Out Errors</th>\
@@ -2299,9 +2812,7 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
         "<script>\nvar DEVICE_IP = '{}';\n",
         escape_json(ip)
     ));
-    html.push_str(I18N_JS);
-    html.push_str(DEVICE_DETAIL_JS);
-    html.push_str("</script></body></html>");
+    html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/device-detail.js'></script></body></html>");
     html
 }
 
@@ -2327,7 +2838,7 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String 
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-    html.push_str(THEME_BOOTSTRAP_JS);
+    html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Discovery</title>");
     html.push_str(COMMON_CSS);
     html.push_str(DISCOVERY_CSS);
@@ -2335,6 +2846,8 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String 
     html.push_str(NAV_HTML);
     html.push_str(DISCOVERY_HTML);
     html.push_str("<script>\nconst EXISTING = new Set(");
+    html.push_str(&existing_set);
+    html.push_str(");\nwindow.DISCOVERY_EXISTING = new Set(");
     html.push_str(&existing_set);
     html.push_str(");\n");
     html.push_str(&format!(
@@ -2345,9 +2858,7 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String 
             .map(|limit| limit.to_string())
             .unwrap_or_else(|| "null".to_string())
     ));
-    html.push_str(I18N_JS);
-    html.push_str(DISCOVERY_JS);
-    html.push_str("</script></body></html>");
+    html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/topology.js'></script><script src='/static/js/discovery.js'></script></body></html>");
     html
 }
 
@@ -2602,7 +3113,7 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-    html.push_str(THEME_BOOTSTRAP_JS);
+    html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Diagnostics</title>");
     html.push_str(COMMON_CSS);
     html.push_str(SETTINGS_CSS);
@@ -2703,17 +3214,13 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
     html.push_str(&result_html);
     html.push_str("</main>");
     html.push_str("<script>\n");
-    html.push_str(I18N_JS);
-    html.push_str(DIAGNOSTICS_JS);
-    html.push_str("</script></body></html>");
+    html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/diagnostics.js'></script></body></html>");
     html
 }
 
 // ─── Shared HTML components ───────────────────────────────────────────────────
 
 const HTML_DOCTYPE: &str = "<!doctype html>";
-const THEME_BOOTSTRAP_JS: &str = "<script>try{document.documentElement.dataset.theme=localStorage.getItem('tracepulse-theme')||'dark';}catch(e){document.documentElement.dataset.theme='dark';}</script>";
-
 const COMMON_CSS: &str = "<style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root { color-scheme: dark; }
@@ -2840,553 +3347,6 @@ const NAV_HTML: &str = "<nav>
   </div>
 </nav>";
 
-const I18N_JS: &str = r"
-var I18N = {
-  en: {
-    nav_dashboard: 'Dashboard',
-    nav_discovery: 'Discovery',
-    nav_diagnostics: 'Diagnostics',
-    nav_settings: 'Settings',
-    recent_alerts_title: 'Recent Alerts',
-    theme_label: 'Theme',
-    theme_dark: 'Dark',
-    theme_light: 'Light',
-    language_label: 'Language',
-    english: 'English',
-    japanese: 'Japanese',
-    dashboard_title: 'Dashboard',
-    discovery_title: 'Device Discovery',
-    diagnostics_title: 'SNMP Diagnostics',
-    settings_title: 'Settings',
-    device_title_prefix: 'Device',
-    interface_status: 'Interface Status',
-    interface_filter_title: 'Interface Selection',
-    select_all_interfaces: 'Select All',
-    clear_all_interfaces: 'Clear All',
-    bandwidth_title: 'Bandwidth Utilization (%)',
-    bandwidth_line1: 'Bandwidth',
-    bandwidth_line2: 'Utilization (%)',
-    error_discard_title: 'Error & Discard Counters',
-    cpu_memory_title: 'CPU & Memory Usage (%)',
-    cpu_usage_title: 'CPU Usage (%)',
-    memory_used_title: 'Memory Used',
-    memory_usage_title: 'Memory Usage (%)',
-    recent_spikes_title: 'Recent Interface Spikes',
-    alert_history: 'Alert History',
-    polling: 'Polling',
-    snmp: 'SNMP',
-    display: 'Display',
-    time_zone: 'Time Zone',
-    time_zone_hint: 'Controls how timestamps are shown in the web UI',
-    timezone_utc: 'UTC',
-    timezone_jst: 'JST',
-    alert_thresholds: 'Alert Thresholds',
-    data_retention: 'Data Retention',
-    polling_interval_label: 'Polling Interval (seconds)',
-    polling_interval_hint: 'Range: 5 – 600 seconds (default: 30)',
-    default_community: 'Default Community String',
-    public_placeholder: 'public',
-    default_community_hint: 'Used when no community is specified per device',
-    error_rate_threshold: 'Error Rate Threshold (0.0 – 1.0)',
-    error_rate_hint: 'e.g. 0.05 = alert when error rate exceeds 5%',
-    spike_threshold: 'Spike Threshold (error count delta)',
-    spike_threshold_hint: 'Alert when error count jumps by this amount between polls',
-    warning_threshold: 'Health Score — Warning threshold (0 – 100)',
-    warning_threshold_hint: 'Score below this value turns status yellow (Warning)',
-    critical_threshold: 'Health Score — Critical threshold (0 – 100)',
-    critical_threshold_hint: 'Score below this value turns status red (Critical)',
-    score_preview: 'Score preview',
-    score_formula: 'Health score (0–100) = 100 − error_rate×1.5 − bandwidth×0.3 − cpu/3 − memory/3',
-    history_retention: 'History Retention (days)',
-    history_retention_hint: 'Polling history older than this is purged automatically',
-    save_settings: 'Save Settings',
-    reset_defaults: 'Reset to Defaults',
-    settings_saved: 'Settings saved',
-    notifications: 'Alert Notifications (Slack / Teams)',
-    slack_enabled: 'Enable Slack notifications',
-    teams_enabled: 'Enable Teams notifications',
-    webhook_url_hint: 'Leave empty to fall back to the environment variable below. ${ENV_NAME} placeholders are expanded.',
-    webhook_env_hint: 'Environment variable used when no URL is set',
-    flap_window: 'Flap Guard Window (seconds)',
-    flap_window_hint: 'Alerts of the same kind are aggregated within this window',
-    retry_max_attempts: 'Retry Attempts',
-    retry_max_attempts_hint: 'Number of webhook delivery attempts (1 – 10)',
-    save_notifications: 'Save Notification Settings',
-    send_test: 'Send test notification',
-    send_test_all: 'Test all enabled channels',
-    notifications_saved: 'Notification settings saved',
-    sending_test: 'Sending test notification…',
-    test_sent: 'Test notification sent',
-    device_discovery: 'Device Discovery',
-    cidr_range: 'CIDR Range',
-    cidr_range_placeholder: '192.168.1.0/24',
-    cidr_range_placeholder_enterprise: 'Example: 192.168.11.0/24, 10.0.0.0/24 (comma-separated)',
-    community: 'Community',
-    public_placeholder: 'public',
-    scan: 'Scan',
-    cancel: 'Cancel',
-    add_manually: '+ Add manually',
-    add_device_manually: 'Add Device Manually',
-    ip_address: 'IP Address',
-    ip_address_placeholder: '192.168.1.1',
-    name: 'Name',
-    name_placeholder: 'router-01',
-    add: 'Add',
-    registration: 'Registration',
-    hostname: 'Hostname',
-    status: 'Status',
-    in_errors: 'In Errors',
-    out_errors: 'Out Errors',
-    in_discards: 'In Discards',
-    out_discards: 'Out Discards',
-    late_collisions: 'Late Collisions',
-    diagnostic_status: 'Diagnostic Status',
-    diagnostic_healthy: 'Healthy',
-    diagnostic_l1_error: '\u26a0 L1 Error',
-    diagnostic_duplex_mismatch: '\u26a0 Duplex Mismatch',
-    diagnostic_congestion: '\u26a0 Congestion',
-    diagnostic_down: 'Down',
-    registered: 'Registered',
-    select_all: 'Select all',
-    scanning: 'Scanning…',
-    elapsed: 'Elapsed',
-    found: 'found',
-    scan_results_label: 'Scan Results',
-    register: 'Register',
-    selected: 'selected',
-    time: 'Time',
-    type: 'Type',
-    severity: 'Severity',
-    details: 'Details',
-    interface: 'Interface',
-    online: 'Online',
-    warning: 'Warning',
-    offline: 'Offline',
-    total: 'Total',
-    error_spikes: 'Error Spikes',
-    updated: 'Updated',
-    no_data: 'No data yet',
-    no_devices: 'No devices registered yet.',
-    no_interface_data: 'No interface data collected yet',
-    no_interface_spikes: 'No interface spikes recorded',
-    no_alerts: 'No alerts recorded',
-    actions: 'Actions',
-    scan_results: 'Scan Results',
-    run_diagnostics: 'Run Diagnostics',
-    diagnostics_running: 'Diagnosing…',
-    diagnostics_help: 'Check sysObjectID, vendor presets, CPU / memory candidates, and ifIndex mappings.',
-    target_device: 'Target Device',
-    oid_overrides: 'OID Overrides',
-    cpu_oid_override: 'CPU OID Override',
-    memory_oid_override: 'Memory OID Override',
-    hardware_oid_temperature: 'Temperature OID',
-    hardware_oid_power: 'Power OID',
-    hardware_oid_fan: 'Fan OID',
-    save_oid_overrides: 'Save OID Overrides',
-    unregister: 'Unregister',
-    unregistering: 'Unregistering…',
-    unregister_confirm: 'Remove this device from TracePulse?',
-    unregister_success: 'Device unregistered',
-    unregister_failed: 'Failed to unregister device',
-    cpu_candidates: 'CPU Candidates',
-    hardware_candidates: 'Hardware Candidates',
-    hardware_sensors: 'Hardware Sensors',
-    hardware_status_title: 'Hardware Status',
-    memory_candidates: 'Memory Candidates',
-    if_index_list: 'ifIndex List',
-    sys_object_id: 'sysObjectID',
-    enterprise_id: 'Enterprise ID',
-    vendor: 'Vendor',
-    probe: 'Probe',
-    value: 'Value',
-    link_status: 'Link',
-    no_snmp_devices_found: 'No SNMP-responding devices found',
-    registering: 'Registering…',
-    select_at_least_one_device: 'Select at least one device.',
-    request_failed: 'Request failed',
-    register_selected: 'Register Selected',
-    seed_device_ip: 'Seed Device IP (LLDP/CDP)',
-    draw_topology: 'Draw Topology',
-    topology_map: 'Topology Map',
-    topology_zoom_in: 'Zoom in',
-    topology_zoom_out: 'Zoom out',
-    topology_fit: 'Fit',
-    topology_auto_layout: 'Auto layout',
-    topology_export_json: 'Export JSON',
-    topology_export_csv: 'Export CSV',
-    topology_details: 'Details',
-    topology_close: 'Close',
-    topology_empty_hint: 'Enter a seed device IP and run discovery to draw the network map.',
-    topology_running: 'Topology discovery running from {ip}…',
-    topology_no_neighbors: 'No LLDP/CDP neighbors found from {ip}',
-    topology_summary: '{nodes} nodes / {edges} links discovered from {ip}',
-    topology_seed_required: 'Seed device IP is required to draw the topology map.',
-    topology_export_empty: 'Run topology discovery before exporting.',
-    topology_hidden_nodes: '+ {count} nodes hidden (Enterprise Edition for unlimited)',
-    topology_protocol: 'Protocol',
-    topology_local_side: 'Local side',
-    topology_remote_side: 'Remote side',
-    topology_device: 'Device',
-    topology_port: 'Port',
-    topology_link: 'Link',
-    topology_interfaces: 'Interfaces',
-    topology_no_interface_data: 'No interface data',
-    node_type_switch: 'Switch / Router',
-    node_type_endpoint: 'Endpoint',
-    edition_community: 'Community Edition ({limit} Node Limit)',
-    edition_enterprise: 'Enterprise Edition (Unlimited Nodes)',
-    port_health: 'Port Health',
-    port_health_crc: 'CRC Errors',
-    port_health_late_collisions: 'Late Collisions',
-    port_health_discards: 'Discards',
-    error_breakdown_title: 'Error Breakdown',
-    error_breakdown_select_hint: 'Select an interface to inspect corrupted-packet breakdown.',
-    error_breakdown_no_data: 'No error breakdown data collected yet.',
-    error_breakdown_fcs_errors: 'FCS/CRC Errors',
-    error_breakdown_alignment_errors: 'Alignment Errors',
-    error_breakdown_frame_too_longs: 'Oversized Frames',
-    error_breakdown_internal_mac_receive_errors: 'MAC Receive Errors',
-    error_breakdown_hover_title: 'Error Breakdown (since previous poll)',
-    traffic_protocols_title: 'Traffic & Protocols',
-    traffic_protocols_empty: 'No flow records received yet.',
-    traffic_protocols_note: 'Values are estimates based on received flows; device-side sampling is not corrected.',
-    traffic_protocols_share: 'Protocol Share',
-    traffic_protocols_top_talkers: 'Top Talkers'
-  },
-  ja: {
-    nav_dashboard: 'ダッシュボード',
-    nav_discovery: '探索',
-    nav_diagnostics: '診断',
-    recent_alerts_title: '最近のアラート',
-    nav_settings: '設定',
-    theme_label: 'テーマ',
-    theme_dark: 'ダーク',
-    theme_light: 'ライト',
-    language_label: 'Language',
-    english: '英語',
-    japanese: '日本語',
-    dashboard_title: 'ダッシュボード',
-    discovery_title: 'デバイス探索',
-    diagnostics_title: 'SNMP 診断',
-    settings_title: '設定',
-    device_title_prefix: '機器',
-    interface_status: 'インターフェース状態',
-    interface_filter_title: 'インターフェース選択',
-    select_all_interfaces: '全選択',
-    clear_all_interfaces: '全解除',
-    bandwidth_title: '帯域利用率 (%)',
-    bandwidth_line1: '帯域',
-    bandwidth_line2: '利用率 (%)',
-    error_discard_title: 'エラー / ディスカード',
-    cpu_memory_title: 'CPU / メモリ使用率 (%)',
-    cpu_usage_title: 'CPU 使用率 (%)',
-    memory_used_title: 'メモリ使用量',
-    memory_usage_title: 'メモリ使用率 (%)',
-    recent_spikes_title: '最近のインターフェーススパイク',
-    alert_history: 'アラート履歴',
-    polling: 'ポーリング',
-    snmp: 'SNMP',
-    display: '表示',
-    time_zone: '時刻設定',
-    time_zone_hint: 'Web UI 上の時刻表示を切り替えます',
-    timezone_utc: 'UTC',
-    timezone_jst: 'JST',
-    alert_thresholds: 'アラート閾値',
-    data_retention: 'データ保持',
-    polling_interval_label: 'ポーリング間隔（秒）',
-    polling_interval_hint: '範囲: 5 ～ 600 秒（デフォルト: 30）',
-    default_community: 'デフォルトコミュニティ文字列',
-    public_placeholder: 'public',
-    default_community_hint: '各デバイスで community 未指定時に使用',
-    error_rate_threshold: 'エラー率閾値 (0.0 – 1.0)',
-    error_rate_hint: '例: 0.05 = エラー率が 5% を超えたら通知',
-    spike_threshold: 'スパイク閾値（エラーカウント差分）',
-    spike_threshold_hint: 'ポーリング間のエラーカウント増分がこの値を超えると通知',
-    warning_threshold: 'ヘルススコア — Warning 閾値（0 – 100）',
-    warning_threshold_hint: 'この値を下回ると黄色 (Warning)',
-    critical_threshold: 'ヘルススコア — Critical 閾値（0 – 100）',
-    critical_threshold_hint: 'この値を下回ると赤色 (Critical)',
-    score_preview: 'スコア表示',
-    score_formula: 'ヘルススコア (0–100) = 100 − error_rate×1.5 − bandwidth×0.3 − cpu/3 − memory/3',
-    history_retention: '履歴保持期間（日）',
-    history_retention_hint: '指定日数より古いポーリング履歴は自動削除',
-    save_settings: '設定を保存',
-    reset_defaults: 'デフォルトに戻す',
-    settings_saved: '設定を保存しました',
-    notifications: 'アラート通知（Slack / Teams）',
-    slack_enabled: 'Slack 通知を有効にする',
-    teams_enabled: 'Teams 通知を有効にする',
-    webhook_url_hint: '空の場合は下の環境変数から取得します。${環境変数名} 形式の展開にも対応します。',
-    webhook_env_hint: 'URL 未設定時に参照する環境変数名',
-    flap_window: 'フラップ抑制ウィンドウ（秒）',
-    flap_window_hint: '同種のアラートをこの期間内で集約して通知します',
-    retry_max_attempts: 'リトライ回数',
-    retry_max_attempts_hint: 'Webhook 送信の試行回数（1〜10）',
-    save_notifications: '通知設定を保存',
-    send_test: 'テスト通知を送信',
-    send_test_all: '有効なチャンネルを一括テスト',
-    notifications_saved: '通知設定を保存しました',
-    sending_test: 'テスト通知を送信中…',
-    test_sent: 'テスト通知を送信しました',
-    device_discovery: 'デバイス探索',
-    cidr_range: 'CIDR 範囲',
-    cidr_range_placeholder: '192.168.1.0/24',
-    cidr_range_placeholder_enterprise: '例: 192.168.11.0/24, 10.0.0.0/24 (カンマ区切りで複数指定可)',
-    error_breakdown_title: 'エラー詳細（Error Breakdown）',
-    error_breakdown_select_hint: 'インターフェースを選択すると破損パケットの内訳を表示します。',
-    error_breakdown_no_data: 'まだエラー内訳データが収集されていません。',
-    error_breakdown_fcs_errors: 'FCS/CRC エラー',
-    error_breakdown_alignment_errors: 'アライメントエラー',
-    error_breakdown_frame_too_longs: 'フレーム超過（ジャイアント）',
-    error_breakdown_internal_mac_receive_errors: 'MAC 層受信エラー',
-    error_breakdown_hover_title: 'エラー詳細（直近ポーリング差分）',
-    community: 'コミュニティ',
-    public_placeholder: 'public',
-    scan: 'スキャン',
-    cancel: 'キャンセル',
-    add_manually: '+ 手動追加',
-    add_device_manually: 'デバイスを手動追加',
-    ip_address: 'IP アドレス',
-    ip_address_placeholder: '192.168.1.1',
-    name: '名前',
-    name_placeholder: 'router-01',
-    add: '追加',
-    registration: '登録',
-    hostname: 'ホスト名',
-    status: '状態',
-    in_errors: '入力エラー',
-    out_errors: '出力エラー',
-    in_discards: '入力ディスカード',
-    out_discards: '出力ディスカード',
-    late_collisions: '遅延衝突',
-    diagnostic_status: '診断ステータス',
-    diagnostic_healthy: '正常',
-    diagnostic_l1_error: '\u26a0 L1エラー',
-    diagnostic_duplex_mismatch: '\u26a0 Duplex不整合',
-    diagnostic_congestion: '\u26a0 帯域逼迫',
-    diagnostic_down: 'Down',
-    registered: '登録済み',
-    select_all: '全選択',
-    scanning: 'スキャン中…',
-    elapsed: '経過',
-    found: '件検出',
-    scan_results_label: 'スキャン結果',
-    register: '登録',
-    selected: '選択',
-    time: '時刻',
-    type: '種別',
-    severity: '重要度',
-    details: '詳細',
-    interface: 'インターフェース',
-    online: 'Online',
-    warning: 'Warning',
-    offline: 'Offline',
-    total: '合計',
-    error_spikes: 'エラー急増',
-    updated: '更新',
-    no_data: 'データはまだありません',
-    no_devices: 'まだデバイスが登録されていません。',
-    no_interface_data: 'インターフェースデータはまだ収集されていません',
-    no_interface_spikes: 'インターフェーススパイクはまだ記録されていません',
-    no_alerts: 'アラートはまだありません',
-    actions: '操作',
-    scan_results: 'スキャン結果',
-    run_diagnostics: '診断を実行',
-    diagnostics_running: '診断中…',
-    diagnostics_help: 'sysObjectID、ベンダー候補、CPU / メモリ候補、ifIndex マッピングを確認します。',
-    target_device: '対象デバイス',
-    oid_overrides: 'OID 上書き',
-    cpu_oid_override: 'CPU OID 上書き',
-    memory_oid_override: 'メモリ OID 上書き',
-    hardware_oid_temperature: '温度 OID 上書き',
-    hardware_oid_power: '電源 OID 上書き',
-    hardware_oid_fan: 'ファン OID 上書き',
-    save_oid_overrides: 'OID の手動保存',
-    unregister: '登録解除',
-    unregistering: '解除中…',
-    unregister_confirm: 'このデバイスを TracePulse から削除しますか？',
-    unregister_success: 'デバイスを削除しました',
-    unregister_failed: 'デバイスの削除に失敗しました',
-    cpu_candidates: 'CPU 候補',
-    hardware_candidates: 'Hardware 候補',
-    hardware_sensors: 'Hardware センサー',
-    hardware_status_title: 'Hardware ステータス',
-    memory_candidates: 'メモリ候補',
-    if_index_list: 'ifIndex 一覧',
-    sys_object_id: 'sysObjectID',
-    enterprise_id: 'Enterprise ID',
-    vendor: 'ベンダー',
-    probe: '候補',
-    value: '値',
-    link_status: 'リンク',
-    no_snmp_devices_found: 'SNMP 応答のあるデバイスは見つかりませんでした',
-    registering: '登録中…',
-    select_at_least_one_device: '少なくとも1台の機器を選択してください。',
-    request_failed: 'リクエストに失敗しました',
-    register_selected: '選択した機器を登録',
-    seed_device_ip: 'シード機器 IP (LLDP/CDP)',
-    draw_topology: 'トポロジー描画',
-    topology_map: 'トポロジーマップ',
-    topology_zoom_in: '拡大',
-    topology_zoom_out: '縮小',
-    topology_fit: '全体表示',
-    topology_auto_layout: '自動整列',
-    topology_export_json: 'JSON で出力',
-    topology_export_csv: 'CSV で出力',
-    topology_details: '詳細',
-    topology_close: '閉じる',
-    topology_empty_hint: 'シード機器の IP を入力して探索を実行すると構成図を描画します。',
-    topology_running: '{ip} を起点にトポロジーを探索中…',
-    topology_no_neighbors: '{ip} から LLDP/CDP 隣接機器は検出されませんでした',
-    topology_summary: '{ip} から {nodes} ノード / {edges} リンクを検出しました',
-    topology_seed_required: 'トポロジー描画にはシード機器の IP が必要です。',
-    topology_export_empty: 'エクスポート前にトポロジー探索を実行してください。',
-    topology_hidden_nodes: '+ {count} ノードを非表示中（無制限は Enterprise Edition）',
-    topology_protocol: 'プロトコル',
-    topology_local_side: '接続元',
-    topology_remote_side: '接続先',
-    topology_device: '機器名',
-    topology_port: 'ポート',
-    topology_link: 'リンク',
-    topology_interfaces: 'インターフェース',
-    topology_no_interface_data: 'インターフェース情報はありません',
-    node_type_switch: 'スイッチ / ルーター',
-    node_type_endpoint: '端末・その他',
-    edition_community: 'Community Edition（上限 {limit} ノード）',
-    edition_enterprise: 'Enterprise Edition（ノード数無制限）',
-    port_health: 'ポート健全性',
-    port_health_crc: 'CRC エラー',
-    port_health_late_collisions: 'Late Collision',
-    port_health_discards: 'ディスカード',
-    traffic_protocols_title: 'トラフィックとプロトコル',
-    traffic_protocols_empty: 'フローデータをまだ受信していません。',
-    traffic_protocols_note: '※表示値は受信フローに基づく概算値です。機器側のサンプリング設定等による補正は含まれません。',
-    traffic_protocols_share: 'プロトコル構成比',
-    traffic_protocols_top_talkers: 'Top Talkers'
-  }
-};
-
-function t(key, lang) {
-  lang = lang || currentLanguage();
-  return (I18N[lang] && I18N[lang][key]) || (I18N.en && I18N.en[key]) || key;
-}
-
-// {name} 形式のプレースホルダを差し替える
-function tf(key, params, lang) {
-  var text = t(key, lang);
-  Object.keys(params || {}).forEach(function(name) {
-    text = text.split('{' + name + '}').join(params[name]);
-  });
-  return text;
-}
-
-function currentLanguage() {
-  return localStorage.getItem('tracepulse-lang') || 'en';
-}
-
-function setLanguage(lang) {
-  localStorage.setItem('tracepulse-lang', lang);
-  applyLanguage(lang);
-}
-
-function currentTheme() {
-  try { return localStorage.getItem('tracepulse-theme') || 'dark'; } catch (e) { return 'dark'; }
-}
-
-function setTheme(theme) {
-  localStorage.setItem('tracepulse-theme', theme);
-  applyTheme(theme);
-}
-
-function applyTheme(theme) {
-  theme = theme || currentTheme();
-  document.documentElement.dataset.theme = theme;
-  var select = document.getElementById('theme-select');
-  if (select && select.value !== theme) select.value = theme;
-}
-
-function applyLanguage(lang) {
-  lang = lang || currentLanguage();
-  document.documentElement.lang = lang;
-  var select = document.getElementById('lang-select');
-  if (select && select.value !== lang) select.value = lang;
-
-  document.querySelectorAll('[data-i18n]').forEach(function(el) {
-    el.textContent = t(el.dataset.i18n, lang);
-  });
-
-  document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
-    el.placeholder = t(el.dataset.i18nPlaceholder, lang);
-  });
-
-  document.querySelectorAll('[data-i18n-title]').forEach(function(el) {
-    el.title = t(el.dataset.i18nTitle, lang);
-  });
-
-  var titleKey = document.body && document.body.dataset.titleKey;
-  if (titleKey) {
-    document.title = 'TracePulse \u2013 ' + t(titleKey, lang);
-  }
-
-  if (typeof applyPageLanguage === 'function') {
-    applyPageLanguage(lang);
-  }
-}
-
-function currentTimeZoneSetting() {
-  try { return localStorage.getItem('tracepulse-timezone') || 'utc'; } catch (e) { return 'utc'; }
-}
-
-function tracePulseTimeZone() {
-  return currentTimeZoneSetting() === 'jst' ? 'Asia/Tokyo' : 'UTC';
-}
-
-function parseTracePulseTime(iso) {
-  if (!iso) return new Date(NaN);
-  if (/Z$|[+-]\d\d:\d\d$/.test(iso)) return new Date(iso);
-  return new Date(iso.replace(' ', 'T') + 'Z');
-}
-
-function formatTracePulseTimestamp(value) {
-  var d = value instanceof Date ? value : parseTracePulseTime(value);
-  if (isNaN(d)) return value || '-';
-  var parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tracePulseTimeZone(),
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(d);
-  var map = {};
-  parts.forEach(function(p) { if (p.type !== 'literal') map[p.type] = p.value; });
-  return map.month + '/' + map.day + ' ' + map.hour + ':' + map.minute + ':' + map.second;
-}
-
-function formatTracePulseClock(value) {
-  var d = value instanceof Date ? value : parseTracePulseTime(value);
-  if (isNaN(d)) return '-';
-  var parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tracePulseTimeZone(),
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).formatToParts(d);
-  var map = {};
-  parts.forEach(function(p) { if (p.type !== 'literal') map[p.type] = p.value; });
-  return map.hour + ':' + map.minute;
-}
-
-document.addEventListener('DOMContentLoaded', function() {
-  applyTheme(currentTheme());
-  applyLanguage(currentLanguage());
-  document.querySelectorAll('[data-timestamp]').forEach(function(el) {
-    el.textContent = formatTracePulseTimestamp(el.dataset.timestamp);
-  });
-});
-";
-
 const SETTINGS_CSS: &str = "<style>
   .settings-section { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1.5rem; margin-bottom:1.5rem; }
   .settings-section h2 { margin-bottom:1rem; font-size:1rem; color:#38bdf8; border-bottom:1px solid #334155; padding-bottom:.5rem; }
@@ -3503,76 +3463,6 @@ const SETTINGS_HTML: &str = "<main>
 </div>
 </main>";
 
-const SETTINGS_JS: &str = r"
-function populateForm(d) {
-  document.getElementById('interval').value    = d.interval;
-  document.getElementById('community').value   = d.community;
-  document.getElementById('timezone').value    = d.timezone || 'utc';
-  try { localStorage.setItem('tracepulse-timezone', document.getElementById('timezone').value); } catch (e) {}
-  document.getElementById('error_rate').value  = d.error_rate;
-  document.getElementById('spike').value       = d.spike;
-  document.getElementById('warn_t').value      = d.warn;
-  document.getElementById('crit_t').value      = d.crit;
-  document.getElementById('days').value        = d.days;
-  updateBar();
-}
-
-function updateBar() {
-  var w = parseInt(document.getElementById('warn_t').value) || 80;
-  var c = parseInt(document.getElementById('crit_t').value) || 60;
-  var bar = document.getElementById('tbar');
-  var lbl = document.getElementById('bar-label');
-  bar.style.setProperty('--warn', w + '%');
-  bar.style.setProperty('--crit', c + '%');
-  lbl.textContent = 'crit < ' + c + ' \u2264 warn < ' + w + ' \u2264 online';
-}
-
-function showToast(ok, msg) {
-  var tok = document.getElementById('toast-ok');
-  var terr = document.getElementById('toast-err');
-  tok.style.display = 'none';
-  terr.style.display = 'none';
-  if (ok) {
-    tok.style.display = 'inline-block';
-    setTimeout(function(){ tok.style.display='none'; }, 3000);
-  } else {
-    terr.textContent = '\u2717 ' + msg;
-    terr.style.display = 'inline-block';
-    setTimeout(function(){ terr.style.display='none'; }, 5000);
-  }
-}
-
-function saveSettings() {
-  var timezone = document.getElementById('timezone').value;
-  var body = JSON.stringify({
-    interval_seconds: parseInt(document.getElementById('interval').value),
-    default_community: document.getElementById('community').value,
-    timezone: timezone,
-    error_rate_threshold: parseFloat(document.getElementById('error_rate').value),
-    spike_threshold: parseInt(document.getElementById('spike').value),
-    health_warning_threshold: parseInt(document.getElementById('warn_t').value),
-    health_critical_threshold: parseInt(document.getElementById('crit_t').value),
-    history_days: parseInt(document.getElementById('days').value)
-  });
-  fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:body})
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      if (d.ok) {
-        try { localStorage.setItem('tracepulse-timezone', timezone); } catch (e) {}
-        showToast(true);
-      } else { showToast(false, d.error || 'Unknown error'); }
-    })
-    .catch(function(e){ showToast(false, e.toString()); });
-}
-
-function resetDefaults() {
-  populateForm({interval:30, community:'public', timezone:'utc', error_rate:0.05, spike:10, warn:80, crit:60, days:7});
-}
-
-// 初期値をサーバーから埋め込まれた INIT 変数で設定
-populateForm(INIT);
-";
-
 const NOTIFICATIONS_HTML: &str = "<main>
 <div class='settings-section'>
   <h2 data-i18n='notifications'>Alert Notifications (Slack / Teams)</h2>
@@ -3622,162 +3512,6 @@ const NOTIFICATIONS_HTML: &str = "<main>
 </div>
 </main>";
 
-const NOTIFICATIONS_JS: &str = r"
-function showNotifyToast(ok, msg) {
-  var tok = document.getElementById('ntoast-ok');
-  var terr = document.getElementById('ntoast-err');
-  tok.style.display = 'none';
-  terr.style.display = 'none';
-  if (ok) {
-    tok.textContent = '\u2713 ' + msg;
-    tok.style.display = 'inline-block';
-    setTimeout(function(){ tok.style.display='none'; }, 5000);
-  } else {
-    terr.textContent = '\u2717 ' + msg;
-    terr.style.display = 'inline-block';
-    setTimeout(function(){ terr.style.display='none'; }, 8000);
-  }
-}
-
-function populateNotifications(d) {
-  document.getElementById('slack_enabled').checked = !!d.slack.enabled;
-  document.getElementById('slack_url').value = d.slack.webhook_url || '';
-  document.getElementById('slack_url_env').value = d.slack.webhook_url_env || '';
-  document.getElementById('teams_enabled').checked = !!d.teams.enabled;
-  document.getElementById('teams_url').value = d.teams.webhook_url || '';
-  document.getElementById('teams_url_env').value = d.teams.webhook_url_env || '';
-  document.getElementById('flap_window').value = d.flap_guard.window_seconds;
-  document.getElementById('retry_attempts').value = d.retry.max_attempts;
-}
-
-function notificationsPayload() {
-  return {
-    slack: {
-      enabled: document.getElementById('slack_enabled').checked,
-      webhook_url: document.getElementById('slack_url').value.trim(),
-      webhook_url_env: document.getElementById('slack_url_env').value.trim()
-    },
-    teams: {
-      enabled: document.getElementById('teams_enabled').checked,
-      webhook_url: document.getElementById('teams_url').value.trim(),
-      webhook_url_env: document.getElementById('teams_url_env').value.trim()
-    },
-    flap_guard: { window_seconds: parseInt(document.getElementById('flap_window').value) },
-    retry: {
-      max_attempts: parseInt(document.getElementById('retry_attempts').value)
-    }
-  };
-}
-
-function saveNotifications() {
-  return fetch('/api/notifications', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(notificationsPayload())
-  })
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      if (d.ok) { showNotifyToast(true, t('notifications_saved')); return true; }
-      showNotifyToast(false, d.error || 'Unknown error');
-      return false;
-    })
-    .catch(function(e){ showNotifyToast(false, e.toString()); return false; });
-}
-
-// テスト送信は保存済み設定ではなく画面の入力内容を使うため、先に保存してから送信する。
-function testNotification(channel) {
-  saveNotifications().then(function(saved){
-    if (!saved) { return; }
-    showNotifyToast(true, t('sending_test'));
-    return fetch('/api/notifications/test', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({channel: channel})
-    })
-      .then(function(r){ return r.json(); })
-      .then(function(d){
-        if (d.ok) { showNotifyToast(true, d.message || t('test_sent')); }
-        else { showNotifyToast(false, d.error || 'Unknown error'); }
-      })
-      .catch(function(e){ showNotifyToast(false, e.toString()); });
-  });
-}
-
-fetch('/api/notifications')
-  .then(function(r){ return r.json(); })
-  .then(function(d){ if (!d.error) { populateNotifications(d); } })
-  .catch(function(){});
-";
-
-const DIAGNOSTICS_JS: &str = r"
-function startDiagnostics(event) {
-  event.preventDefault();
-  var form = event.target;
-  var button = document.getElementById('diag-run-btn');
-  var progress = document.getElementById('diag-progress');
-  if (button) button.disabled = true;
-  if (progress) progress.textContent = t('diagnostics_running');
-
-  var url = form.action + '?' + new URLSearchParams(new FormData(form)).toString();
-  fetch(url, { cache: 'no-store' })
-    .then(function(r) { return r.text(); })
-    .then(function(html) {
-      document.open();
-      document.write(html);
-      document.close();
-    })
-    .catch(function(e) {
-      if (progress) progress.textContent = e.toString();
-      if (button) button.disabled = false;
-    });
-  return false;
-}
-
-function collectHardwareOids() {
-  var inputs = document.querySelectorAll('.hardware-oid-input');
-  var values = [];
-  inputs.forEach(function(input) {
-    var oid = (input.value || '').trim();
-    var type = input.getAttribute('data-sensor-type') || 'temperature';
-    if (oid) values.push(type + '|' + oid);
-  });
-  return values;
-}
-
-function saveOidOverrides() {
-  var body = JSON.stringify({
-    cpu_oid_override: document.getElementById('cpu-oid-override').value || '',
-    memory_oid_override: document.getElementById('memory-oid-override').value || '',
-    hardware_oid_overrides: collectHardwareOids()
-  });
-  fetch('/api/diagnostics/oids', {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: body
-  })
-  .then(function(r) { return r.json(); })
-  .then(function(d) {
-    var el = document.getElementById('oid-save-result');
-    if (!el) return;
-    if (d.ok) {
-      el.className = 'diag-note';
-      el.textContent = t('settings_saved');
-      setTimeout(function() { window.location.reload(); }, 300);
-    } else {
-      el.textContent = d.error || 'Save failed';
-      el.className = 'diag-note diag-error';
-    }
-  })
-  .catch(function(e) {
-    var el = document.getElementById('oid-save-result');
-    if (el) {
-      el.textContent = e.toString();
-      el.className = 'diag-note diag-error';
-    }
-  });
-}
-";
-
 const DIAGNOSTICS_CSS: &str = "<style>
   .diag-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
   .diag-card { background:#0f172a; border:1px solid #334155; border-radius:.5rem; padding:1rem; }
@@ -3819,6 +3553,7 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .hardware-card .state { font-size:.78rem; margin-top:.35rem; color:#cbd5e1; }
   .chart-wrap { width:100%; overflow-x:auto; }
   .table-scroll { width:100%; overflow-x:auto; }
+    .interface-table-scroll { overflow:visible; }
   .chart-svg { width:100%; height:160px; background:#0f172a; border-radius:.375rem; display:block; }
   .chart-svg.chart-empty { opacity:.5; }
   .chart-legend { font-size:.75rem; font-weight:400; color:#64748b; margin-left:.5rem; }
@@ -3863,11 +3598,13 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   /* 破損パケット内訳（EtherLike-MIB Error Breakdown）: ホバーポップオーバー */
   .err-cell { position:relative; cursor:help; border-bottom:1px dotted #64748b; }
   .err-pop { display:none; position:absolute; left:0; top:100%; margin-top:.35rem; min-width:220px; z-index:20; background:#0f172a; border:1px solid #334155; border-radius:.4rem; padding:.55rem .7rem; font-size:.78rem; color:#cbd5e1; box-shadow:0 8px 20px rgba(0,0,0,.35); white-space:normal; }
+    .err-cell.flip .err-pop { top:auto; bottom:100%; margin-top:0; margin-bottom:.35rem; }
   .err-cell:hover .err-pop, .err-cell:focus .err-pop { display:block; }
   .err-pop-title { font-weight:700; color:#f1f5f9; margin-bottom:.3rem; }
   .err-pop-row { display:flex; justify-content:space-between; gap:.75rem; padding:.1rem 0; }
   .err-pop-row .n { color:#94a3b8; }
   .err-pop-row .v { font-variant-numeric:tabular-nums; }
+    .err-pop-divider { border-top:1px solid #334155; margin:.35rem 0; }
   /* 破損パケット内訳カード: セレクタ + Stacked Bar + 数値テーブル */
   .error-breakdown { display:flex; flex-direction:column; gap:.85rem; }
   .error-breakdown-select { display:flex; align-items:center; gap:.6rem; flex-wrap:wrap; }
@@ -3883,660 +3620,61 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .breakdown-table { width:100%; border-collapse:collapse; }
   .breakdown-table th, .breakdown-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.85rem; text-align:left; }
   .breakdown-table th { color:#94a3b8; font-weight:600; }
-  .traffic-protocols { display:grid; grid-template-columns:minmax(220px,.8fr) minmax(360px,1.2fr); gap:1rem; align-items:start; }
+    .traffic-protocols { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:1rem; align-items:stretch; }
+    .traffic-card { min-width:0; background:rgba(15,23,42,.6); border:1px solid #334155; border-radius:.5rem; padding:1rem; }
+    .traffic-card h3 { margin:0 0 .75rem; color:#e2e8f0; font-size:.95rem; }
+    .traffic-summary-card, .traffic-talkers-card { grid-column:span 12; }
+    .traffic-timeseries-card { grid-column:span 8; }
+    .traffic-protocol-card { grid-column:span 4; }
+    .traffic-applications-card, .traffic-endpoints-card { grid-column:span 4; }
+    .traffic-controls { display:flex; align-items:center; flex-wrap:wrap; gap:.35rem; margin-bottom:.8rem; }
+    .traffic-card-label { color:#94a3b8; font-size:.72rem; font-weight:600; text-transform:uppercase; letter-spacing:.04em; margin-right:.2rem; }
+    .traffic-refresh-select { background:#334155; color:#cbd5e1; border:1px solid #475569; border-radius:.3rem; padding:.3rem .45rem; font-size:.75rem; }
+    .traffic-controls button { background:#334155; color:#cbd5e1; border:1px solid #475569; border-radius:.3rem; padding:.3rem .55rem; font-size:.75rem; cursor:pointer; }
+    .traffic-controls button:hover { background:#475569; color:#fff; }
+    .traffic-kpi-row { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.75rem; }
+    .traffic-kpi-row div { display:grid; gap:.2rem; padding:.65rem .75rem; background:rgba(30,41,59,.62); border-radius:.35rem; }
+    .traffic-kpi-row span { color:#94a3b8; font-size:.72rem; }
+    .traffic-kpi-row strong { color:#f8fafc; font-size:1.05rem; font-weight:600; }
   .traffic-donut-wrap { display:flex; align-items:center; gap:1rem; min-height:180px; }
   .traffic-donut { width:150px; height:150px; border-radius:50%; background:conic-gradient(#38bdf8 0 100%); position:relative; flex:0 0 auto; }
   .traffic-donut::after { content:''; position:absolute; inset:32px; border-radius:50%; background:#1e293b; }
   .traffic-legend { display:grid; gap:.35rem; font-size:.8rem; color:#cbd5e1; }
-  .traffic-legend-item { display:flex; gap:.35rem; align-items:center; }
+    .traffic-legend-item { display:flex; justify-content:space-between; gap:.75rem; align-items:center; }
   .traffic-legend-swatch { width:.7rem; height:.7rem; border-radius:.15rem; }
+    .traffic-scroll-panel { max-height:260px; overflow-y:auto; padding-right:.25rem; }
+    .traffic-share-list { display:grid; gap:.7rem; }
+    .traffic-share-item { display:grid; gap:.3rem; }
+    .traffic-share-label { display:flex; justify-content:space-between; gap:.6rem; color:#cbd5e1; font-size:.78rem; }
+    .traffic-share-label span:last-child { color:#94a3b8; white-space:nowrap; }
+    .traffic-share-track { height:.35rem; overflow:hidden; border-radius:999px; background:#1e293b; }
+    .traffic-share-track span { display:block; height:100%; border-radius:inherit; background:#38bdf8; }
+    .traffic-table-scroll { overflow-x:auto; }
+    .traffic-timeseries-scroll { max-height:260px; overflow:auto; }
   .talker-table { width:100%; border-collapse:collapse; }
   .talker-table th, .talker-table td { padding:.45rem .55rem; border-bottom:1px solid #334155; text-align:left; font-size:.8rem; }
   .talker-table th { color:#94a3b8; }
+    .traffic-talkers-table { min-width:980px; }
   .traffic-empty { color:#64748b; font-style:italic; padding:.75rem 0; }
   .traffic-note { margin:-.35rem 0 .85rem; color:#94a3b8; font-size:.82rem; }
-  @media (max-width:760px) { .traffic-protocols { grid-template-columns:1fr; } .traffic-donut-wrap { justify-content:center; } }
+    @media (max-width:900px) { .traffic-timeseries-card, .traffic-protocol-card { grid-column:span 12; } }
+    @media (max-width:760px) { .traffic-protocols { grid-template-columns:1fr; } .traffic-summary-card, .traffic-timeseries-card, .traffic-protocol-card, .traffic-applications-card, .traffic-endpoints-card, .traffic-talkers-card { grid-column:span 1; } .traffic-kpi-row { grid-template-columns:repeat(2,minmax(0,1fr)); } .traffic-donut-wrap { justify-content:center; flex-wrap:wrap; } }
 </style>";
 
-const DEVICE_DETAIL_JS: &str = r#"
-var COLORS = ['#38bdf8','#4ade80','#f59e0b','#f87171','#a78bfa','#34d399','#fb923c','#e879f9'];
-var REFRESH_MS = 30000;
-var TIME_ZONE = (function() { try { return localStorage.getItem('tracepulse-timezone') || 'utc'; } catch (e) { return 'utc'; } })();
-var IFACE_LABELS = {};
-var IFACE_SELECTED = new Set();
-var LAST_DEVICE_DETAIL = null;
-var IFACE_SELECTION_READY = false;
-
-window.esc = window.esc || function(value) {
-  return String(value === null || value === undefined ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\x22/g, '&quot;');
-};
-var esc = window.esc;
-
-function ifaceSelectionKey() {
-  return 'tracepulse-iface-selection:' + DEVICE_IP;
-}
-
-function syncSelectedInterfaces(ifaces) {
-  var known = new Set((ifaces || []).map(function(f) { return String(f.if_index); }));
-  var stored = null;
-  if (!IFACE_SELECTION_READY) {
-    try {
-      stored = JSON.parse(localStorage.getItem(ifaceSelectionKey()) || 'null');
-    } catch (e) {
-      stored = null;
-    }
-
-    IFACE_SELECTED = new Set();
-    if (Array.isArray(stored) && stored.length > 0) {
-      stored.forEach(function(v) {
-        var key = String(v);
-        if (known.has(key)) IFACE_SELECTED.add(key);
-      });
-    }
-
-    if (IFACE_SELECTED.size === 0) {
-      known.forEach(function(v) { IFACE_SELECTED.add(v); });
-    }
-    IFACE_SELECTION_READY = true;
-  } else {
-    Array.from(IFACE_SELECTED).forEach(function(v) {
-      if (!known.has(String(v))) IFACE_SELECTED.delete(v);
-    });
-  }
-
-  saveSelectedInterfaces();
-}
-
-function saveSelectedInterfaces() {
-  try {
-    localStorage.setItem(ifaceSelectionKey(), JSON.stringify(Array.from(IFACE_SELECTED)));
-  } catch (e) {}
-}
-
-function isInterfaceSelected(ifIndex) {
-  return IFACE_SELECTED.has(String(ifIndex));
-}
-
-function selectAllInterfaces(checked) {
-  var ifaces = (LAST_DEVICE_DETAIL && LAST_DEVICE_DETAIL.interfaces) || [];
-  IFACE_SELECTED = new Set();
-  if (checked) {
-    ifaces.forEach(function(f) { IFACE_SELECTED.add(String(f.if_index)); });
-  }
-  saveSelectedInterfaces();
-  if (LAST_DEVICE_DETAIL) {
-    renderDetail(LAST_DEVICE_DETAIL);
-  }
-}
-
-function toggleInterfaceSelection(ifIndex, checked) {
-  ifIndex = String(ifIndex);
-  if (checked) {
-    IFACE_SELECTED.add(ifIndex);
-  } else {
-    IFACE_SELECTED.delete(ifIndex);
-  }
-  saveSelectedInterfaces();
-  if (LAST_DEVICE_DETAIL) {
-    renderDetail(LAST_DEVICE_DETAIL);
-  }
-}
-
-function renderInterfaceSelection(ifaces) {
-  var box = document.getElementById('iface-filter');
-  var note = document.getElementById('iface-filter-note');
-  if (!box) return;
-  ifaces = ifaces || [];
-
-  box.innerHTML = ifaces.map(function(f) {
-    var id = 'iface-select-' + f.if_index;
-    var label = f.if_name || ('if-' + f.if_index);
-    var checked = isInterfaceSelected(f.if_index) ? ' checked' : '';
-    return '<label class=\'iface-filter-item\' for=\'' + id + '\'><input id=\'' + id + '\' type=\'checkbox\' value=\'' + f.if_index + '\'' + checked + ' onchange=\'toggleInterfaceSelection(this.value,this.checked)\'><span>' + label + ' (if-' + f.if_index + ')</span></label>';
-  }).join('');
-
-  if (note) {
-    note.textContent = ifaces.length ? (Array.from(IFACE_SELECTED).length + ' / ' + ifaces.length + ' ' + t('selected')) : ('0 / 0 ' + t('selected'));
-  }
-}
-
-function selectedSeries(series, getPoints) {
-  return (series || []).filter(function(s) { return isInterfaceSelected(s.if_index); }).map(getPoints);
-}
-
-function fmtTime(iso) {
-  if (!iso) return '-';
-  var d = parseTracePulseTime(iso);
-  return isNaN(d) ? iso : formatTracePulseTime(d);
-}
-function pad2(n) { return n < 10 ? '0'+n : ''+n; }
-function parseTracePulseTime(iso) {
-  if (!iso) return new Date(NaN);
-  if (/Z$|[+-]\d\d:\d\d$/.test(iso)) return new Date(iso);
-  return new Date(iso.replace(' ', 'T') + 'Z');
-}
-function tracePulseTimeZone() {
-  return TIME_ZONE === 'jst' ? 'Asia/Tokyo' : 'UTC';
-}
-function formatTracePulseTime(d) {
-  var parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tracePulseTimeZone(),
-    month: 'numeric',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(d);
-  var map = {};
-  parts.forEach(function(p) { if (p.type !== 'literal') map[p.type] = p.value; });
-  return map.month + '/' + map.day + ' ' + map.hour + ':' + map.minute + ':' + map.second;
-}
-function formatTracePulseClock(d) {
-  var parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tracePulseTimeZone(),
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  }).formatToParts(d);
-  var map = {};
-  parts.forEach(function(p) { if (p.type !== 'literal') map[p.type] = p.value; });
-  return map.hour + ':' + map.minute + ':' + map.second;
-}
-function fmtNum(v) {
-  return new Intl.NumberFormat('en-US').format(v || 0);
-}
-function counterClass(delta, spikeThreshold) {
-  if (delta >= spikeThreshold) return 'crit';
-  if (delta > 0) return 'warn';
-  return 'none';
-}
-function formatCounter(total, delta) {
-  var totalText = '<span class=\'counter-total\'>' + fmtNum(total) + '</span>';
-  if (!delta) return totalText;
-  return totalText + '<span class=\'counter-delta ' + counterClass(delta, (window.TRACEPULSE_SPIKE_THRESHOLD || 10)) + '\'> (+' + fmtNum(delta) + ')</span>';
-}
-function formatLateCollisions(total, delta) {
-  var totalText = '<span class=\'counter-total\'>' + fmtNum(total) + '</span>';
-  if (!delta) return totalText;
-  return totalText + '<span class=\'counter-delta duplex\'> (+' + fmtNum(delta) + ')</span>';
-}
-function errorBreakdownPopoverHtml(eb) {
-  eb = eb || {};
-  return '<div class=\'err-pop\'>' +
-    '<div class=\'err-pop-title\'>' + t('error_breakdown_hover_title') + '</div>' +
-    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_fcs_errors') + '</span><span class=\'v\'>+' + fmtNum(eb.fcs_errors_delta) + '</span></div>' +
-    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_alignment_errors') + '</span><span class=\'v\'>+' + fmtNum(eb.alignment_errors_delta) + '</span></div>' +
-    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_frame_too_longs') + '</span><span class=\'v\'>+' + fmtNum(eb.frame_too_longs_delta) + '</span></div>' +
-    '<div class=\'err-pop-row\'><span class=\'n\'>' + t('error_breakdown_internal_mac_receive_errors') + '</span><span class=\'v\'>+' + fmtNum(eb.internal_mac_receive_errors_delta) + '</span></div>' +
-    '</div>';
-}
-function formatCounterWithBreakdown(total, delta, eb) {
-  return '<span class=\'err-cell\' tabindex=\'0\'>' + formatCounter(total, delta) + errorBreakdownPopoverHtml(eb) + '</span>';
-}
-function diagnosticBadge(status) {
-  var key = status || 'healthy';
-  return '<span class=\'diagnostic-badge ' + key + '\'>' + t('diagnostic_' + key) + '</span>';
-}
-
-// ── SVG sparkline ────────────────────────────────────────────────────────────
-function sparkline(svgId, series, yLabel) {
-  // series: [{label, color, points:[{t,v}]}]
-  var svg = document.getElementById(svgId);
-  if (!svg) return;
-  // コンテナの実描画サイズを viewBox にそのまま反映し、preserveAspectRatio='none' による
-  // 文字・線の引き伸ばしを防ぐ（viewBox 1ユニット = 実ピクセル1px にする）
-  var rect = svg.getBoundingClientRect();
-  var W = Math.max(200, Math.round(rect.width) || 800);
-  var H = Math.max(80, Math.round(rect.height) || 160);
-  svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
-  var fontSize = W < 420 ? 8 : 9;
-  var PL = W < 420 ? 30 : 40, PR = 8, PT = 8, PB = 20;
-  var cW = W - PL - PR, cH = H - PT - PB;
-
-  // flatten all points to find x/y range
-  var allPts = [];
-  series.forEach(function(s) {
-    (s.points || []).forEach(function(p) {
-      if (p && p.v !== null && p.v !== undefined && !isNaN(p.v)) {
-        allPts.push(p);
-      }
-    });
-  });
-  if (allPts.length === 0) {
-    svg.classList.add('chart-empty');
-    svg.innerHTML = '<text x=\''+(W/2)+'\' y=\''+(H/2)+'\' text-anchor=\'middle\' fill=\'#64748b\' font-size=\'13\'>N/A</text>';
-    return;
-  }
-  svg.classList.remove('chart-empty');
-
-  var times = allPts.map(function(p) { return parseTracePulseTime(p.t).getTime(); });
-  var vals  = allPts.map(function(p) { return p.v; });
-  var tMin = Math.min.apply(null, times), tMax = Math.max.apply(null, times);
-  var vMin = 0, vMax = (yLabel === '%') ? 100 : (Math.max.apply(null, vals) * 1.15 || 1);
-  if (tMin === tMax) tMax = tMin + 1;
-
-  function tx(t) { return PL + (parseTracePulseTime(t).getTime() - tMin) / (tMax - tMin) * cW; }
-  function ty(v) { return PT + cH - (v - vMin) / (vMax - vMin) * cH; }
-  function formatAxisValue(v) {
-    if (yLabel === 'bytes') {
-      var units = ['B','KB','MB','GB','TB'];
-      var value = v;
-      var idx = 0;
-      while (value >= 1024 && idx + 1 < units.length) {
-        value = value / 1024;
-        idx++;
-      }
-      return (idx === 0 ? Math.round(value) : value.toFixed(1)) + ' ' + units[idx];
-    }
-    if (yLabel === '%') {
-      if (v < 1) return v.toFixed(2);
-      if (v < 10) return v.toFixed(1);
-    }
-    return Math.round(v).toString();
-  }
-
-  var out = '';
-  // grid lines
-  for (var gi = 0; gi <= 4; gi++) {
-    var gy = PT + gi * cH / 4;
-    var gv = (vMax - vMin) * (1 - gi/4) + vMin;
-    out += '<line x1=\''+PL+'\' y1=\''+gy+'\' x2=\''+(W-PR)+'\' y2=\''+gy+'\' stroke=\'#1e293b\' stroke-width=\'1\'/>';
-    out += '<text x=\''+(PL-4)+'\' y=\''+(gy+4)+'\' text-anchor=\'end\' fill=\'#64748b\' font-size=\''+fontSize+'\'>'+formatAxisValue(gv)+'</text>';
-  }
-  // x-axis labels (4 points)
-  for (var xi = 0; xi <= 3; xi++) {
-    var xt = tMin + (tMax - tMin) * xi / 3;
-    var xp = PL + (xt - tMin) / (tMax - tMin) * cW;
-    var xl = formatTracePulseClock(new Date(xt));
-    var anchor = 'middle';
-    var labelX = xp;
-    if (xi === 0) {
-      anchor = 'start';
-      labelX = PL + 2;
-    } else if (xi === 3) {
-      anchor = 'end';
-      labelX = W - PR - 2;
-    }
-    out += '<text x=\''+labelX+'\' y=\''+(H-4)+'\' text-anchor=\''+anchor+'\' fill=\'#475569\' font-size=\''+fontSize+'\'>'+xl+'</text>';
-  }
-  // series lines
-  series.forEach(function(s) {
-    if (s.points.length === 0) return;
-    var d = s.points.map(function(p, i) {
-      return (i === 0 ? 'M' : 'L') + tx(p.t).toFixed(1) + ' ' + ty(p.v).toFixed(1);
-    }).join(' ');
-    out += '<path d=\''+d+'\' fill=\'none\' stroke=\''+s.color+'\' stroke-width=\'1.5\' stroke-linejoin=\'round\'/>';
-  });
-  svg.innerHTML = out;
-}
-
-// ── Render functions ──────────────────────────────────────────────────────────
-function renderInterfaces(ifaces) {
-  var tbody = document.getElementById('if-tbody');
-  if (!tbody) return;
-  if (ifaces.length === 0) {
-    tbody.innerHTML = '<tr><td colspan=11 class=no-data>' + t('no_interface_data') + '</td></tr>';
-    return;
-  }
-  var spikeThreshold = (window.TRACEPULSE_SPIKE_THRESHOLD || 10);
-  tbody.innerHTML = ifaces.map(function(f) {
-    var m = f.metrics || {};
-    var lc = f.link_status === 'up' ? 'link-up' : 'link-down';
-    var errorDelta = Math.max(m.in_errors_delta || 0, m.out_errors_delta || 0);
-    var discardDelta = Math.max(m.in_discards_delta || 0, m.out_discards_delta || 0);
-    var rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? ' row-crit' : (errorDelta > 0 || discardDelta > 0 ? ' row-warn' : '');
-    return '<tr class=\'' + rowClass.trim() + '\'>' +
-      '<td>'+f.if_index+'</td>' +
-      '<td>'+f.if_name + ((f.predictive_status && (f.predictive_status.dom_warning || f.predictive_status.trend_warning)) ? '<span class=\'pred-badge\'>[PRED]</span>' : '') + '</td>' +
-      '<td><span class='+lc+'>'+f.link_status+'</span></td>' +
-      '<td>'+diagnosticBadge(f.health_status)+'</td>' +
-      '<td>'+formatCounterWithBreakdown(m.in_errors, m.in_errors_delta, f.error_breakdown)+'</td>' +
-      '<td>'+formatCounterWithBreakdown(m.out_errors, m.out_errors_delta, f.error_breakdown)+'</td>' +
-      '<td>'+formatCounter(m.in_discards, m.in_discards_delta)+'</td>' +
-      '<td>'+formatCounter(m.out_discards, m.out_discards_delta)+'</td>' +
-      '<td>'+formatLateCollisions(m.late_collisions, m.late_collisions_delta)+'</td>' +
-      '<td>'+(m.bandwidth_utilization*100).toFixed(1)+'%' +
-        ((f.predictive_status && f.predictive_status.rx_optical_power_dbm !== null && f.predictive_status.rx_optical_power_dbm !== undefined) ? '<div class=\'dom-meter\'><span>Rx Power: '+Number(f.predictive_status.rx_optical_power_dbm).toFixed(1)+' dBm</span><span class=\'dom-meter-track\'><span class=\'dom-meter-fill '+(f.predictive_status.dom_warning ? '' : 'ok')+'\' style=\'width:'+Math.max(0, Math.min(100, (Number(f.predictive_status.rx_optical_power_dbm)+30)/30*100))+'%\'></span></span></div>' : '') +
-      '</td>' +
-      '<td>'+fmtTime(f.sampled_at)+'</td>' +
-      '</tr>';
-  }).join('');
-}
-
-function renderHardwareStatus(sensors) {
-  var box = document.getElementById('hardware-status');
-  if (!box) return;
-  var visible = (sensors || []).filter(function(s) {
-    var type = (s.sensor_type || '').toLowerCase();
-    var hasValue = (s.value !== null && s.value !== undefined) || (s.status !== null && s.status !== undefined);
-    return (type === 'temperature' || type === 'power' || type === 'fan') && hasValue;
-  });
-  if (visible.length === 0) {
-    box.innerHTML = '<span class=no-data>No Sensors Detected</span>';
-    return;
-  }
-  box.innerHTML = visible.map(function(s) {
-    var cls = s.is_alarm ? 'hardware-card crit' : (s.status !== null && s.status !== undefined && s.status !== 0 ? 'hardware-card warn' : 'hardware-card');
-    var label = s.name || (s.source === 'entity-physical' ? ('component ' + s.index) : ('sensor ' + s.index));
-    var displayVal = s.status_text 
-      ? s.status_text 
-      : ((s.value !== null && s.value !== undefined) ? (s.value + (s.unit ? ' ' + s.unit : '')) : ((s.status !== null && s.status !== undefined) ? s.status : 'N/A'));
-    return '<div class=\'' + cls + '\'>' +
-      '<div class=\'label\'>' + label + '</div>' +
-      '<div class=\'value\'>' + displayVal + '</div>' +
-      '</div>';
-  }).join('');
-}
-
-function renderBwChart(ifSeries) {
-  var legend = document.getElementById('bw-legend');
-  if (legend) legend.innerHTML = '';
-  var ordered = ifSeries.slice().sort(function(a, b) { return a.if_index - b.if_index; });
-  var filtered = ordered.filter(function(s) { return isInterfaceSelected(s.if_index); });
-  var series = filtered.map(function(s, i) {
-    var color = COLORS[i % COLORS.length];
-    var label = IFACE_LABELS[String(s.if_index)] || ('if-' + s.if_index);
-    if (legend) legend.innerHTML += '<span style=\'color:'+color+';margin-right:.5rem\'>\u{25a0} '+label+'</span>';
-    return { label: label, color: color, points: s.points.map(function(p) { return {t: p.t, v: p.bw}; }) };
-  });
-  sparkline('bw-chart', series, '%');
-}
-
-function renderErrChart(ifSeries) {
-  var legend = document.getElementById('err-legend');
-  if (legend) legend.innerHTML = '';
-  var ordered = ifSeries.slice().sort(function(a, b) { return a.if_index - b.if_index; });
-  var series = [];
-  ordered.filter(function(s) { return isInterfaceSelected(s.if_index); }).forEach(function(s, i) {
-    var color = COLORS[i % COLORS.length];
-    var label = IFACE_LABELS[String(s.if_index)] || ('if-' + s.if_index);
-    if (legend && i < 4) legend.innerHTML += '<span style=\'color:'+color+';margin-right:.5rem\'>\u{25a0} '+label+'</span>';
-    series.push({ label: label+' in_err', color: color,
-      points: s.points.map(function(p) { return {t: p.t, v: p.in_err + p.in_dis}; }) });
-  });
-  sparkline('err-chart', series, 'count');
-}
-
-function renderSysChart(metrics) {
-  renderCpuChart(metrics);
-  renderMemoryChart(metrics);
-}
-
-var ERROR_BREAKDOWN_SELECTED_IF = null;
-
-function renderErrorBreakdownCard(ifaces) {
-  var box = document.getElementById('error-breakdown');
-  if (!box) return;
-  ifaces = ifaces || [];
-
-  if (ifaces.length === 0) {
-    box.innerHTML = '<p class=\'no-data\'>' + t('error_breakdown_no_data') + '</p>';
-    return;
-  }
-
-  if (ERROR_BREAKDOWN_SELECTED_IF === null || !ifaces.some(function(f) { return f.if_index === ERROR_BREAKDOWN_SELECTED_IF; })) {
-    ERROR_BREAKDOWN_SELECTED_IF = ifaces[0].if_index;
-  }
-
-  var options = ifaces.map(function(f) {
-    var sel = f.if_index === ERROR_BREAKDOWN_SELECTED_IF ? ' selected' : '';
-    return '<option value=\'' + f.if_index + '\'' + sel + '>' + (f.if_name || ('if-' + f.if_index)) + ' (if-' + f.if_index + ')</option>';
-  }).join('');
-
-  var selected = ifaces.find(function(f) { return f.if_index === ERROR_BREAKDOWN_SELECTED_IF; }) || ifaces[0];
-  var eb = selected.error_breakdown || {};
-  var fcs = eb.fcs_errors_delta || 0;
-  var align = eb.alignment_errors_delta || 0;
-  var toolong = eb.frame_too_longs_delta || 0;
-  var macrx = eb.internal_mac_receive_errors_delta || 0;
-  var total = fcs + align + toolong + macrx;
-
-  function pct(v) { return total > 0 ? (v / total * 100) : 0; }
-
-  var bar = '<div class=\'breakdown-bar\'>' +
-    '<div class=\'breakdown-bar-seg fcs\' style=\'width:' + pct(fcs) + '%\'></div>' +
-    '<div class=\'breakdown-bar-seg alignment\' style=\'width:' + pct(align) + '%\'></div>' +
-    '<div class=\'breakdown-bar-seg frametoolong\' style=\'width:' + pct(toolong) + '%\'></div>' +
-    '<div class=\'breakdown-bar-seg macreceive\' style=\'width:' + pct(macrx) + '%\'></div>' +
-    '</div>';
-
-  var legend = '<div class=\'breakdown-legend\'>' +
-    '<span><span class=\'swatch\' style=\'background:#f87171\'></span>' + t('error_breakdown_fcs_errors') + '</span>' +
-    '<span><span class=\'swatch\' style=\'background:#fbbf24\'></span>' + t('error_breakdown_alignment_errors') + '</span>' +
-    '<span><span class=\'swatch\' style=\'background:#a78bfa\'></span>' + t('error_breakdown_frame_too_longs') + '</span>' +
-    '<span><span class=\'swatch\' style=\'background:#38bdf8\'></span>' + t('error_breakdown_internal_mac_receive_errors') + '</span>' +
-    '</div>';
-
-  var table = '<table class=\'breakdown-table\'><thead><tr>' +
-    '<th>' + t('error_breakdown_fcs_errors') + '</th>' +
-    '<th>' + t('error_breakdown_alignment_errors') + '</th>' +
-    '<th>' + t('error_breakdown_frame_too_longs') + '</th>' +
-    '<th>' + t('error_breakdown_internal_mac_receive_errors') + '</th>' +
-    '</tr></thead><tbody><tr>' +
-    '<td>' + fmtNum(eb.fcs_errors) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(fcs) + ')</span></td>' +
-    '<td>' + fmtNum(eb.alignment_errors) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(align) + ')</span></td>' +
-    '<td>' + fmtNum(eb.frame_too_longs) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(toolong) + ')</span></td>' +
-    '<td>' + fmtNum(eb.internal_mac_receive_errors) + ' <span class=\'counter-delta warn\'>(+' + fmtNum(macrx) + ')</span></td>' +
-    '</tr></tbody></table>';
-
-  box.innerHTML =
-    '<div class=\'error-breakdown-select\'>' +
-    '<label for=\'error-breakdown-if\'>' + t('error_breakdown_select_hint') + '</label>' +
-    '<select id=\'error-breakdown-if\' onchange=\'onErrorBreakdownIfaceChange(this.value)\'>' + options + '</select>' +
-    '</div>' + bar + legend + table;
-}
-
-function onErrorBreakdownIfaceChange(value) {
-  ERROR_BREAKDOWN_SELECTED_IF = parseInt(value, 10);
-  if (LAST_DEVICE_DETAIL) renderErrorBreakdownCard(LAST_DEVICE_DETAIL.interfaces || []);
-}
-
-function renderTrafficProtocols(data) {
-  var box = document.getElementById('traffic-protocols');
-  if (!box) return;
-
-  function includeTrafficItem(item) {
-    if (!item) return false;
-    if (!Object.prototype.hasOwnProperty.call(item, 'if_index')) return true;
-    if (typeof isInterfaceSelected !== 'function') return true;
-    return isInterfaceSelected(item.if_index);
-  }
-
-  var protocols = (data && Array.isArray(data.protocols) ? data.protocols : []).filter(includeTrafficItem);
-  var talkers = (data && Array.isArray(data.top_talkers) ? data.top_talkers : []).filter(includeTrafficItem);
-  if (protocols.length === 0 && talkers.length === 0) {
-    box.innerHTML = '<p class=\'traffic-empty\'>' + t('traffic_protocols_empty') + '</p>';
-    return;
-  }
-  var palette = ['#38bdf8','#4ade80','#f59e0b','#f87171','#a78bfa','#34d399'];
-  var cursor = 0;
-  var stops = protocols.map(function(item, index) {
-    var start = cursor;
-    cursor += Number(item.percentage || 0);
-    return palette[index % palette.length] + ' ' + start + '% ' + cursor + '%';
-  });
-  var legend = protocols.map(function(item, index) {
-    return '<div class=\'traffic-legend-item\'><span class=\'traffic-legend-swatch\' style=\'background:' + palette[index % palette.length] + '\'></span>' +
-      esc(item.protocol) + ' ' + Number(item.percentage || 0).toFixed(1) + '% (' + formatBps(item.bps) + ')</div>';
-  }).join('');
-  var rows = talkers.map(function(item) {
-    return '<tr><td>' + esc(item.source_ip) + ':' + item.source_port + '</td><td>' + esc(item.destination_ip) + ':' + item.destination_port + '</td><td>' + esc(item.protocol) + '</td><td>' + formatBps(item.bps) + '</td></tr>';
-  }).join('');
-  box.innerHTML = '<div><h3>' + t('traffic_protocols_share') + '</h3><div class=\'traffic-donut-wrap\'><div class=\'traffic-donut\' style=\'background:conic-gradient(' + (stops.join(',') || '#334155 0 100%') + ')\'></div><div class=\'traffic-legend\'>' + legend + '</div></div></div>' +
-    '<div><h3>' + t('traffic_protocols_top_talkers') + '</h3><table class=\'talker-table\'><thead><tr><th>Source</th><th>Destination</th><th>Protocol</th><th>bps</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
-}
-
-function formatBps(value) {
-  value = Number(value || 0);
-  if (value >= 1000000000) return (value / 1000000000).toFixed(1) + ' Gbps';
-  if (value >= 1000000) return (value / 1000000).toFixed(1) + ' Mbps';
-  if (value >= 1000) return (value / 1000).toFixed(1) + ' Kbps';
-  return Math.round(value) + ' bps';
-}
-
-function refreshTrafficProtocols() {
-  fetch('/api/flow/analytics', {cache:'no-store'})
-    .then(function(response) { return response.json(); })
-    .then(renderTrafficProtocols)
-    .catch(function() { renderTrafficProtocols(null); });
-}
-
-function renderDetail(d) {
-  LAST_DEVICE_DETAIL = d;
-  renderHeader(d);
-  var ifaces = d.interfaces || [];
-  IFACE_LABELS = {};
-  ifaces.forEach(function(f) { IFACE_LABELS[String(f.if_index)] = f.if_name || ('if-' + f.if_index); });
-  syncSelectedInterfaces(ifaces);
-  renderInterfaceSelection(ifaces);
-  renderInterfaces(ifaces);
-  renderErrorBreakdownCard(ifaces);
-  refreshTrafficProtocols();
-  renderBwChart(d.if_series || []);
-  renderErrChart(d.if_series || []);
-  renderSysChart(d.metrics || []);
-  renderHardwareStatus(d.hardware_sensors || []);
-  renderSpikes(d.spikes || []);
-  renderAlerts(d.alerts || []);
-  updateLastRefreshed();
-}
-
-function renderCpuChart(metrics) {
-  var cpuSeries = {
-    label:'CPU %',
-    color:'#38bdf8',
-    points: metrics.filter(function(m) { return m.cpu !== null && m.cpu !== undefined && m.cpu > 0; }).map(function(m) { return {t:m.t, v:m.cpu}; })
-  };
-  sparkline('cpu-chart', [cpuSeries], '%');
-}
-
-function renderMemoryChart(metrics) {
-  var memSeries = {
-    label: 'Memory Usage (%)',
-    color: '#a78bfa',
-    points: []
-  };
-
-  (metrics || []).forEach(function(m) {
-    if (m && m.memory !== null && m.memory !== undefined && !isNaN(m.memory)) {
-      memSeries.points.push({ t: m.t, v: m.memory });
-    }
-  });
-
-  if (memSeries.points.length === 0 && metrics && metrics.length > 0) {
-    var maxBytes = 0;
-    metrics.forEach(function(m) {
-      if (m && m.memory_bytes && m.memory_bytes > maxBytes) {
-        maxBytes = m.memory_bytes;
-      }
-    });
-    if (maxBytes > 0) {
-      metrics.forEach(function(m) {
-        if (m && m.memory_bytes !== null && m.memory_bytes !== undefined && m.memory_bytes > 0) {
-          var pct = Math.round((m.memory_bytes / maxBytes) * 100);
-          memSeries.points.push({ t: m.t, v: pct });
-        }
-      });
-    }
-  }
-
-  sparkline('memory-chart', [memSeries], '%');
-}
-
-function renderSpikes(spikes) {
-  var tbody = document.getElementById('spike-tbody');
-  if (!tbody) return;
-  if (!spikes || spikes.length === 0) {
-    tbody.innerHTML = '<tr><td colspan=8 class=no-data>' + t('no_interface_spikes') + '</td></tr>';
-    return;
-  }
-  tbody.innerHTML = spikes.map(function(s) {
-    var lc = s.link_status === 'up' ? 'link-up' : 'link-down';
-    return '<tr>' +
-      '<td>'+fmtTime(s.latest_sampled_at)+'</td>' +
-      '<td>'+s.if_name+' (if-'+s.if_index+')</td>' +
-      '<td><span class='+lc+'>'+s.link_status+'</span></td>' +
-      '<td>'+fmtNum(s.in_errors_delta)+'</td>' +
-      '<td>'+fmtNum(s.out_errors_delta)+'</td>' +
-      '<td>'+fmtNum(s.in_discards_delta)+'</td>' +
-      '<td>'+fmtNum(s.out_discards_delta)+'</td>' +
-      '<td>'+fmtNum(s.total_delta)+'</td>' +
-      '</tr>';
-  }).join('');
-}
-
-function renderAlerts(alerts) {
-  var tbody = document.getElementById('alert-tbody');
-  if (!tbody) return;
-  if (alerts.length === 0) {
-    tbody.innerHTML = '<tr><td colspan=5 class=no-data>' + t('no_alerts') + '</td></tr>';
-    return;
-  }
-  tbody.innerHTML = alerts.map(function(a) {
-    var sc = {warning:'sev-warning', critical:'sev-critical', info:'sev-info'}[a.severity] || '';
-    var iface = a.interface || '-';
-    return '<tr><td>'+fmtTime(a.at)+'</td><td>'+iface+'</td><td>'+a.type+'</td><td><span class='+sc+'>'+a.severity+'</span></td><td>'+a.details+'</td></tr>';
-  }).join('');
-}
-
-function renderHeader(d) {
-  var el = document.getElementById('dev-title');
-  if (el) el.textContent = d.name + ' (' + d.ip + ')';
-  var st = document.getElementById('dev-status');
-  if (st) {
-    var clsMap = {online:'status-online', offline:'status-offline', warning:'status-warning', critical:'status-critical'};
-    st.className = clsMap[d.status] || 'status-unknown';
-    st.textContent = d.status;
-  }
-  document.title = 'TracePulse \u{2013} ' + d.name;
-}
-
-function updateLastRefreshed() {
-  var el = document.getElementById('device-refresh');
-  if (el) {
-    el.textContent = 'Auto refresh: 30s • ' + t('updated') + ': ' + formatTracePulseClock(new Date());
-  }
-}
-
-function load() {
-  Promise.all([
-    fetch('/api/settings', { cache: 'no-store' }).then(function(r) { return r.json(); }).catch(function() { return null; }),
-    fetch('/api/device/' + encodeURIComponent(DEVICE_IP), { cache: 'no-store' }).then(function(r) { return r.json(); })
-  ])
-    .then(function(results) {
-      var settings = results[0];
-      var d = results[1];
-      if (settings && settings.display && settings.display.timezone) {
-        TIME_ZONE = settings.display.timezone;
-        try { localStorage.setItem('tracepulse-timezone', TIME_ZONE); } catch (e) {}
-      }
-      if (settings && settings.alert && typeof settings.alert.spike_threshold === 'number') {
-        window.TRACEPULSE_SPIKE_THRESHOLD = settings.alert.spike_threshold;
-      }
-      if (d.error) { document.getElementById('dev-title').textContent = d.error; return; }
-      renderDetail(d);
-    })
-    .catch(function(e) { document.getElementById('dev-title').textContent = 'Error: ' + e; });
-}
-
-load();
-setInterval(load, REFRESH_MS);
-
-// ウィンドウ幅変更時にグラフを実サイズへ合わせて再描画する
-var resizeTimer = null;
-window.addEventListener('resize', function() {
-  clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(function() {
-    if (LAST_DEVICE_DETAIL) renderDetail(LAST_DEVICE_DETAIL);
-  }, 200);
-});
-"#;
+const DEVICE_DETAIL_BUNDLE_JS: &str = include_str!("../../frontend/dist/device-detail.js");
+const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js");
+const ENTERPRISE_ANALYTICS_BUNDLE_JS: &str =
+    include_str!("../../frontend/dist/enterprise-analytics.js");
+const GEO_MAP_BUNDLE_JS: &str = include_str!("../../frontend/dist/geo-map.js");
+const ECHARTS_BUNDLE_JS: &str = include_str!("../../frontend/dist/echarts.min.js");
+const WORLD_GEOJSON: &str = include_str!("../../frontend/dist/world.json");
+const SETTINGS_BUNDLE_JS: &str = include_str!("../../frontend/dist/settings.js");
+const NOTIFICATIONS_BUNDLE_JS: &str = include_str!("../../frontend/dist/notifications.js");
+const DIAGNOSTICS_BUNDLE_JS: &str = include_str!("../../frontend/dist/diagnostics.js");
+const DISCOVERY_BUNDLE_JS: &str = include_str!("../../frontend/dist/discovery.js");
+const TOPOLOGY_BUNDLE_JS: &str = include_str!("../../frontend/dist/topology.js");
+const THEME_BUNDLE_JS: &str = include_str!("../../frontend/dist/theme.js");
+const I18N_BUNDLE_JS: &str = include_str!("../../frontend/dist/i18n.js");
 
 const DASHBOARD_CSS: &str = "<style>
   #dash-table th { cursor:pointer; user-select:none; white-space:nowrap; }
@@ -4553,145 +3691,77 @@ const DASHBOARD_CSS: &str = "<style>
   .btn-row-danger { background:#7f1d1d; color:#fecaca; border:1px solid #991b1b; padding:.3rem .55rem; border-radius:.35rem; font-size:.78rem; cursor:pointer; }
   .btn-row-danger:hover:not(:disabled) { background:#991b1b; }
   .btn-row-danger:disabled { opacity:.55; cursor:not-allowed; }
-</style>";
-
-const DASHBOARD_JS: &str = r"
-var sortCol = 'ip';
-var sortAsc = true;
-var COLS = ['ip','name','status','community','last_seen'];
-var deletingIps = new Set();
-
-function ipToNum(ip) {
-  var p = ip.split('.');
-  if (p.length !== 4) return 0;
-  return ((parseInt(p[0],10)||0)*16777216)+((parseInt(p[1],10)||0)*65536)+((parseInt(p[2],10)||0)*256)+(parseInt(p[3],10)||0);
-}
-
-function statusOrder(s) {
-  var o = {critical:0, offline:1, warning:2, unknown:3, online:4};
-  return o[s] !== undefined ? o[s] : 5;
-}
-
-function cmpVal(a, b, col) {
-  if (col === 'ip') return ipToNum(a.ip) - ipToNum(b.ip);
-  if (col === 'status') return statusOrder(a.status) - statusOrder(b.status);
-  var av = (a[col] || '').toLowerCase();
-  var bv = (b[col] || '').toLowerCase();
-  return av < bv ? -1 : av > bv ? 1 : 0;
-}
-
-function renderTable() {
-  var sorted = DEVICES.slice().sort(function(a, b) {
-    // スパイク機器を常に最上位に
-    if (a.error_spike && !b.error_spike) return -1;
-    if (!a.error_spike && b.error_spike) return 1;
-    var r = cmpVal(a, b, sortCol);
-    return sortAsc ? r : -r;
-  });
-  var tbody = document.getElementById('dash-tbody');
-  if (sorted.length === 0) {
-    tbody.innerHTML = '<tr><td colspan=6 class=empty>' + t('no_devices') + ' <a href=/discovery>' + t('nav_discovery') + '</a></td></tr>';
-    return;
-  }
-  tbody.innerHTML = sorted.map(function(d) {
-    var clsMap = {online:'status-online', offline:'status-offline', warning:'status-warning', critical:'status-critical'};
-    var cls = clsMap[d.status] || 'status-unknown';
-    var ls = formatTracePulseTimestamp(d.last_seen || d.last_seen_at);
-    var rowCls = d.error_spike ? ' class=spike-row' : '';
-    var spikeBadge = d.error_spike ? '<span class=spike-badge>\u26a0 Error Spike</span>' : '';
-    var deleting = deletingIps.has(d.ip);
-    var actionLabel = deleting ? t('unregistering') : t('unregister');
-    var actionBtn = '<button class=\'btn-row-danger\' data-ip=\'' + encodeURIComponent(d.ip) + '\' data-name=\'' + encodeURIComponent(d.name || d.ip) + '\' onclick=\'unregisterDevice(this.dataset.ip,this.dataset.name)\' ' + (deleting ? 'disabled' : '') + '>' + actionLabel + '</button>';
-    return '<tr'+rowCls+'><td><a href=/device/'+d.ip+' style=\'color:#38bdf8;text-decoration:none\'>'+d.ip+'</a></td><td>'+d.name+spikeBadge+'</td><td><span class='+cls+'>'+d.status+'</span></td><td>'+d.community+'</td><td>'+ls+'</td><td><div class=\'row-actions\'>'+actionBtn+'</div></td></tr>';
-  }).join('');
-}
-
-function updateSortIndicators() {
-  COLS.forEach(function(col) {
-    var th = document.getElementById('th-' + col);
-    var icon = document.getElementById('sort-' + col);
-    if (!th) return;
-    if (col === sortCol) {
-      th.className = sortAsc ? 'sort-asc' : 'sort-desc';
-      if (icon) icon.textContent = sortAsc ? '\u25b4' : '\u25be';
-    } else {
-      th.className = '';
-      if (icon) icon.textContent = '';
+    .enterprise-analytics-panel { margin:1.25rem 0; padding:1.1rem; border:1px solid #334155; border-radius:.5rem; background:rgba(15,23,42,.65); }
+    .enterprise-analytics-toolbar { display:flex; align-items:center; gap:.5rem; margin-bottom:.85rem; color:#cbd5e1; }
+    .enterprise-analytics-toolbar select { background:#1e293b; color:#f8fafc; border:1px solid #475569; border-radius:.3rem; padding:.35rem .55rem; }
+    .enterprise-analytics-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+    .enterprise-analytics-grid article { min-width:0; border:1px solid #334155; border-radius:.4rem; padding:.85rem; background:#0f172a; display:flex; flex-direction:column; }
+    .enterprise-analytics-grid h2 { font-size:.9rem; color:#e2e8f0; margin-bottom:.6rem; }
+    .enterprise-sankey-article { grid-column: 1 / -1; }
+    .enterprise-geo-article { grid-column: 1 / -1; }
+    .enterprise-sankey { width:100%; height:280px; min-height:280px; color:#94a3b8; font-size:.8rem; }
+    .sankey-title-group { display:flex; align-items:center; gap:.45rem; }
+    .sankey-help-wrap { position:relative; display:inline-flex; align-items:center; }
+    .sankey-help-btn { background:none; border:none; cursor:pointer; font-size:.85rem; padding:2px; line-height:1; opacity:.75; transition:opacity .2s; }
+    .sankey-help-btn:hover, .sankey-help-btn:focus { opacity:1; }
+    .sankey-help-popover {
+      display:none; position:absolute; top:calc(100% + 6px); left:0; z-index:30;
+      width:300px; background:#0f172a; border:1px solid #334155; border-radius:.4rem;
+      padding:.75rem .85rem; font-size:.78rem; color:#cbd5e1; box-shadow:0 8px 24px rgba(0,0,0,.6);
+      line-height:1.5; pointer-events:auto;
     }
-  });
-}
+    .sankey-help-wrap:hover .sankey-help-popover,
+    .sankey-help-wrap:focus-within .sankey-help-popover { display:block; }
+    .sankey-help-title { font-weight:700; color:#38bdf8; font-size:.85rem; margin-bottom:.35rem; }
+    .sankey-help-body p { margin:0 0 .4rem; color:#94a3b8; }
+    .sankey-help-body ul { margin:0; padding-left:1.1rem; }
+    .sankey-help-body li { margin-bottom:.25rem; }
+    .sankey-help-body strong { color:#f8fafc; }
 
-function sortBy(col) {
-  sortAsc = (sortCol === col) ? !sortAsc : true;
-  sortCol = col;
-  updateSortIndicators();
-  renderTable();
-}
-
-function renderSummary(devices) {
-  var online = 0, warn = 0, offline = 0, spikes = 0;
-  devices.forEach(function(d) {
-    if (d.status === 'online') online++;
-    else if (d.status === 'warning') warn++;
-    else if (d.status === 'offline' || d.status === 'critical') offline++;
-    if (d.error_spike) spikes++;
-  });
-  var el = document.getElementById('summary-cards');
-  if (!el) return;
-  var spikeCls = spikes > 0 ? 'card card-spike' : 'card';
-  el.innerHTML =
-    '<div class=\'card card-online\'><div class=\'card-num\'>'+online+'</div><div class=\'card-label\'>'+t('online')+'</div></div>' +
-    '<div class=\'card card-warning\'><div class=\'card-num\'>'+warn+'</div><div class=\'card-label\'>'+t('warning')+'</div></div>' +
-    '<div class=\'card card-offline\'><div class=\'card-num\'>'+offline+'</div><div class=\'card-label\'>'+t('offline')+'</div></div>' +
-    '<div class=\'card\'><div class=\'card-num\'>'+devices.length+'</div><div class=\'card-label\'>'+t('total')+'</div></div>' +
-    '<div class=\''+spikeCls+'\'><div class=\'card-num\'>'+spikes+'</div><div class=\'card-label\'>'+t('error_spikes')+'</div></div>';
-}
-
-function unregisterDevice(ip, name) {
-  ip = decodeURIComponent(ip || '');
-  name = decodeURIComponent(name || '');
-  if (!confirm(t('unregister_confirm') + '\n\n' + ip + (name ? ' (' + name + ')' : ''))) return;
-  deletingIps.add(ip);
-  renderTable();
-  fetch('/api/device/' + encodeURIComponent(ip), { method: 'DELETE' })
-    .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, status: r.status, body: body }; }); })
-    .then(function(res) {
-      if (!res.ok || (res.body && res.body.error)) {
-        throw new Error((res.body && res.body.error) || ('HTTP ' + res.status));
-      }
-      deletingIps.delete(ip);
-      refresh();
-      alert(t('unregister_success'));
-    })
-    .catch(function(e) {
-      deletingIps.delete(ip);
-      renderTable();
-      alert(t('unregister_failed') + ': ' + e.message);
-    });
-}
-
-function updateLastRefreshed() {
-  var el = document.getElementById('last-refreshed');
-  if (el) el.textContent = t('updated') + ': ' + formatTracePulseClock(new Date());
-}
-
-function refresh() {
-  fetch('/api/devices')
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      DEVICES = data;
-      renderTable();
-      renderSummary(data);
-      updateLastRefreshed();
-    })
-    .catch(function(e) { console.warn('refresh failed', e); });
-}
-
-renderTable();
-updateSortIndicators();
-updateLastRefreshed();
-setInterval(refresh, 30000);
-";
+    .sankey-headers {
+      display:grid; grid-template-columns:repeat(4, 1fr); gap:.75rem; margin:.3rem 0 .5rem;
+      padding:.45rem .85rem; background:#1e293b; border-radius:.375rem; border:1px solid #334155;
+    }
+    .sankey-col-header { display:flex; align-items:center; gap:.45rem; font-size:.78rem; font-weight:600; color:#e2e8f0; white-space:nowrap; }
+    .sankey-col-header .col-title { font-weight:600; }
+    .sankey-col-header .col-sub { font-size:.7rem; color:#94a3b8; font-weight:400; margin-left:.35rem; }
+    .col-dot { width:.45rem; height:.45rem; border-radius:50%; display:inline-block; flex-shrink:0; }
+    .dot-src { background:#38bdf8; }
+    .dot-ing { background:#34d399; }
+    .dot-egr { background:#fbbf24; }
+    .dot-dst { background:#c084fc; }
+    .enterprise-threat-badge { display:inline-block; margin:.2rem; padding:.2rem .4rem; color:#fecaca; background:#7f1d1d; border:1px solid #ef4444; border-radius:.25rem; font-size:.75rem; font-weight:700; }
+    .enterprise-card-heading { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+    .enterprise-card-heading h2 { margin:0; }
+    .enterprise-map-link { color:#7dd3fc; font-size:.75rem; text-decoration:none; white-space:nowrap; }
+    .enterprise-geoip-list { display:grid; gap:.65rem; min-height:140px; align-content:start; }
+    .enterprise-class-wrapper { margin-bottom:.65rem; padding-bottom:.65rem; border-bottom:1px solid #1e293b; }
+    .enterprise-class-legend { display:flex; gap:.75rem; font-size:.73rem; color:#cbd5e1; margin-bottom:.35rem; flex-wrap:wrap; }
+    .class-tag { display:inline-flex; align-items:center; gap:.25rem; }
+    .class-dot { width:.45rem; height:.45rem; border-radius:50%; display:inline-block; }
+    .class-priv .class-dot { background:#38bdf8; }
+    .class-inet .class-dot { background:#f97316; }
+    .class-bcast .class-dot { background:#a855f7; }
+    .enterprise-class-track { display:flex; height:.45rem; border-radius:99px; overflow:hidden; background:#1e293b; }
+    .class-seg-priv { background:#38bdf8; height:100%; transition:width .3s; }
+    .class-seg-inet { background:#f97316; height:100%; transition:width .3s; }
+    .class-seg-bcast { background:#a855f7; height:100%; transition:width .3s; }
+    .enterprise-geo-row { display:grid; grid-template-columns:minmax(9rem, 1fr) 2fr auto; gap:.85rem; align-items:center; font-size:.78rem; }
+    .enterprise-geo-label { display:flex; align-items:center; gap:.4rem; min-width:0; }
+    .enterprise-asn-pill { display:inline-block; padding:.1rem .4rem; background:#1e293b; border:1px solid #334155; border-radius:.25rem; font-size:.7rem; font-weight:700; color:#38bdf8; flex-shrink:0; }
+    .enterprise-asn-pill.local { color:#94a3b8; }
+    .enterprise-geo-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#e2e8f0; font-weight:500; }
+    .enterprise-geo-bar { height:.4rem; background:#1e293b; border-radius:99px; overflow:hidden; }
+    .enterprise-geo-bar i { display:block; height:100%; background:#38bdf8; border-radius:inherit; }
+    .enterprise-geo-meta { text-align:right; white-space:nowrap; color:#94a3b8; font-variant-numeric:tabular-nums; }
+    .enterprise-geo-bytes { color:#e2e8f0; font-weight:600; }
+    .enterprise-geo-pct { font-size:.72rem; margin-left:.3rem; }
+    .enterprise-muted { color:#64748b; }
+    .enterprise-loading-wrap { display:flex; align-items:center; justify-content:center; height:100%; min-height:160px; color:#94a3b8; font-size:.84rem; gap:.6rem; }
+    .enterprise-spinner { width:1.2rem; height:1.2rem; border:2px solid #334155; border-top-color:#38bdf8; border-radius:50%; animation:ent-spin .8s linear infinite; flex-shrink:0; }
+    @keyframes ent-spin { to { transform:rotate(360deg); } }
+    @media (max-width:768px) { .enterprise-analytics-grid { grid-template-columns:1fr; } }
+</style>";
 
 const DISCOVERY_CSS: &str = "<style>
   .scan-form { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-start; margin-bottom:1.5rem; }
@@ -4881,957 +3951,6 @@ const DISCOVERY_HTML: &str = "<main>
 
 // SCAN_TIMEOUT_SECS: クライアント側のポーリングタイムアウト（秒）
 // ホスト数 × 推定時間で動的に計算するが上限はこの値
-const DISCOVERY_JS: &str = r"
-const SCAN_TIMEOUT_SECS = 300;  // 5分
-const POLL_INTERVAL_MS  = 1500;
-
-let currentJobId   = null;
-let pollTimer      = null;
-let elapsedTimer   = null;
-let scanStartedAt  = null;
-let cancelled      = false;
-const WEB_EDITION = window.TRACEPULSE_WEB_EDITION || {enterprise:false,nodeLimit:25};
-const IS_ENTERPRISE = !!WEB_EDITION.enterprise;
-
-document.querySelectorAll('.enterprise-only').forEach(function(el) {
-  el.style.display = IS_ENTERPRISE ? '' : 'none';
-});
-
-// Community版は単一サブネット（/24 以上）、Enterprise は複数 CIDR と大規模レンジを許可。
-const MAX_PREFIX = IS_ENTERPRISE ? 0 : 24;
-const CONCURRENCY = 256;
-const COMMUNITY_MAX_DEVICES = WEB_EDITION.nodeLimit || 25;
-
-// ── CIDR hint ──
-function cidrHostCount(cidr) {
-  const m = cidr.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/);
-  if (!m) return null;
-  const prefix = parseInt(m[2], 10);
-  if (prefix < 0 || prefix > 32) return null;
-  if (prefix === 32) return 1;
-  if (prefix === 31) return 2;
-  return Math.pow(2, 32 - prefix) - 2;
-}
-
-function cidrEntries(value) {
-  return value.split(',').map(function(c) { return c.trim(); }).filter(Boolean);
-}
-
-function updateHint() {
-  const cidrValue = document.getElementById('cidr').value.trim();
-  const hintEl = document.getElementById('host-hint');
-  const entries = cidrEntries(cidrValue);
-  const counts = entries.map(cidrHostCount);
-  if (entries.length > 0 && counts.some(function(count) { return count === null; })) { hintEl.innerHTML = ''; return; }
-  const total = counts.reduce(function(sum, count) { return sum + (count || 0); }, 0);
-  if (!total) { hintEl.innerHTML = ''; return; }
-
-  const smallestPrefix = Math.min.apply(null, entries.map(function(cidr) { return parseInt(cidr.split('/')[1], 10); }));
-  const tooLarge = !IS_ENTERPRISE && smallestPrefix < MAX_PREFIX;
-  const secs = Math.ceil(total * 0.5 / CONCURRENCY);
-
-  if (tooLarge) {
-    // Community版は単一サブネット（/24以上）のみ許可
-    hintEl.innerHTML =
-      '<span style=\'color:#f87171\'>\u26a0 Community\u7248\u3067\u306f\u5358\u4e00\u30b5\u30d6\u30cd\u30c3\u30c8\uff08/' + MAX_PREFIX + ' \u4ee5\u4e0a\uff09\u306e\u307f\u30b9\u30ad\u30e3\u30f3\u53ef\u80fd\u3067\u3059\u3002\u73fe\u5728: /' + smallestPrefix + '</span>';
-  } else {
-    const warn = !IS_ENTERPRISE && (secs > 30 || total > COMMUNITY_MAX_DEVICES);
-    const timeStr = secs >= 60 ? Math.ceil(secs / 60) + ' min' : secs + 's';
-    const limitText = IS_ENTERPRISE
-      ? ' \u2022 \u30ce\u30fc\u30c9\u767b\u9332\u6570: \u7121\u5236\u9650 (Enterprise)'
-      : (total > COMMUNITY_MAX_DEVICES ? ' \u2022 \u767b\u9332\u53ef\u80fd\u306a\u306e\u306f\u6700\u5927 ' + COMMUNITY_MAX_DEVICES + ' \u53f0\u307e\u3067\uff08Community\u7248\uff09' : '');
-    hintEl.innerHTML = '<span>' + total.toLocaleString() + ' hosts \u2022 est. ~' + timeStr +
-      limitText +
-      '</span>';
-    hintEl.className = 'host-hint' + (warn ? ' warn' : '');
-  }
-}
-
-// ── Scan start ──
-async function startScan() {
-  const cidr = document.getElementById('cidr').value.trim();
-  const community = document.getElementById('community').value.trim() || 'public';
-  const seedIp = (document.getElementById('seed-ip') && document.getElementById('seed-ip').value.trim()) || '';
-  if (!cidr) { alert('Please enter a CIDR range.'); return; }
-
-  const entries = cidrEntries(cidr);
-  const prefixes = entries.map(function(entry) { return parseInt((entry.split('/')[1] || '33'), 10); });
-  const smallestPrefix = Math.min.apply(null, prefixes);
-  if (!IS_ENTERPRISE && entries.length > 1) {
-    showScanError('Community\u7248\u3067\u306f CIDR \u30921\u3064\u3060\u3051\u6307\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044\u3002');
-    return;
-  }
-  if (!IS_ENTERPRISE && smallestPrefix < MAX_PREFIX) {
-    showScanError('Community\u7248\u3067\u306f\u5358\u4e00\u30b5\u30d6\u30cd\u30c3\u30c8\uff08/' + MAX_PREFIX + ' \u4ee5\u4e0a\uff09\u306e\u307f\u30b9\u30ad\u30e3\u30f3\u53ef\u80fd\u3067\u3059\u3002\uff08\u73fe\u5728: /' + smallestPrefix + '\uff09');
-    return;
-  }
-
-  const total = entries.map(cidrHostCount).reduce(function(sum, count) { return sum + (count || 0); }, 0);
-  const maxHosts = total || 65534;
-
-  cancelled = false;
-  currentJobId = null;
-  clearInterval(pollTimer);
-  clearInterval(elapsedTimer);
-
-  document.getElementById('scan-btn').style.display    = 'none';
-  document.getElementById('cancel-btn').style.display  = '';
-  document.getElementById('scan-error').style.display  = 'none';
-  document.getElementById('results-section').style.display = 'none';
-  document.getElementById('topology-section').style.display = 'none';
-  document.getElementById('register-result').style.display = 'none';
-  setProgress(0, 0, 0);
-  document.getElementById('scan-progress').style.display = 'block';
-
-  try {
-    const res = await fetch('/api/discovery/scan', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'cidr=' + encodeURIComponent(cidr) + '&community=' + encodeURIComponent(community) + '&max_hosts=' + encodeURIComponent(maxHosts)
-    });
-    const data = await res.json();
-    if (data.error) { finishScanError(data.error); return; }
-    currentJobId = data.job_id;
-    scanStartedAt = Date.now();
-    if (seedIp) startTopologyDiscovery(seedIp, community);
-    startPolling(data.total || 0);
-  } catch(e) {
-    finishScanError('Failed to start scan: ' + e.message);
-  }
-}
-
-async function runTopologyOnly() {
-  const seedIp = (document.getElementById('seed-ip').value || '').trim();
-  const community = (document.getElementById('community').value || 'public').trim();
-  if (!seedIp) {
-    showScanError(t('topology_seed_required'));
-    return;
-  }
-  document.getElementById('scan-error').style.display = 'none';
-  await startTopologyDiscovery(seedIp, community);
-}
-
-async function startTopologyDiscovery(seedIp, community) {
-  const section = document.getElementById('topology-section');
-  const result = document.getElementById('topology-result');
-  if (!section || !result) return;
-  section.style.display = 'block';
-  updateEditionBadge();
-  setTopologyPlaceholder('topology_running', {ip: seedIp});
-  result.innerHTML = '';
-  try {
-    const res = await fetch('/api/discovery/topology', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-      body: 'seed_ip=' + encodeURIComponent(seedIp) + '&community=' + encodeURIComponent(community)
-    });
-    const data = await res.json();
-    if (data.error) {
-      setTopologyPlaceholder(null, {}, '\u26a0 ' + data.error);
-      return;
-    }
-    renderTopology(data);
-  } catch(e) {
-    setTopologyPlaceholder(null, {}, '\u26a0 ' + e.message);
-  }
-}
-
-// ── Topology map (SVG renderer) ──────────────────────────────────────────────
-
-const TOPO = {
-  data: null,
-  pos: {},
-  els: {nodes: {}, edges: []},
-  scale: 1,
-  tx: 0,
-  ty: 0,
-  root: null,
-  drag: null,
-  pan: null,
-  selected: null,
-  selection: null,
-  placeholder: {key: 'topology_empty_hint', params: {}, text: null}
-};
-
-const NODE_H = 44;
-const LAYER_GAP = 150;
-const ROW_GAP = 96;
-const COLUMN_GAP = 200;
-
-function svgEl(tag) {
-  return document.createElementNS('http://www.w3.org/2000/svg', tag);
-}
-
-function esc(value) {
-  return String(value === null || value === undefined ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\x22/g, '&quot;');
-}
-
-// ポートのエラー状態（Warning 以上）をエッジ線の色・線種に反映する
-function edgeHealthClass(edge) {
-  if (edge.health_status === 'Critical') return ' crit';
-  if (edge.health_status === 'Warning') return ' warn';
-  if (edge.predictive_warning) return ' predictive';
-  return (edge.protocol || '').indexOf('CDP') !== -1 ? ' cdp' : '';
-}
-
-function updateEditionBadge() {
-  const badge = document.getElementById('edition-badge');
-  if (!badge) return;
-  if (IS_ENTERPRISE) {
-    badge.textContent = t('edition_enterprise');
-    badge.classList.add('enterprise');
-  } else {
-    badge.textContent = tf('edition_community', {limit: COMMUNITY_MAX_DEVICES});
-    badge.classList.remove('enterprise');
-  }
-}
-
-// key 指定時は言語切替に追従し、text 指定時は原文（API エラー等）をそのまま表示する
-function setTopologyPlaceholder(key, params, text) {
-  TOPO.placeholder = {key: key, params: params || {}, text: text || null};
-  const empty = document.getElementById('topology-empty');
-  if (!empty) return;
-  if (!key && !text) {
-    empty.textContent = '';
-    empty.style.display = 'none';
-    return;
-  }
-  empty.textContent = text || tf(key, params);
-  empty.style.display = 'flex';
-}
-
-function renderTopology(data) {
-  TOPO.data = data;
-  TOPO.selected = null;
-  closeInspector();
-  updateEditionBadge();
-
-  const nodes = data.nodes || [];
-  const edges = data.edges || [];
-  renderTopologyWarnings(data);
-  updateHiddenIndicator(data);
-
-  if (nodes.length === 0) {
-    clearTopologyCanvas();
-    setTopologyPlaceholder('topology_no_neighbors', {ip: data.seed_ip || '-'});
-    return;
-  }
-
-  setTopologyPlaceholder(null);
-  computeTreeLayout(nodes, edges, data.seed_ip);
-  drawTopology();
-  topoFit();
-}
-
-function renderTopologyWarnings(data) {
-  const result = document.getElementById('topology-result');
-  if (!result) return;
-  const warnings = data.warnings || [];
-  const summary = '<div class=\'topology-edge\'>' + esc(tf('topology_summary', {
-    nodes: data.total_nodes || (data.nodes || []).length,
-    edges: (data.edges || []).length,
-    ip: data.seed_ip || '-'
-  })) + '</div>';
-  result.innerHTML = summary + warnings.map(function(w) {
-    return '<div class=\'topology-edge\'>\u26a0 ' + esc(w) + '</div>';
-  }).join('');
-}
-
-function updateHiddenIndicator(data) {
-  const box = document.getElementById('topology-hidden');
-  if (!box) return;
-  const hidden = data.hidden_nodes || 0;
-  if (hidden > 0) {
-    box.textContent = tf('topology_hidden_nodes', {count: hidden});
-    box.style.display = 'block';
-  } else {
-    box.style.display = 'none';
-  }
-}
-
-// 言語切替時に i18n 属性を持たない動的テキストを再構築する
-function refreshTopologyTexts() {
-  updateEditionBadge();
-  const placeholder = TOPO.placeholder || {};
-  setTopologyPlaceholder(placeholder.key, placeholder.params, placeholder.text);
-  if (TOPO.data) {
-    renderTopologyWarnings(TOPO.data);
-    updateHiddenIndicator(TOPO.data);
-  }
-  const selection = TOPO.selection;
-  if (selection && selection.group) {
-    if (selection.type === 'node') {
-      selectNode(selection.data, selection.group);
-    } else {
-      selectEdge(selection.data, selection.group);
-    }
-  } else {
-    document.getElementById('inspector-title').textContent = t('topology_details');
-  }
-}
-
-// シード機器を根とした BFS ツリーレイアウト。到達不能ノードは第1階層に並べる。
-function computeTreeLayout(nodes, edges, seedIp) {
-  const adjacency = {};
-  nodes.forEach(function(node) { adjacency[node.id] = []; });
-  edges.forEach(function(edge) {
-    if (adjacency[edge.source] && adjacency[edge.target]) {
-      adjacency[edge.source].push(edge.target);
-      adjacency[edge.target].push(edge.source);
-    }
-  });
-
-  const seed = nodes.filter(function(n) { return n.seed; })[0] ||
-    nodes.filter(function(n) { return n.id === seedIp; })[0] || nodes[0];
-  const depth = {};
-  const queue = [seed.id];
-  depth[seed.id] = 0;
-  while (queue.length) {
-    const id = queue.shift();
-    (adjacency[id] || []).forEach(function(next) {
-      if (depth[next] === undefined) { depth[next] = depth[id] + 1; queue.push(next); }
-    });
-  }
-
-  const layers = {};
-  nodes.forEach(function(node) {
-    const d = depth[node.id] === undefined ? 1 : depth[node.id];
-    if (!layers[d]) layers[d] = [];
-    layers[d].push(node.id);
-  });
-
-  TOPO.pos = {};
-  Object.keys(layers).forEach(function(key) {
-    const ids = layers[key];
-    // 1階層が横に伸びすぎないよう折り返して配置する
-    const perRow = Math.min(ids.length, Math.max(4, Math.ceil(Math.sqrt(ids.length * 2))));
-    ids.forEach(function(id, i) {
-      const row = Math.floor(i / perRow);
-      const columns = Math.min(perRow, ids.length - row * perRow);
-      TOPO.pos[id] = {
-        x: ((i % perRow) - (columns - 1) / 2) * COLUMN_GAP,
-        y: Number(key) * LAYER_GAP + row * ROW_GAP
-      };
-    });
-  });
-}
-
-function clearTopologyCanvas() {
-  const svg = document.getElementById('topology-canvas');
-  if (!svg) return;
-  while (svg.firstChild) svg.removeChild(svg.firstChild);
-  TOPO.root = null;
-  TOPO.els = {nodes: {}, edges: []};
-}
-
-function drawTopology() {
-  const svg = document.getElementById('topology-canvas');
-  if (!svg) return;
-  clearTopologyCanvas();
-  bindCanvasEvents(svg);
-
-  const root = svgEl('g');
-  svg.appendChild(root);
-  TOPO.root = root;
-
-  const edgeLayer = svgEl('g');
-  const nodeLayer = svgEl('g');
-  root.appendChild(edgeLayer);
-  root.appendChild(nodeLayer);
-
-  (TOPO.data.edges || []).forEach(function(edge) {
-    if (!TOPO.pos[edge.source] || !TOPO.pos[edge.target]) return;
-    const group = svgEl('g');
-    group.setAttribute('class', 'topo-edge');
-    const line = svgEl('line');
-    line.setAttribute('class', 'topo-edge-line' + edgeHealthClass(edge));
-    const hit = svgEl('line');
-    hit.setAttribute('class', 'topo-edge-hit');
-    const label = svgEl('text');
-    label.setAttribute('class', 'topo-edge-label');
-    label.textContent = edge.label || '';
-    group.appendChild(line);
-    group.appendChild(hit);
-    group.appendChild(label);
-    edgeLayer.appendChild(group);
-    hit.addEventListener('click', function(ev) { ev.stopPropagation(); selectEdge(edge, group); });
-    TOPO.els.edges.push({edge: edge, group: group, line: line, hit: hit, label: label});
-  });
-
-  (TOPO.data.nodes || []).forEach(function(node) {
-    if (!TOPO.pos[node.id]) return;
-    const group = svgEl('g');
-    const classes = ['topo-node', node.kind === 'switch' ? 'switch' : 'endpoint'];
-    if (node.seed) classes.push('seed');
-    if ((node.status || '').toLowerCase() === 'offline') classes.push('offline');
-    group.setAttribute('class', classes.join(' '));
-
-    const label = node.label || node.ip || node.id;
-    const width = Math.max(104, label.length * 7.4 + 28);
-    let shape;
-    if (node.kind === 'switch') {
-      shape = svgEl('rect');
-      shape.setAttribute('width', width);
-      shape.setAttribute('height', NODE_H);
-      shape.setAttribute('x', -width / 2);
-      shape.setAttribute('y', -NODE_H / 2);
-      shape.setAttribute('rx', 6);
-    } else {
-      shape = svgEl('circle');
-      shape.setAttribute('r', Math.max(28, width / 3.2));
-    }
-    shape.setAttribute('class', 'topo-node-shape');
-    group.appendChild(shape);
-
-    const title = svgEl('text');
-    title.setAttribute('class', 'topo-node-label');
-    title.setAttribute('y', -6);
-    title.textContent = label;
-    group.appendChild(title);
-
-    const sub = svgEl('text');
-    sub.setAttribute('class', 'topo-node-sub');
-    sub.setAttribute('y', 10);
-    sub.textContent = node.ip || node.status || '';
-    group.appendChild(sub);
-
-    nodeLayer.appendChild(group);
-    group.addEventListener('mousedown', function(ev) { startNodeDrag(ev, node.id); });
-    group.addEventListener('click', function(ev) { ev.stopPropagation(); selectNode(node, group); });
-    TOPO.els.nodes[node.id] = {group: group, node: node};
-  });
-
-  updateTopologyPositions();
-  applyTopologyTransform();
-}
-
-function updateTopologyPositions() {
-  Object.keys(TOPO.els.nodes).forEach(function(id) {
-    const pos = TOPO.pos[id];
-    if (!pos) return;
-    TOPO.els.nodes[id].group.setAttribute('transform', 'translate(' + pos.x + ',' + pos.y + ')');
-  });
-
-  // 同じノード間に複数エッジが残っている場合に備え、線とラベルをまとめて平行移動し
-  // どのラベルがどの線に対応するか一目でわかるようにする
-  const groups = {};
-  TOPO.els.edges.forEach(function(item) {
-    const key = item.edge.source + '\u0000' + item.edge.target;
-    (groups[key] = groups[key] || []).push(item);
-  });
-
-  Object.keys(groups).forEach(function(key) {
-    const group = groups[key];
-    const mid = (group.length - 1) / 2;
-    group.forEach(function(item, index) {
-      const a = TOPO.pos[item.edge.source];
-      const b = TOPO.pos[item.edge.target];
-      if (!a || !b) return;
-
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const len = Math.hypot(dx, dy) || 1;
-      const nx = -dy / len;
-      const ny = dx / len;
-      // ラベル文字幅より広い間隔を確保し、重なって文字が潰れて見えるのを防ぐ
-      const offset = (index - mid) * 90;
-      const ax = a.x + nx * offset;
-      const ay = a.y + ny * offset;
-      const bx = b.x + nx * offset;
-      const by = b.y + ny * offset;
-
-      [item.line, item.hit].forEach(function(line) {
-        line.setAttribute('x1', ax); line.setAttribute('y1', ay);
-        line.setAttribute('x2', bx); line.setAttribute('y2', by);
-      });
-
-      item.label.setAttribute('x', ax + (bx - ax) * 0.68);
-      item.label.setAttribute('y', ay + (by - ay) * 0.68 - 8);
-    });
-  });
-}
-
-function applyTopologyTransform() {
-  if (!TOPO.root) return;
-  TOPO.root.setAttribute('transform',
-    'translate(' + TOPO.tx + ',' + TOPO.ty + ') scale(' + TOPO.scale + ')');
-}
-
-function bindCanvasEvents(svg) {
-  if (svg.dataset.bound === '1') return;
-  svg.dataset.bound = '1';
-
-  svg.addEventListener('wheel', function(ev) {
-    ev.preventDefault();
-    const rect = svg.getBoundingClientRect();
-    const mx = ev.clientX - rect.left;
-    const my = ev.clientY - rect.top;
-    const k = ev.deltaY < 0 ? 1.1 : 0.9;
-    TOPO.tx = mx - (mx - TOPO.tx) * k;
-    TOPO.ty = my - (my - TOPO.ty) * k;
-    TOPO.scale = Math.min(4, Math.max(0.15, TOPO.scale * k));
-    applyTopologyTransform();
-  }, {passive: false});
-
-  svg.addEventListener('mousedown', function(ev) {
-    if (TOPO.drag) return;
-    TOPO.pan = {x: ev.clientX, y: ev.clientY, tx: TOPO.tx, ty: TOPO.ty};
-    svg.classList.add('panning');
-  });
-
-  svg.addEventListener('click', function() { closeInspector(); clearSelection(); });
-
-  window.addEventListener('mousemove', function(ev) {
-    if (TOPO.drag) {
-      const pos = TOPO.pos[TOPO.drag.id];
-      if (!pos) return;
-      pos.x = TOPO.drag.originX + (ev.clientX - TOPO.drag.x) / TOPO.scale;
-      pos.y = TOPO.drag.originY + (ev.clientY - TOPO.drag.y) / TOPO.scale;
-      updateTopologyPositions();
-    } else if (TOPO.pan) {
-      TOPO.tx = TOPO.pan.tx + (ev.clientX - TOPO.pan.x);
-      TOPO.ty = TOPO.pan.ty + (ev.clientY - TOPO.pan.y);
-      applyTopologyTransform();
-    }
-  });
-
-  window.addEventListener('mouseup', function() {
-    TOPO.drag = null;
-    TOPO.pan = null;
-    svg.classList.remove('panning');
-  });
-}
-
-function startNodeDrag(ev, id) {
-  ev.stopPropagation();
-  const pos = TOPO.pos[id];
-  if (!pos) return;
-  TOPO.drag = {id: id, x: ev.clientX, y: ev.clientY, originX: pos.x, originY: pos.y};
-}
-
-function topoZoom(factor) {
-  const svg = document.getElementById('topology-canvas');
-  if (!svg || !TOPO.root) return;
-  const rect = svg.getBoundingClientRect();
-  const cx = rect.width / 2;
-  const cy = rect.height / 2;
-  TOPO.tx = cx - (cx - TOPO.tx) * factor;
-  TOPO.ty = cy - (cy - TOPO.ty) * factor;
-  TOPO.scale = Math.min(4, Math.max(0.15, TOPO.scale * factor));
-  applyTopologyTransform();
-}
-
-function topoFit() {
-  const svg = document.getElementById('topology-canvas');
-  const ids = Object.keys(TOPO.pos);
-  if (!svg || !TOPO.root || ids.length === 0) return;
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  ids.forEach(function(id) {
-    const p = TOPO.pos[id];
-    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-  });
-  const rect = svg.getBoundingClientRect();
-  const pad = 110;
-  const width = (maxX - minX) + pad * 2;
-  const height = (maxY - minY) + pad * 2;
-  const scale = Math.min(2, Math.max(0.15, Math.min(rect.width / width, rect.height / height)));
-  TOPO.scale = scale;
-  TOPO.tx = rect.width / 2 - ((minX + maxX) / 2) * scale;
-  TOPO.ty = rect.height / 2 - ((minY + maxY) / 2) * scale;
-  applyTopologyTransform();
-}
-
-function topoRelayout() {
-  if (!TOPO.data) return;
-  computeTreeLayout(TOPO.data.nodes || [], TOPO.data.edges || [], TOPO.data.seed_ip);
-  updateTopologyPositions();
-  topoFit();
-}
-
-// ── Inspector ────────────────────────────────────────────────────────────────
-
-function clearSelection() {
-  if (TOPO.selected) TOPO.selected.classList.remove('selected');
-  TOPO.selected = null;
-  TOPO.selection = null;
-}
-
-function openInspector(title, html) {
-  document.getElementById('inspector-title').textContent = title;
-  document.getElementById('inspector-body').innerHTML = html;
-  document.getElementById('topology-inspector').classList.add('open');
-}
-
-function closeInspector() {
-  const panel = document.getElementById('topology-inspector');
-  if (panel) panel.classList.remove('open');
-  clearSelection();
-}
-
-function inspectorRow(label, value) {
-  return '<div class=\'inspector-row\'><span>' + esc(label) + '</span><span>' +
-    esc(value === null || value === undefined || value === '' ? '-' : value) + '</span></div>';
-}
-
-function portHealthTags(iface) {
-  const m = iface.metrics || {};
-  const tags = [];
-  if ((m.in_errors_delta || 0) > 0) {
-    tags.push(t('port_health_crc') + ': ' + m.in_errors_delta);
-  }
-  if ((m.late_collisions_delta || 0) > 0) {
-    tags.push(t('port_health_late_collisions') + ': ' + m.late_collisions_delta);
-  }
-  const discards = (m.in_discards_delta || 0) + (m.out_discards_delta || 0);
-  if (discards > 0) {
-    tags.push(t('port_health_discards') + ': ' + discards);
-  }
-  return tags;
-}
-
-function selectNode(node, group) {
-  clearSelection();
-  group.classList.add('selected');
-  TOPO.selected = group;
-  TOPO.selection = {type: 'node', data: node, group: group};
-  let html = inspectorRow(t('ip_address'), node.ip) +
-    inspectorRow(t('hostname'), node.hostname) +
-    inspectorRow(t('status'), node.status) +
-    inspectorRow(t('type'), t(node.kind === 'switch' ? 'node_type_switch' : 'node_type_endpoint'));
-  const interfaces = node.interfaces || [];
-  html += '<h4>' + esc(t('topology_interfaces')) + ' (' + interfaces.length + ')</h4>';
-  if (interfaces.length === 0) {
-    html += '<div class=\'inspector-if\'><span>' + esc(t('topology_no_interface_data')) + '</span></div>';
-  } else {
-    html += interfaces.map(function(iface) {
-      const idx = iface.if_index === null || iface.if_index === undefined ? '-' : iface.if_index;
-      const pred = iface.predictive_warning ? ' <span class=\'pred-badge\'>[PRED]</span>' : '';
-      return '<div class=\'inspector-if\'><span>' + esc(iface.if_name || ('if-' + idx)) + pred +
-        '</span><span>' + esc(iface.link_status || '-') + '</span></div>';
-    }).join('');
-  }
-
-  const unhealthy = interfaces.filter(function(iface) {
-    return iface.health_status && iface.health_status !== 'Healthy';
-  });
-  if (unhealthy.length > 0) {
-    html += '<h4>' + esc(t('port_health')) + '</h4>';
-    html += unhealthy.map(function(iface) {
-      const critical = iface.health_status === 'Critical';
-      const cls = critical ? 'crit' : 'warn';
-      const icon = critical ? '\u26d4' : '\u26a0';
-      const tags = portHealthTags(iface)
-        .map(function(tag) { return '[' + tag + ' (' + iface.health_status + ')]'; })
-        .join(' ');
-      return '<div class=\'inspector-if ' + cls + '\'><span class=\'inspector-if-icon\'>' + icon +
-        '</span><span>' + esc(iface.if_name) + ' ' + esc(tags) + '</span></div>';
-    }).join('');
-  }
-
-  openInspector(node.label || node.ip || node.id, html);
-}
-
-function selectEdge(edge, group) {
-  clearSelection();
-  group.classList.add('selected');
-  TOPO.selected = group;
-  TOPO.selection = {type: 'edge', data: edge, group: group};
-  const localPort = edge.local_port ||
-    (edge.local_if_index === null || edge.local_if_index === undefined ? '' : 'if-' + edge.local_if_index);
-  const html = inspectorRow(t('topology_protocol'), edge.protocol) +
-    '<h4>' + esc(t('topology_local_side')) + '</h4>' +
-    inspectorRow(t('topology_device'), edge.local_ip) +
-    inspectorRow(t('topology_port'), localPort) +
-    '<h4>' + esc(t('topology_remote_side')) + '</h4>' +
-    inspectorRow(t('topology_device'), edge.remote_hostname || edge.remote_ip) +
-    inspectorRow(t('ip_address'), edge.remote_ip) +
-    inspectorRow(t('topology_port'), edge.remote_port);
-  openInspector(edge.label || t('topology_link'), html);
-}
-
-// ── Export ───────────────────────────────────────────────────────────────────
-
-function exportTopology(format) {
-  if (!TOPO.data) {
-    showScanError(t('topology_export_empty'));
-    return;
-  }
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  if (format === 'csv') {
-    downloadFile('tracepulse-topology-' + stamp + '.csv', topologyToCsv(TOPO.data), 'text/csv');
-  } else {
-    downloadFile('tracepulse-topology-' + stamp + '.json', JSON.stringify(TOPO.data, null, 2), 'application/json');
-  }
-}
-
-function csvCell(value) {
-  const quote = '\u0022';
-  const text = String(value === null || value === undefined ? '' : value);
-  return quote + text.split(quote).join(quote + quote) + quote;
-}
-
-function topologyToCsv(data) {
-  const rows = [['record_type', 'id', 'label', 'ip', 'hostname', 'kind_or_protocol', 'status', 'source', 'source_port', 'target', 'target_port']];
-  (data.nodes || []).forEach(function(node) {
-    rows.push(['node', node.id, node.label, node.ip, node.hostname, node.kind, node.status, '', '', '', '']);
-  });
-  (data.edges || []).forEach(function(edge) {
-    const localPort = edge.local_port ||
-      (edge.local_if_index === null || edge.local_if_index === undefined ? '' : 'if-' + edge.local_if_index);
-    rows.push(['edge', edge.id, edge.label, edge.remote_ip, edge.remote_hostname, edge.protocol, '',
-      edge.source, localPort, edge.target, edge.remote_port]);
-  });
-  return rows.map(function(row) {
-    return row.map(csvCell).join(',');
-  }).join('\r\n');
-}
-
-function downloadFile(filename, content, mime) {
-  const blob = new Blob([content], {type: mime + ';charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  setTimeout(function() { URL.revokeObjectURL(url); }, 0);
-}
-
-function startPolling(total) {
-  // Elapsed timer updates every second
-  elapsedTimer = setInterval(function() {
-    if (!scanStartedAt) return;
-    const elapsed = Math.floor((Date.now() - scanStartedAt) / 1000);
-    document.getElementById('progress-elapsed').textContent = 'Elapsed: ' + elapsed + 's';
-    if (elapsed >= SCAN_TIMEOUT_SECS && currentJobId) {
-      cancelScan();
-      finishScanError('Scan timed out after ' + elapsed + 's. Try a smaller CIDR range or increase Max Hosts limit.');
-    }
-  }, 1000);
-
-  pollTimer = setInterval(function() {
-    if (!currentJobId || cancelled) return;
-    fetch('/api/discovery/scan/' + currentJobId)
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        if (cancelled) return;
-        if (data.error) { finishScanError(data.error); return; }
-        const scanned = data.scanned || 0;
-        const tot     = data.total   || total;
-        setProgress(scanned, tot, data.elapsed || 0);
-        if (data.status === 'done') {
-          finishScanDone(data.devices || [], scanned, tot, data.elapsed || 0);
-        } else if (data.status === 'error') {
-          finishScanError(data.error || 'Scan failed');
-        }
-      })
-      .catch(function(e) { finishScanError('Polling error: ' + e.message); });
-  }, POLL_INTERVAL_MS);
-}
-
-function setProgress(scanned, total, elapsed) {
-  const pct = total > 0 ? Math.round(scanned / total * 100) : 0;
-  document.getElementById('progress-bar').style.width = pct + '%';
-  document.getElementById('progress-stats').textContent = scanned + ' / ' + (total || '?') + '  (' + pct + '%)';
-  document.getElementById('progress-elapsed').textContent = t('elapsed') + ': ' + elapsed + 's';
-  document.getElementById('progress-label').textContent = t('scanning');
-}
-
-function stopPolling() {
-  clearInterval(pollTimer);
-  clearInterval(elapsedTimer);
-  pollTimer = null;
-  elapsedTimer = null;
-}
-
-function cancelScan() {
-  cancelled = true;
-  currentJobId = null;
-  stopPolling();
-  document.getElementById('scan-btn').style.display   = '';
-  document.getElementById('cancel-btn').style.display = 'none';
-  document.getElementById('scan-progress').style.display = 'none';
-}
-
-function finishScanError(msg) {
-  stopPolling();
-  document.getElementById('scan-btn').style.display   = '';
-  document.getElementById('cancel-btn').style.display = 'none';
-  document.getElementById('scan-progress').style.display = 'none';
-  showScanError(msg);
-}
-
-function finishScanDone(devices, scanned, total, elapsed) {
-  stopPolling();
-  currentJobId = null;
-  document.getElementById('scan-btn').style.display   = '';
-  document.getElementById('cancel-btn').style.display = 'none';
-  document.getElementById('scan-progress').style.display = 'none';
-  renderResults(devices, scanned, total, elapsed);
-}
-
-function showScanError(msg) {
-  const el = document.getElementById('scan-error');
-  el.textContent = '\u26a0 ' + msg;
-  el.style.display = 'block';
-}
-
-// ── Results ──
-function renderResults(devices, scanned, total, elapsed) {
-  const tbody = document.getElementById('results-body');
-  tbody.innerHTML = '';
-  let hasSelectable = false;
-  const summary = '(scanned ' + scanned + '/' + total + ', ' + elapsed + 's)';
-  if (devices.length === 0) {
-    tbody.innerHTML = '<tr><td colspan=\'5\' class=\'empty\'>' + t('no_snmp_devices_found') + ' in ' + scanned + ' hosts scanned.</td></tr>';
-    document.getElementById('results-title').textContent = t('scan_results_label') + ' \u2014 0 ' + t('found') + ' ' + summary;
-  } else {
-    document.getElementById('results-title').textContent = t('scan_results_label') + ' \u2014 ' + devices.length + ' ' + t('found') + ' ' + summary;
-    devices.forEach(function(d) {
-      const isExisting = EXISTING.has(d.ip);
-      const badge = isExisting ? '<span class=\'badge-registered\'>' + t('registered') + '</span>' : '';
-      const statusCls = d.status === 'online' ? 'status-online' : 'status-unknown';
-      const row = document.createElement('tr');
-      row.innerHTML =
-        '<td><input type=\'checkbox\' class=\'row-cb\' data-ip=\'' + d.ip + '\' data-name=\'' + d.name + '\' data-community=\'' + d.community + '\'' + (isExisting ? ' disabled' : ' onchange=\'updateRegisterBtn()\'') + '></td>' +
-        '<td>' + d.ip + '</td>' +
-        '<td>' + d.name + '</td>' +
-        '<td><span class=\'' + statusCls + '\'>' + d.status + '</span></td>' +
-        '<td>' + badge + '</td>';
-      tbody.appendChild(row);
-      if (!isExisting) hasSelectable = true;
-    });
-  }
-  document.getElementById('results-section').style.display = 'block';
-  document.getElementById('select-all').checked = false;
-  updateRegisterBtn();
-}
-
-function updateRegisterBtn() {
-  const checked = document.querySelectorAll('.row-cb:checked').length;
-  const btn = document.getElementById('register-btn');
-  const action = document.getElementById('register-action');
-  const countEl = document.getElementById('select-count');
-  if (checked > 0) {
-    action.style.display = 'flex';
-    btn.textContent = '\u2713 ' + t('register') + ' ' + checked + ' device' + (checked > 1 ? 's' : '');
-    if (countEl) countEl.textContent = checked + ' ' + t('selected');
-  } else {
-    action.style.display = 'none';
-    if (countEl) countEl.textContent = '';
-  }
-}
-
-function toggleAll(master) {
-  document.querySelectorAll('.row-cb:not(:disabled)').forEach(function(cb) { cb.checked = master.checked; });
-  updateRegisterBtn();
-}
-
-// ── Register ──
-async function registerSelected() {
-  const selected = Array.from(document.querySelectorAll('.row-cb:checked')).map(function(cb) {
-    return { ip: cb.dataset.ip, name: cb.dataset.name, community: cb.dataset.community };
-  });
-  if (selected.length === 0) { alert(t('select_at_least_one_device')); return; }
-  const btn = document.getElementById('register-btn');
-  btn.disabled = true; btn.textContent = t('registering');
-  try {
-    const res = await fetch('/api/discovery/register', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(selected)
-    });
-    const data = await res.json();
-    const resultEl = document.getElementById('register-result');
-    if (data.error) {
-      resultEl.className = 'reg-error';
-      resultEl.textContent = '\u2717 ' + data.error;
-    } else {
-      let msg = '';
-      if (data.registered.length > 0) msg += '\u2713 ' + t('registered') + ': ' + data.registered.join(', ') + '. ';
-      if (data.skipped.length > 0) msg += 'Skipped (duplicate): ' + data.skipped.join(', ') + '. ';
-      if (data.errors.length > 0) msg += 'Errors: ' + data.errors.join(', ') + '.';
-      resultEl.className = data.registered.length > 0 ? 'reg-success' : 'reg-error';
-      resultEl.textContent = msg.trim();
-      data.registered.forEach(function(ip) { EXISTING.add(ip); });
-      document.querySelectorAll('.row-cb').forEach(function(cb) {
-        if (EXISTING.has(cb.dataset.ip)) {
-          cb.disabled = true; cb.checked = false;
-          const td = cb.closest('tr').querySelector('td:last-child');
-          if (td) td.innerHTML = '<span class=\'badge-registered\'>' + t('registered') + '</span>';
-        }
-      });
-      updateRegisterBtn();
-    }
-    resultEl.style.display = 'block';
-  } catch(e) {
-    const resultEl = document.getElementById('register-result');
-    resultEl.className = 'reg-error';
-    resultEl.textContent = '\u2717 ' + t('request_failed') + ': ' + e.message;
-    resultEl.style.display = 'block';
-  } finally { btn.disabled = false; updateRegisterBtn(); }
-}
-
-// ── Manual add ──
-function showManual() { document.getElementById('manual-box').style.display = 'block'; }
-function hideManual() {
-  document.getElementById('manual-box').style.display = 'none';
-  document.getElementById('manual-result').textContent = '';
-}
-
-async function addManual() {
-  const ip = document.getElementById('manual-ip').value.trim();
-  const lastName = ip.split('.').pop();
-  const name = document.getElementById('manual-name').value.trim() || ('device-' + lastName);
-  const community = document.getElementById('manual-community').value.trim() || 'public';
-  const resultEl = document.getElementById('manual-result');
-  if (!ip) { resultEl.textContent = '\u26a0 IP address is required.'; return; }
-  try {
-    const res = await fetch('/api/discovery/register', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify([{ip: ip, name: name, community: community}])
-    });
-    const data = await res.json();
-    if (data.error) {
-      resultEl.style.color = '#fca5a5';
-      resultEl.textContent = '\u2717 ' + data.error;
-    } else if (data.skipped.length > 0) {
-      resultEl.style.color = '#fbbf24';
-      resultEl.textContent = '\u26a0 ' + ip + ' is already registered.';
-    } else if (data.registered.length > 0) {
-      resultEl.style.color = '#86efac';
-      resultEl.textContent = '\u2713 ' + ip + ' registered successfully.';
-      EXISTING.add(ip);
-      document.getElementById('manual-ip').value = '';
-      document.getElementById('manual-name').value = '';
-    } else {
-      resultEl.style.color = '#fca5a5';
-      resultEl.textContent = '\u2717 Registration failed.';
-    }
-  } catch(e) {
-    resultEl.style.color = '#fca5a5';
-    resultEl.textContent = '\u2717 ' + e.message;
-  }
-}
-
-document.getElementById('cidr').addEventListener('keydown', function(e) { if (e.key === 'Enter') startScan(); });
-
-refreshTopologyTexts();
-
-function applyPageLanguage(lang) {
-  var cidr = document.getElementById('cidr');
-  if (cidr && IS_ENTERPRISE) cidr.placeholder = t('cidr_range_placeholder_enterprise', lang);
-  refreshTopologyTexts();
-}
-";
-
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 fn parse_form(body: &str) -> std::collections::HashMap<String, String> {
@@ -6304,46 +4423,202 @@ impl PollResult {
 mod tests {
     use super::{
         CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebEdition, WebTopologyEdge,
-        WebTopologyInterface, WebTopologyReport, annotate_edge_health,
-        classify_interface_diagnostic, effective_interface_link_status, evaluate_port_health,
-        merge_duplicate_edges, page_discovery, parse_cdp_edges, persist_config,
+        WebTopologyInterface, WebTopologyReport, annotate_edge_health, api_flow_analytics,
+        api_live_flow_analytics, classify_interface_diagnostic, effective_interface_link_status,
+        evaluate_port_health, merge_duplicate_edges, page_discovery, parse_cdp_edges,
+        persist_config,
     };
-      use crate::config::AppConfig;
-    use crate::db::models::InterfacePortDelta;
+    use crate::config::AppConfig;
+    use crate::db::models::{Device, FlowRecord, InterfacePortDelta, InterfaceSample};
     use crate::db::repository::Repository;
+    use crate::db::sqlite::initialize_database;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn flow_analytics_api_exposes_extended_contract() {
+        let path =
+            std::env::temp_dir().join(format!("tracepulse-flow-api-{}.db", std::process::id()));
+        let connection = initialize_database(&path).expect("database should initialize");
+        let repository = Repository::new(connection);
+        repository
+            .save_flow_record(&FlowRecord {
+                exporter_ip: Some("192.0.2.10".to_string()),
+                source_ip: "192.0.2.1".to_string(),
+                destination_ip: "198.51.100.2".to_string(),
+                source_port: 50000,
+                destination_port: 443,
+                protocol: "TCP".to_string(),
+                bytes: 1000,
+                packets: 10,
+                ingress_if_index: Some(7),
+                egress_if_index: Some(8),
+                tcp_flags: 0x12,
+                sampling_rate: 1,
+                dscp: 0,
+                bgp_next_hop: None,
+                observed_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            })
+            .expect("flow should save");
+        let repository = Arc::new(Mutex::new(repository));
+        let body = api_flow_analytics(&repository, 60, 10);
+        assert!(body.contains("\"summary\""));
+        assert!(body.contains("\"protocols\""));
+        assert!(body.contains("\"top_talkers\""));
+        assert!(body.contains("\"packets\""));
+        assert!(body.contains("\"tcp_flags\""));
+        assert!(body.contains("\"ingress_if_index\":7"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn live_flow_analytics_exposes_all_sections() {
+        let records = vec![FlowRecord {
+            exporter_ip: Some("192.0.2.10".to_string()),
+            source_ip: "192.0.2.1".to_string(),
+            destination_ip: "198.51.100.2".to_string(),
+            source_port: 50000,
+            destination_port: 443,
+            protocol: "TCP".to_string(),
+            bytes: 2048,
+            packets: 20,
+            ingress_if_index: Some(7),
+            egress_if_index: Some(8),
+            tcp_flags: 0x12,
+            sampling_rate: 1,
+            dscp: 0,
+            bgp_next_hop: None,
+            observed_at: "2026-09-12 12:00:00".to_string(),
+        }];
+        let body = api_live_flow_analytics(&records, 60, 10);
+        for section in [
+            "summary",
+            "timeseries",
+            "protocols",
+            "applications",
+            "top_sources",
+            "top_destinations",
+            "top_talkers",
+        ] {
+            assert!(
+                body.contains(&format!("\"{section}\"")),
+                "missing {section}: {body}"
+            );
+        }
+        assert!(body.contains("HTTPS (TCP/443)"));
+        assert!(body.contains("tcp_flags"));
+    }
+
+    #[test]
+    fn long_window_rollup_preserves_flags_and_exporter_interface_names() {
+        let path = std::env::temp_dir().join(format!(
+            "tracepulse-flow-rollup-api-{}.db",
+            std::process::id()
+        ));
+        let connection = initialize_database(&path).expect("database should initialize");
+        let repository = Repository::new(connection);
+        let device_id = repository
+            .save_device(&Device {
+                id: None,
+                name: "exporter".to_string(),
+                ip: "192.0.2.10".to_string(),
+                community: "public".to_string(),
+                device_type: "router".to_string(),
+                status: "online".to_string(),
+                last_seen_at: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .expect("exporter should save");
+        let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        repository
+            .save_sample(&InterfaceSample {
+                id: None,
+                device_id,
+                if_index: 7,
+                if_name: "GigabitEthernet1".to_string(),
+                link_status: "up".to_string(),
+                in_errors: 0,
+                out_errors: 0,
+                in_packets: 0,
+                out_packets: 0,
+                in_discards: 0,
+                out_discards: 0,
+                late_collisions: 0,
+                fcs_errors: 0,
+                alignment_errors: 0,
+                frame_too_longs: 0,
+                internal_mac_receive_errors: 0,
+                rx_optical_power_dbm: None,
+                in_octets: 0,
+                out_octets: 0,
+                bandwidth_utilization: 0.0,
+                sampled_at: now.clone(),
+            })
+            .expect("interface sample should save");
+        repository
+            .save_flow_record(&FlowRecord {
+                exporter_ip: Some("192.0.2.10".to_string()),
+                source_ip: "192.0.2.1".to_string(),
+                destination_ip: "198.51.100.2".to_string(),
+                source_port: 50000,
+                destination_port: 443,
+                protocol: "TCP".to_string(),
+                bytes: 1000,
+                packets: 10,
+                ingress_if_index: Some(7),
+                egress_if_index: Some(0),
+                tcp_flags: 0x12,
+                sampling_rate: 1,
+                dscp: 0,
+                bgp_next_hop: None,
+                observed_at: now,
+            })
+            .expect("flow should save");
+        let body = api_flow_analytics(&Arc::new(Mutex::new(repository)), 3600, 10);
+        assert!(body.contains("GigabitEthernet1"));
+        assert!(body.contains("tcp_flags"));
+        assert!(body.contains("SYN") || body.contains("ACK"));
+        assert!(body.contains("Internal/Local"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn persist_config_preserves_unmanaged_toml_keys() {
-      let path = std::env::temp_dir().join(format!(
-        "tracepulse-config-merge-{}.toml",
-        std::process::id()
-      ));
-      std::fs::write(
+        let path = std::env::temp_dir().join(format!(
+            "tracepulse-config-merge-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(
         &path,
         "[polling]\ninterval_seconds = 10\ncustom_polling_key = true\n\n[notifier]\nendpoint = 'https://example.invalid'\n",
       )
       .expect("test config should be written");
 
-      let mut config = AppConfig::default();
-      config.polling.interval_seconds = 45;
-      persist_config(&config, &path).expect("config should be persisted");
+        let mut config = AppConfig::default();
+        config.polling.interval_seconds = 45;
+        persist_config(&config, &path).expect("config should be persisted");
 
-      let content = std::fs::read_to_string(&path).expect("test config should be readable");
-      let root: toml::Table = content.parse().expect("persisted config should be valid TOML");
-      let polling = root["polling"].as_table().expect("polling should be a table");
-      let notifier = root["notifier"].as_table().expect("notifier should be preserved");
+        let content = std::fs::read_to_string(&path).expect("test config should be readable");
+        let root: toml::Table = content
+            .parse()
+            .expect("persisted config should be valid TOML");
+        let polling = root["polling"]
+            .as_table()
+            .expect("polling should be a table");
+        let notifier = root["notifier"]
+            .as_table()
+            .expect("notifier should be preserved");
 
-      assert_eq!(polling["interval_seconds"].as_integer(), Some(45));
-      assert_eq!(polling["custom_polling_key"].as_bool(), Some(true));
-      assert_eq!(
-        notifier["endpoint"].as_str(),
-        Some("https://example.invalid")
-      );
+        assert_eq!(polling["interval_seconds"].as_integer(), Some(45));
+        assert_eq!(polling["custom_polling_key"].as_bool(), Some(true));
+        assert_eq!(
+            notifier["endpoint"].as_str(),
+            Some("https://example.invalid")
+        );
 
-      let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -6366,11 +4641,9 @@ mod tests {
         let html = page_discovery(&repo, WebEdition::Enterprise);
 
         assert!(html.contains("window.TRACEPULSE_WEB_EDITION = {enterprise:true,nodeLimit:null};"));
-        assert!(html.contains("IS_ENTERPRISE"));
-        assert!(html.contains("Enterprise"));
-        assert!(html.contains("cidr_range_placeholder_enterprise"));
+        assert!(html.contains("/static/js/discovery.js"));
+        assert!(html.contains("/static/js/topology.js"));
         assert!(html.contains("id='seed-ip'"));
-        assert!(html.contains("/api/discovery/topology"));
     }
 
     #[test]

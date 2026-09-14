@@ -1,0 +1,29 @@
+name: "💡 Feature Request"
+description: Suggest a feature or improvement for TracePulse
+title: "[FEAT] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Background and Problem
+      description: What problem or need would this request address?
+      placeholder: Describe the situation and who is affected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Feature
+      description: Describe the feature, UI changes, or workflow you would like. Please mention whether it concerns the TUI, Web UI, or both.
+      placeholder: Explain what you would like TracePulse to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: How are you currently working around this problem? This field is optional.

@@ -45,6 +45,31 @@ pub struct RetentionConfig {
 pub struct DisplayConfig {
     #[serde(default = "defaults::default_timezone")]
     pub timezone: String,
+    #[serde(default = "defaults::default_language")]
+    pub language: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlowConfig {
+    #[serde(default = "defaults::default_flow_bind_addr")]
+    pub bind_addr: String,
+    #[serde(default = "defaults::default_netflow_port")]
+    pub netflow_port: u16,
+    #[serde(default = "defaults::default_ipfix_port")]
+    pub ipfix_port: u16,
+    #[serde(default = "defaults::default_sflow_port")]
+    pub sflow_port: u16,
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            bind_addr: defaults::default_flow_bind_addr(),
+            netflow_port: defaults::default_netflow_port(),
+            ipfix_port: defaults::default_ipfix_port(),
+            sflow_port: defaults::default_sflow_port(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -59,6 +84,8 @@ pub struct AppConfig {
     pub retention: RetentionConfig,
     #[serde(default)]
     pub display: DisplayConfig,
+    #[serde(default)]
+    pub flow: FlowConfig,
 }
 
 impl AppConfig {

@@ -1,4 +1,6 @@
-use super::{AlertConfig, AppConfig, DisplayConfig, PollingConfig, RetentionConfig, SnmpConfig};
+use super::{
+    AlertConfig, AppConfig, DisplayConfig, FlowConfig, PollingConfig, RetentionConfig, SnmpConfig,
+};
 
 impl Default for PollingConfig {
     fn default() -> Self {
@@ -42,6 +44,7 @@ impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             timezone: super::defaults::default_timezone(),
+            language: super::defaults::default_language(),
         }
     }
 }
@@ -54,6 +57,7 @@ impl Default for AppConfig {
             alert: AlertConfig::default(),
             retention: RetentionConfig::default(),
             display: DisplayConfig::default(),
+            flow: FlowConfig::default(),
         }
     }
 }

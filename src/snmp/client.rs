@@ -2256,21 +2256,6 @@ fn classify_hardware_sensor(name: &str) -> String {
     }
 }
 
-fn physical_class_label(class: Option<i64>) -> String {
-    match class {
-        Some(3) => "chassis".to_string(),
-        Some(4) => "backplane".to_string(),
-        Some(5) => "container".to_string(),
-        Some(6) => "power".to_string(),
-        Some(7) => "fan".to_string(),
-        Some(8) => "sensor".to_string(),
-        Some(9) => "module".to_string(),
-        Some(10) => "port".to_string(),
-        Some(v) => format!("class-{}", v),
-        None => "component".to_string(),
-    }
-}
-
 fn sensor_unit_for_type(sensor_type: &str) -> Option<String> {
     match sensor_type {
         "temperature" => Some("°C".to_string()),

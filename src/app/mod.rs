@@ -15,6 +15,7 @@ pub struct AppRunner {
     pub connection: Connection,
     alerts: AlertBroadcaster,
     notifications: Option<Arc<dyn NotificationSettingsProvider>>,
+    flow_repository: Option<Arc<dyn crate::flow::FlowRepository>>,
 }
 
 impl AppRunner {
@@ -32,6 +33,7 @@ impl AppRunner {
             connection,
             alerts,
             notifications: None,
+            flow_repository: None,
         }
     }
 
@@ -45,6 +47,18 @@ impl AppRunner {
 
     pub fn notification_provider(&self) -> Option<Arc<dyn NotificationSettingsProvider>> {
         self.notifications.clone()
+    }
+
+    pub fn with_flow_repository(
+        mut self,
+        repository: Arc<dyn crate::flow::FlowRepository>,
+    ) -> Self {
+        self.flow_repository = Some(repository);
+        self
+    }
+
+    pub fn flow_repository(&self) -> Option<Arc<dyn crate::flow::FlowRepository>> {
+        self.flow_repository.clone()
     }
 
     /// 外部モジュールがアラートイベントを購読するためのレシーバーを返す。
