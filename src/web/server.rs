@@ -356,6 +356,7 @@ fn respond_js(stream: TcpStream, body: &str) -> Result<(), AppError> {
 
 // ─── Router ──────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
     stream: TcpStream,
     repo: Arc<Mutex<Repository>>,
@@ -516,7 +517,9 @@ fn handle_connection(
     }
 
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") | ("GET", "/dashboard") => respond_html(stream, page_dashboard(&repo, &cfg)),
+        ("GET", "/") | ("GET", "/dashboard") => {
+            respond_html(stream, page_dashboard(&repo, &cfg, edition))
+        }
         ("GET", "/discovery") => respond_html(stream, page_discovery(&repo, edition)),
         ("GET", "/diagnostics") => respond_html(stream, page_diagnostics("/diagnostics", &cfg)),
         ("GET", "/settings") => respond_html(stream, page_settings(&cfg, notifications.is_some())),
@@ -681,9 +684,9 @@ fn api_flow_analytics(repo: &Arc<Mutex<Repository>>, window_seconds: i64, limit:
         talker.pps,
         tcp_flags_json(talker.tcp_flags),
         talker.ingress_if_index.map_or_else(|| "null".to_string(), |value| value.to_string()),
-        format!("\"{}\"", escape_json(&flow_interface_name(talker.ingress_if_index, talker.ingress_if_name.as_deref()))),
+        escape_json(&flow_interface_name(talker.ingress_if_index, talker.ingress_if_name.as_deref())),
         talker.egress_if_index.map_or_else(|| "null".to_string(), |value| value.to_string()),
-        format!("\"{}\"", escape_json(&flow_interface_name(talker.egress_if_index, talker.egress_if_name.as_deref()))),
+        escape_json(&flow_interface_name(talker.egress_if_index, talker.egress_if_name.as_deref())),
       )
     })
     .collect::<Vec<_>>()
@@ -744,14 +747,16 @@ fn api_flow_analytics(repo: &Arc<Mutex<Repository>>, window_seconds: i64, limit:
     )
 }
 
+type ConversationKey = (String, String, u16, u16, String);
+type ConversationValue = (u64, u64, u8);
+
 fn api_live_flow_analytics(
     records: &[crate::db::models::FlowRecord],
     window_seconds: i64,
     limit: usize,
 ) -> String {
     let mut protocols: HashMap<String, (u64, u64)> = HashMap::new();
-    let mut conversations: HashMap<(String, String, u16, u16, String), (u64, u64, u8)> =
-        HashMap::new();
+    let mut conversations: HashMap<ConversationKey, ConversationValue> = HashMap::new();
     let mut applications: HashMap<(String, u16), u64> = HashMap::new();
     let mut sources: HashMap<String, u64> = HashMap::new();
     let mut destinations: HashMap<String, u64> = HashMap::new();
@@ -827,7 +832,7 @@ fn api_live_flow_analytics(
             },
         )
         .collect();
-    conversation_rows.sort_by(|left, right| right.0.cmp(&left.0));
+    conversation_rows.sort_by_key(|left| std::cmp::Reverse(left.0));
     let talker_json = conversation_rows.into_iter().take(limit).map(|(bytes, source, destination, source_port, destination_port, protocol, packets, flags)| format!(r#"{{"source_ip":"{}","destination_ip":"{}","source_port":{},"destination_port":{},"protocol":"{}","bytes":{},"packets":{},"bps":{:.0},"pps":{:.2},"tcp_flags":[{}]}}"#, escape_json(&source), escape_json(&destination), source_port, destination_port, escape_json(&protocol), bytes, packets, bytes as f64 * 8.0 / window_seconds.max(1) as f64, packets as f64 / window_seconds.max(1) as f64, tcp_flags_json(flags))).collect::<Vec<_>>().join(",");
     let applications_json = applications
         .into_iter()
@@ -1272,15 +1277,15 @@ fn api_post_settings(
 
     // バリデーション付き更新
     if let Some(v) = parse_u64(body, "interval_seconds") {
-        if v < 5 || v > 600 {
+        if !(5..=600).contains(&v) {
             return r#"{"error":"interval_seconds must be 5-600"}"#.to_string();
         }
         c.polling.interval_seconds = v;
     }
-    if let Some(v) = parse_str_field(body, "default_community") {
-        if !v.is_empty() {
-            c.snmp.default_community = v;
-        }
+    if let Some(v) = parse_str_field(body, "default_community")
+        && !v.is_empty()
+    {
+        c.snmp.default_community = v;
     }
     if let Some(v) = parse_str_field(body, "timezone") {
         let tz = v.to_lowercase();
@@ -1585,10 +1590,10 @@ fn api_scan_start(body: &str, jobs: JobStore, edition: WebEdition) -> String {
         let mut store = jobs.lock().unwrap();
         store.insert(job_id.clone(), ScanJob::new(host_count));
         // Evict old jobs (keep at most 16)
-        if store.len() > 16 {
-            if let Some(oldest) = store.keys().min_by_key(|k| store[*k].started_at).cloned() {
-                store.remove(&oldest);
-            }
+        if store.len() > 16
+            && let Some(oldest) = store.keys().min_by_key(|k| store[*k].started_at).cloned()
+        {
+            store.remove(&oldest);
         }
     }
 
@@ -1617,10 +1622,10 @@ fn run_scan_job(
     let hosts = match enumerate_discovery_hosts(&cidr, edition) {
         Ok(h) => h,
         Err(err) => {
-            if let Ok(mut store) = jobs.lock() {
-                if let Some(job) = store.get_mut(&job_id) {
-                    job.state = ScanState::Error(err.to_string());
-                }
+            if let Ok(mut store) = jobs.lock()
+                && let Some(job) = store.get_mut(&job_id)
+            {
+                job.state = ScanState::Error(err.to_string());
             }
             return;
         }
@@ -1651,17 +1656,17 @@ fn run_scan_job(
                 if let Ok(sys_name) = client.probe_device(&device) {
                     device.name = sys_name;
                     device.status = "online".to_string();
-                    if let Ok(mut store) = jobs2.lock() {
-                        if let Some(job) = store.get_mut(&job_id2) {
-                            job.found.push(device);
-                        }
+                    if let Ok(mut store) = jobs2.lock()
+                        && let Some(job) = store.get_mut(&job_id2)
+                    {
+                        job.found.push(device);
                     }
                 }
                 let done = counter2.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Ok(mut store) = jobs2.lock() {
-                    if let Some(job) = store.get_mut(&job_id2) {
-                        job.scanned = done;
-                    }
+                if let Ok(mut store) = jobs2.lock()
+                    && let Some(job) = store.get_mut(&job_id2)
+                {
+                    job.scanned = done;
                 }
             }
         });
@@ -1674,11 +1679,11 @@ fn run_scan_job(
     }
 
     // Mark done
-    if let Ok(mut store) = jobs.lock() {
-        if let Some(job) = store.get_mut(&job_id) {
-            job.scanned = total;
-            job.state = ScanState::Done;
-        }
+    if let Ok(mut store) = jobs.lock()
+        && let Some(job) = store.get_mut(&job_id)
+    {
+        job.scanned = total;
+        job.state = ScanState::Done;
     }
 }
 
@@ -1929,39 +1934,39 @@ fn enrich_topology_nodes(report: &mut WebTopologyReport, repo: &Arc<Mutex<Reposi
         ) {
             node.kind = "switch";
         }
-        if let Some(device_id) = device.id {
-            if let Ok(samples) = repo.get_latest_interfaces(device_id) {
-                let deltas = repo
-                    .get_interface_port_deltas(device_id)
-                    .unwrap_or_default();
-                node.interfaces = samples
-                    .into_iter()
-                    .map(|sample| {
-                        let delta = deltas.get(&sample.if_index).copied().unwrap_or_default();
-                        let (health_status, alerts) = evaluate_port_health(&delta);
-                        let predictive_warning = crate::monitor::predictive::evaluate_predictive(
-                            &repo
-                                .get_recent_interface_samples(device_id, sample.if_index, 3)
-                                .unwrap_or_default(),
-                        )
-                        .map(|indicators| {
-                            indicators.error_ratio_warning
-                                || indicators.trend_warning
-                                || indicators.dom_warning
-                        })
-                        .unwrap_or(false);
-                        WebTopologyInterface {
-                            if_index: Some(i64::from(sample.if_index)),
-                            if_name: sample.if_name,
-                            link_status: sample.link_status,
-                            metrics: delta,
-                            health_status,
-                            predictive_warning,
-                            alerts,
-                        }
+        if let Some(device_id) = device.id
+            && let Ok(samples) = repo.get_latest_interfaces(device_id)
+        {
+            let deltas = repo
+                .get_interface_port_deltas(device_id)
+                .unwrap_or_default();
+            node.interfaces = samples
+                .into_iter()
+                .map(|sample| {
+                    let delta = deltas.get(&sample.if_index).copied().unwrap_or_default();
+                    let (health_status, alerts) = evaluate_port_health(&delta);
+                    let predictive_warning = crate::monitor::predictive::evaluate_predictive(
+                        &repo
+                            .get_recent_interface_samples(device_id, sample.if_index, 3)
+                            .unwrap_or_default(),
+                    )
+                    .map(|indicators| {
+                        indicators.error_ratio_warning
+                            || indicators.trend_warning
+                            || indicators.dom_warning
                     })
-                    .collect();
-            }
+                    .unwrap_or(false);
+                    WebTopologyInterface {
+                        if_index: Some(i64::from(sample.if_index)),
+                        if_name: sample.if_name,
+                        link_status: sample.link_status,
+                        metrics: delta,
+                        health_status,
+                        predictive_warning,
+                        alerts,
+                    }
+                })
+                .collect();
         }
     }
 }
@@ -2350,15 +2355,13 @@ fn merge_lldp_management_addresses(
     }
 
     for edge in edges.iter_mut().filter(|edge| edge.protocol == "LLDP") {
-        if edge.remote_ip.is_none() {
-            if let Some(local_if_index) = edge.local_if_index {
-                if let Some((_, ip)) = addresses
-                    .iter()
-                    .find(|(key, _)| key.split('.').nth(1) == Some(&local_if_index.to_string()))
-                {
-                    edge.remote_ip = Some(ip.clone());
-                }
-            }
+        if edge.remote_ip.is_none()
+            && let Some(local_if_index) = edge.local_if_index
+            && let Some((_, ip)) = addresses
+                .iter()
+                .find(|(key, _)| key.split('.').nth(1) == Some(&local_if_index.to_string()))
+        {
+            edge.remote_ip = Some(ip.clone());
         }
     }
 }
@@ -2429,13 +2432,13 @@ fn snmp_value_to_ip(value: &crate::snmp::SnmpValue) -> Option<String> {
         return Some(format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]));
     }
 
-    if let Some(bytes) = value.as_bytes() {
-        if bytes.len() >= 4 {
-            return Some(format!(
-                "{}.{}.{}.{}",
-                bytes[0], bytes[1], bytes[2], bytes[3]
-            ));
-        }
+    if let Some(bytes) = value.as_bytes()
+        && bytes.len() >= 4
+    {
+        return Some(format!(
+            "{}.{}.{}.{}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
     }
 
     value
@@ -2519,7 +2522,11 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, edition: WebEdition) 
 
 // ─── Pages ───────────────────────────────────────────────────────────────────
 
-fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> String {
+fn page_dashboard(
+    repo: &Arc<Mutex<Repository>>,
+    cfg: &Arc<Mutex<AppConfig>>,
+    edition: WebEdition,
+) -> String {
     let spike_threshold = cfg.lock().map(|c| c.alert.spike_threshold).unwrap_or(10);
     let (devices, spikes_count, devices_json, recent_alerts) = {
         if let Ok(r) = repo.lock() {
@@ -2577,28 +2584,30 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html.push_str(&format!("<div class='{spike_card_cls}'><div class='card-num'>{spikes_count}</div><div class='card-label' data-i18n='error_spikes'>Error Spikes</div></div>"));
     html.push_str("</div>");
     html.push_str("<p id='last-refreshed' style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'></p>");
-    html.push_str("<section class='enterprise-analytics-panel'>");
-    html.push_str("<div class='enterprise-analytics-toolbar'><label for='enterprise-scope'>Scope</label><select id='enterprise-scope' onchange='setEnterpriseScope(this.value)'><option value=''>All Devices</option><option value='10.0.0.0/8'>Core (10.0.0.0/8)</option><option value='192.168.0.0/16'>Edge (192.168.0.0/16)</option></select></div>");
-    html.push_str("<div class='enterprise-analytics-grid'>");
-    html.push_str("<article class='enterprise-sankey-article'>");
-    html.push_str("<div class='enterprise-card-heading'>");
-    html.push_str("<div class='sankey-title-group'><h2>Sankey Flow</h2><div class='sankey-help-wrap'><button class='sankey-help-btn' type='button' aria-label='Help' title='Sankey Flow について'>ℹ️</button><div class='sankey-help-popover'><div class='sankey-help-title'>Sankey Flow について</div><div class='sankey-help-body'><p>トラフィックがどのポートを通過し、どこへ向かったかの「流動経路」と「流量」を示しています。</p><ul><li><strong>左 ➔ 右:</strong> 送信元 IP ➔ 入力 IF ➔ 出力 IF ➔ 宛先 IP</li><li><strong>帯の太さ:</strong> トラフィック量（Bps / PPS）</li></ul></div></div></div></div>");
-    html.push_str("</div>");
-    html.push_str("<div class='sankey-headers'>");
-    html.push_str("<div class='sankey-col-header col-src'><span class='col-dot dot-src'></span><span class='col-title'>Source IP</span><span class='col-sub'>送信元</span></div>");
-    html.push_str("<div class='sankey-col-header col-ing'><span class='col-dot dot-ing'></span><span class='col-title'>Ingress IF</span><span class='col-sub'>入力IF</span></div>");
-    html.push_str("<div class='sankey-col-header col-egr'><span class='col-dot dot-egr'></span><span class='col-title'>Egress IF</span><span class='col-sub'>出力IF</span></div>");
-    html.push_str("<div class='sankey-col-header col-dst'><span class='col-dot dot-dst'></span><span class='col-title'>Destination IP</span><span class='col-sub'>宛先</span></div>");
-    html.push_str("</div>");
-    html.push_str("<div id='enterprise-sankey' class='enterprise-sankey'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading flow records...</span></div></div>");
-    html.push_str("</article>");
-    html.push_str("<article class='enterprise-geo-article'><div class='enterprise-card-heading'><h2>GeoIP / ASN</h2><a class='enterprise-map-link' href='/geo-map'>Open full-screen map ↗</a></div><div id='enterprise-geoip-list' class='enterprise-geoip-list'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading GeoIP / ASN data...</span></div></div></article>");
-    html.push_str(
-        "<article class='enterprise-bgp-article'><h2>BGP / QoS</h2><div id='enterprise-bgp-qos'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>",
-    );
-    html.push_str("<article class='enterprise-threat-article'><h2>Threat Badges</h2><div id='enterprise-threat-badges'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>");
-    html.push_str("</div>");
-    html.push_str("</section>");
+    if edition.is_enterprise() {
+        html.push_str("<section class='enterprise-analytics-panel'>");
+        html.push_str("<div class='enterprise-analytics-toolbar'><label for='enterprise-scope'>Scope</label><select id='enterprise-scope' onchange='setEnterpriseScope(this.value)'><option value=''>All Devices</option><option value='10.0.0.0/8'>Core (10.0.0.0/8)</option><option value='192.168.0.0/16'>Edge (192.168.0.0/16)</option></select></div>");
+        html.push_str("<div class='enterprise-analytics-grid'>");
+        html.push_str("<article class='enterprise-sankey-article'>");
+        html.push_str("<div class='enterprise-card-heading'>");
+        html.push_str("<div class='sankey-title-group'><h2>Sankey Flow</h2><div class='sankey-help-wrap'><button class='sankey-help-btn' type='button' aria-label='Help' title='Sankey Flow について'>ℹ️</button><div class='sankey-help-popover'><div class='sankey-help-title'>Sankey Flow について</div><div class='sankey-help-body'><p>トラフィックがどのポートを通過し、どこへ向かったかの「流動経路」と「流量」を示しています。</p><ul><li><strong>左 ➔ 右:</strong> 送信元 IP ➔ 入力 IF ➔ 出力 IF ➔ 宛先 IP</li><li><strong>帯の太さ:</strong> トラフィック量（Bps / PPS）</li></ul></div></div></div></div>");
+        html.push_str("</div>");
+        html.push_str("<div class='sankey-headers'>");
+        html.push_str("<div class='sankey-col-header col-src'><span class='col-dot dot-src'></span><span class='col-title'>Source IP</span><span class='col-sub'>送信元</span></div>");
+        html.push_str("<div class='sankey-col-header col-ing'><span class='col-dot dot-ing'></span><span class='col-title'>Ingress IF</span><span class='col-sub'>入力IF</span></div>");
+        html.push_str("<div class='sankey-col-header col-egr'><span class='col-dot dot-egr'></span><span class='col-title'>Egress IF</span><span class='col-sub'>出力IF</span></div>");
+        html.push_str("<div class='sankey-col-header col-dst'><span class='col-dot dot-dst'></span><span class='col-title'>Destination IP</span><span class='col-sub'>宛先</span></div>");
+        html.push_str("</div>");
+        html.push_str("<div id='enterprise-sankey' class='enterprise-sankey'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading flow records...</span></div></div>");
+        html.push_str("</article>");
+        html.push_str("<article class='enterprise-geo-article'><div class='enterprise-card-heading'><h2>GeoIP / ASN</h2><a class='enterprise-map-link' href='/geo-map'>Open full-screen map ↗</a></div><div id='enterprise-geoip-list' class='enterprise-geoip-list'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading GeoIP / ASN data...</span></div></div></article>");
+        html.push_str(
+            "<article class='enterprise-bgp-article'><h2>BGP / QoS</h2><div id='enterprise-bgp-qos'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>",
+        );
+        html.push_str("<article class='enterprise-threat-article'><h2>Threat Badges</h2><div id='enterprise-threat-badges'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>");
+        html.push_str("</div>");
+        html.push_str("</section>");
+    }
     html.push_str("<table id='dash-table'><thead><tr>");
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");
     html.push_str("<th id='th-name' onclick='sortBy(\"name\")' data-i18n='hostname'>Name <span class='sort-icon' id='sort-name'></span></th>");
@@ -2637,7 +2646,11 @@ fn page_dashboard(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) ->
     html.push_str("<script>\nvar DEVICES = [");
     html.push_str(&devices_json.join(","));
     html.push_str("];\n");
-    html.push_str("</script><script src='/static/js/echarts.min.js'></script><script src='/static/js/i18n.js?v=2'></script><script src='/static/js/dashboard.js?v=2'></script><script src='/static/js/enterprise-analytics.js?v=6'></script></body></html>");
+    html.push_str("</script><script src='/static/js/echarts.min.js'></script><script src='/static/js/i18n.js?v=2'></script><script src='/static/js/dashboard.js?v=2'></script>");
+    if edition.is_enterprise() {
+        html.push_str("<script src='/static/js/enterprise-analytics.js?v=6'></script>");
+    }
+    html.push_str("</body></html>");
     html
 }
 
@@ -2721,14 +2734,12 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
         return html;
     }
 
-    html.push_str(&format!(
-        "<main><div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>\
+    html.push_str("<main><div style='display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap'>\
          <a href='/' style='color:#94a3b8;font-size:.85rem;text-decoration:none' data-i18n='nav_dashboard'>&#8592; Dashboard</a>\
          <h1 id='dev-title' style='margin:0'>Loading...</h1>\
          <span id='dev-status' class='status-unknown'>unknown</span>\
          <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Device data auto-refresh: 30s</span>\
-         </div>",
-    ));
+         </div>");
 
     // セクション: インターフェース一覧
     html.push_str("<section class='detail-section'>");
@@ -4046,8 +4057,8 @@ fn parse_register_body(body: &str) -> Vec<DeviceConfig> {
         let name = extract_json_str(chunk, "name");
         let community = extract_json_str(chunk, "community");
         if let Some(ip) = ip {
-            let name =
-                name.unwrap_or_else(|| format!("device-{}", ip.split('.').last().unwrap_or("x")));
+            let name = name
+                .unwrap_or_else(|| format!("device-{}", ip.split('.').next_back().unwrap_or("x")));
             let community = community.unwrap_or_else(|| "public".to_string());
             let mut d = DeviceConfig::new(ip.clone(), community);
             d.name = name;
@@ -4282,7 +4293,7 @@ pub(crate) fn run_polling_loop(
                         );
                     }
                     let _ = r.save_sample(&sample);
-                    publish_predictive_alerts(&alerts, &dev_config, &sample, &*r);
+                    publish_predictive_alerts(&alerts, &dev_config, &sample, &r);
                 }
 
                 // スパイク検出（インターフェース単位）
@@ -4392,15 +4403,15 @@ fn publish_predictive_alerts(
             format!("[PRED] Error acceleration rising on {}", sample.if_name),
         );
     }
-    if indicators.dom_warning {
-        if let Some(power) = indicators.rx_optical_power_dbm {
-            publish(
-                AlertKind::PredictiveDom,
-                format!("{power:.1} dBm"),
-                "-18 dBm".to_string(),
-                format!("[PRED] SFP Rx optical power degraded on {}", sample.if_name),
-            );
-        }
+    if indicators.dom_warning
+        && let Some(power) = indicators.rx_optical_power_dbm
+    {
+        publish(
+            AlertKind::PredictiveDom,
+            format!("{power:.1} dBm"),
+            "-18 dBm".to_string(),
+            format!("[PRED] SFP Rx optical power degraded on {}", sample.if_name),
+        );
     }
 }
 
@@ -4425,8 +4436,8 @@ mod tests {
         CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebEdition, WebTopologyEdge,
         WebTopologyInterface, WebTopologyReport, annotate_edge_health, api_flow_analytics,
         api_live_flow_analytics, classify_interface_diagnostic, effective_interface_link_status,
-        evaluate_port_health, merge_duplicate_edges, page_discovery, parse_cdp_edges,
-        persist_config,
+        evaluate_port_health, merge_duplicate_edges, page_dashboard, page_discovery,
+        parse_cdp_edges, persist_config,
     };
     use crate::config::AppConfig;
     use crate::db::models::{Device, FlowRecord, InterfacePortDelta, InterfaceSample};
@@ -4469,6 +4480,34 @@ mod tests {
         assert!(body.contains("\"packets\""));
         assert!(body.contains("\"tcp_flags\""));
         assert!(body.contains("\"ingress_if_index\":7"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dashboard_hides_enterprise_analytics_for_community() {
+        let path = std::env::temp_dir().join(format!(
+            "tracepulse-dashboard-edition-{}.db",
+            std::process::id()
+        ));
+        let repository =
+            Repository::new(initialize_database(&path).expect("database should initialize"));
+        let repository = Arc::new(Mutex::new(repository));
+        let config = Arc::new(Mutex::new(AppConfig::default()));
+
+        let community = page_dashboard(&repository, &config, WebEdition::Community);
+        assert!(!community.contains("Sankey Flow"));
+        assert!(!community.contains("GeoIP / ASN"));
+        assert!(!community.contains("BGP / QoS"));
+        assert!(!community.contains("Threat Badges"));
+        assert!(!community.contains("enterprise-analytics.js"));
+
+        let enterprise = page_dashboard(&repository, &config, WebEdition::Enterprise);
+        assert!(enterprise.contains("Sankey Flow"));
+        assert!(enterprise.contains("GeoIP / ASN"));
+        assert!(enterprise.contains("BGP / QoS"));
+        assert!(enterprise.contains("Threat Badges"));
+        assert!(enterprise.contains("enterprise-analytics.js"));
+
         let _ = std::fs::remove_file(path);
     }
 
@@ -4952,7 +4991,7 @@ fn epoch_to_ymd_hms(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
     let mut days = secs;
     let mut y = 1970u64;
     loop {
-        let dy = if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+        let dy = if (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400) {
             366
         } else {
             365
@@ -4963,7 +5002,7 @@ fn epoch_to_ymd_hms(mut secs: u64) -> (u64, u64, u64, u64, u64, u64) {
         days -= dy;
         y += 1;
     }
-    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let leap = (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
     let months = [
         31u64,
         if leap { 29 } else { 28 },

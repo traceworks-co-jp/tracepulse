@@ -7,6 +7,12 @@ pub struct SystemMonitor {
     pub sys_descr: String,
 }
 
+impl Default for SystemMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemMonitor {
     pub fn new() -> Self {
         Self {

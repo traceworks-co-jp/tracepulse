@@ -38,18 +38,41 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check and build frontend assets
+        run: |
+          npm run typecheck
+          npm run build:web
+          git diff --exit-code -- frontend/dist
+
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package Windows binary
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.binary }}" -DestinationPath "${{ matrix.archive }}"
+        run: |
+          New-Item -ItemType Directory -Force -Path release-package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" release-package/
+          Copy-Item -Recurse templates release-package/templates
+          Compress-Archive -Path release-package/* -DestinationPath "${{ matrix.archive }}"
 
       - name: Package Unix binary
         if: runner.os != 'Windows'
         shell: bash
-        run: tar -czf "${{ matrix.archive }}" -C "target/${{ matrix.target }}/release" "${{ matrix.binary }}"
+        run: |
+          mkdir -p release-package
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" release-package/
+          cp -R templates release-package/templates
+          tar -czf "${{ matrix.archive }}" -C release-package .
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

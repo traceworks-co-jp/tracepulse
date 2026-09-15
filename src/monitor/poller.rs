@@ -86,21 +86,21 @@ impl PollingEngine {
                 ),
             ));
         }
-        if indicators.dom_warning {
-            if let Some(power) = indicators.rx_optical_power_dbm {
-                self.publish_alert(AlertEvent::predictive(
-                    crate::alert::AlertKind::PredictiveDom,
-                    device,
-                    sample.if_index,
-                    &sample.if_name,
-                    format!("{power:.1} dBm"),
-                    "-18 dBm",
-                    format!(
-                        "[PRED] SFP Rx optical power degraded on {}: {power:.1} dBm",
-                        sample.if_name
-                    ),
-                ));
-            }
+        if indicators.dom_warning
+            && let Some(power) = indicators.rx_optical_power_dbm
+        {
+            self.publish_alert(AlertEvent::predictive(
+                crate::alert::AlertKind::PredictiveDom,
+                device,
+                sample.if_index,
+                &sample.if_name,
+                format!("{power:.1} dBm"),
+                "-18 dBm",
+                format!(
+                    "[PRED] SFP Rx optical power degraded on {}: {power:.1} dBm",
+                    sample.if_name
+                ),
+            ));
         }
     }
 

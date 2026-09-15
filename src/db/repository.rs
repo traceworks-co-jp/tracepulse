@@ -1518,16 +1518,14 @@ impl Repository {
 
 fn application_name(protocol: String, destination_port: u16) -> String {
     let custom_name = crate::exe_dir().join("config").join("services.toml");
-    if let Ok(content) = std::fs::read_to_string(custom_name) {
-        if let Ok(value) = content.parse::<toml::Value>() {
-            if let Some(name) = value
-                .get("services")
-                .and_then(|services| services.get(destination_port.to_string()))
-                .and_then(toml::Value::as_str)
-            {
-                return format!("{name} ({protocol}/{destination_port})");
-            }
-        }
+    if let Ok(content) = std::fs::read_to_string(custom_name)
+        && let Ok(value) = content.parse::<toml::Value>()
+        && let Some(name) = value
+            .get("services")
+            .and_then(|services| services.get(destination_port.to_string()))
+            .and_then(toml::Value::as_str)
+    {
+        return format!("{name} ({protocol}/{destination_port})");
     }
     let name = match destination_port {
         22 => "SSH",

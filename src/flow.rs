@@ -656,17 +656,18 @@ fn parse_sflow_flow_sample(
         if offset + record_len > sample.len() {
             break;
         }
-        if record_type & 0x0fff == 1 && record_type >> 12 == 0 {
-            if let Some(record) = decode_sflow_raw_packet(
+        if record_type & 0x0fff == 1
+            && record_type >> 12 == 0
+            && let Some(record) = decode_sflow_raw_packet(
                 &sample[offset..offset + record_len],
                 sampling_rate,
                 input,
                 output,
                 exporter,
                 observed_at,
-            ) {
-                records.push(record);
-            }
+            )
+        {
+            records.push(record);
         }
         offset += record_len;
     }
@@ -904,6 +905,7 @@ fn cache_templates(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_data_set(
     format: TemplateFormat,
     exporter: IpAddr,

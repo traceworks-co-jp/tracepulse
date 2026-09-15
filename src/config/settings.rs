@@ -49,6 +49,7 @@ impl Default for DisplayConfig {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for AppConfig {
     fn default() -> Self {
         Self {

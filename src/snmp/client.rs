@@ -417,21 +417,18 @@ impl SnmpClient {
                 std::collections::HashMap::new();
             for vb in varbinds {
                 if let Some(suffix) = vb.index_suffix(&LLDP_REM_SYS_NAME_OID) {
-                    if let Some(&local_if) = suffix.get(1) {
-                        if let Some(val) = vb.value.as_string() {
-                            if !val.trim().is_empty() {
-                                lldp_names.insert(local_if as i32, val);
-                            }
-                        }
+                    if let Some(&local_if) = suffix.get(1)
+                        && let Some(val) = vb.value.as_string()
+                        && !val.trim().is_empty()
+                    {
+                        lldp_names.insert(local_if as i32, val);
                     }
-                } else if let Some(suffix) = vb.index_suffix(&LLDP_REM_PORT_ID_OID) {
-                    if let Some(&local_if) = suffix.get(1) {
-                        if let Some(val) = vb.value.as_string() {
-                            if !val.trim().is_empty() {
-                                lldp_ports.insert(local_if as i32, val);
-                            }
-                        }
-                    }
+                } else if let Some(suffix) = vb.index_suffix(&LLDP_REM_PORT_ID_OID)
+                    && let Some(&local_if) = suffix.get(1)
+                    && let Some(val) = vb.value.as_string()
+                    && !val.trim().is_empty()
+                {
+                    lldp_ports.insert(local_if as i32, val);
                 }
             }
             for (if_idx, name) in lldp_names {
@@ -453,21 +450,18 @@ impl SnmpClient {
                 std::collections::HashMap::new();
             for vb in varbinds {
                 if let Some(suffix) = vb.index_suffix(&CDP_CACHE_DEVICE_ID_OID) {
-                    if let Some(&local_if) = suffix.first() {
-                        if let Some(val) = vb.value.as_string() {
-                            if !val.trim().is_empty() {
-                                cdp_names.insert(local_if as i32, val);
-                            }
-                        }
+                    if let Some(&local_if) = suffix.first()
+                        && let Some(val) = vb.value.as_string()
+                        && !val.trim().is_empty()
+                    {
+                        cdp_names.insert(local_if as i32, val);
                     }
-                } else if let Some(suffix) = vb.index_suffix(&CDP_CACHE_DEVICE_PORT_OID) {
-                    if let Some(&local_if) = suffix.first() {
-                        if let Some(val) = vb.value.as_string() {
-                            if !val.trim().is_empty() {
-                                cdp_ports.insert(local_if as i32, val);
-                            }
-                        }
-                    }
+                } else if let Some(suffix) = vb.index_suffix(&CDP_CACHE_DEVICE_PORT_OID)
+                    && let Some(&local_if) = suffix.first()
+                    && let Some(val) = vb.value.as_string()
+                    && !val.trim().is_empty()
+                {
+                    cdp_ports.insert(local_if as i32, val);
                 }
             }
             for (if_idx, name) in cdp_names {
@@ -580,10 +574,10 @@ impl SnmpClient {
         if indexes.is_empty() {
             for i in 1u32..=8 {
                 let oid = [1u32, 3, 6, 1, 2, 1, 2, 2, 1, 1, i];
-                if let Ok(mut r) = session.get(&oid) {
-                    if r.varbinds.next().is_some() {
-                        indexes.push(i);
-                    }
+                if let Ok(mut r) = session.get(&oid)
+                    && r.varbinds.next().is_some()
+                {
+                    indexes.push(i);
                 }
             }
         }
@@ -1166,14 +1160,12 @@ impl SnmpClient {
         session: &mut SyncSession,
         vendor_enterprise_id: Option<u32>,
     ) -> Result<Option<u32>, AppError> {
-        if let Some(overrides) = &self.overrides {
-            if let Some(cpu_oid) = parse_oid_string(&overrides.cpu_oid_override) {
-                if let Ok(value) = query_u32(session, &cpu_oid) {
-                    if value > 0 {
-                        return Ok(Some(value));
-                    }
-                }
-            }
+        if let Some(overrides) = &self.overrides
+            && let Some(cpu_oid) = parse_oid_string(&overrides.cpu_oid_override)
+            && let Ok(value) = query_u32(session, &cpu_oid)
+            && value > 0
+        {
+            return Ok(Some(value));
         }
         if let Some(value) = self.query_cpu_from_template(session, vendor_enterprise_id) {
             return Ok(Some(value));
@@ -1186,16 +1178,13 @@ impl SnmpClient {
         session: &mut SyncSession,
         vendor_enterprise_id: Option<u32>,
     ) -> Result<Option<u32>, AppError> {
-        if let Some(overrides) = &self.overrides {
-            if let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override) {
-                if let Ok(value) = query_u32_with_table_fallback(session, &memory_oid) {
-                    if let Some(v) = value {
-                        if v <= 100 {
-                            return Ok(Some(v));
-                        }
-                    }
-                }
-            }
+        if let Some(overrides) = &self.overrides
+            && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
+            && let Ok(value) = query_u32_with_table_fallback(session, &memory_oid)
+            && let Some(v) = value
+            && v <= 100
+        {
+            return Ok(Some(v));
         }
 
         if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id) {
@@ -1203,12 +1192,11 @@ impl SnmpClient {
             let mode = mem_tmpl.mode.trim().to_lowercase();
 
             if mode == "direct" && !mem_tmpl.oid.is_empty() {
-                if let Some(oid) = parse_oid_string(&mem_tmpl.oid) {
-                    if let Ok(value) = query_u32_with_table_fallback(session, &oid) {
-                        if let Some(v) = value {
-                            return Ok(Some(v.min(100)));
-                        }
-                    }
+                if let Some(oid) = parse_oid_string(&mem_tmpl.oid)
+                    && let Ok(value) = query_u32_with_table_fallback(session, &oid)
+                    && let Some(v) = value
+                {
+                    return Ok(Some(v.min(100)));
                 }
             } else {
                 let (used_val, free_val, total_val) = query_memory_pair_from_prefixes(
@@ -1241,11 +1229,11 @@ impl SnmpClient {
             }
         }
 
-        if let Ok((Some(used), Some(total))) = query_hr_storage_memory_used_and_total(session) {
-            if total > 0 {
-                let util = ((used as f64 / total as f64) * 100.0).round() as u32;
-                return Ok(Some(util.min(100)));
-            }
+        if let Ok((Some(used), Some(total))) = query_hr_storage_memory_used_and_total(session)
+            && total > 0
+        {
+            let util = ((used as f64 / total as f64) * 100.0).round() as u32;
+            return Ok(Some(util.min(100)));
         }
 
         Ok(None)
@@ -1256,14 +1244,12 @@ impl SnmpClient {
         session: &mut SyncSession,
         vendor_enterprise_id: Option<u32>,
     ) -> Result<Option<u64>, AppError> {
-        if let Some(overrides) = &self.overrides {
-            if let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override) {
-                if let Ok(value) = query_u32_with_table_fallback(session, &memory_oid) {
-                    if let Some(value) = value.filter(|v| *v > 0) {
-                        return Ok(Some(value as u64));
-                    }
-                }
-            }
+        if let Some(overrides) = &self.overrides
+            && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
+            && let Ok(value) = query_u32_with_table_fallback(session, &memory_oid)
+            && let Some(value) = value.filter(|v| *v > 0)
+        {
+            return Ok(Some(value as u64));
         }
 
         if vendor_enterprise_id == Some(9) {
@@ -1315,22 +1301,22 @@ impl SnmpClient {
         let mut probes = Vec::new();
         let mut selected = None;
 
-        if let Some(overrides) = &self.overrides {
-            if let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override) {
-                let value = query_u32_with_table_fallback(session, &memory_oid)
-                    .ok()
-                    .flatten()
-                    .filter(|v| *v > 0)
-                    .map(|v| v as u64);
-                probes.push(SnmpMemoryProbe {
-                    label: "Manual Memory Override".to_string(),
-                    oid: oid_to_string(&memory_oid),
-                    value,
-                    selected: value.is_some(),
-                    status: if value.is_some() { "ok" } else { "n/a" }.to_string(),
-                });
-                selected = selected.or(value);
-            }
+        if let Some(overrides) = &self.overrides
+            && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
+        {
+            let value = query_u32_with_table_fallback(session, &memory_oid)
+                .ok()
+                .flatten()
+                .filter(|v| *v > 0)
+                .map(|v| v as u64);
+            probes.push(SnmpMemoryProbe {
+                label: "Manual Memory Override".to_string(),
+                oid: oid_to_string(&memory_oid),
+                value,
+                selected: value.is_some(),
+                status: if value.is_some() { "ok" } else { "n/a" }.to_string(),
+            });
+            selected = selected.or(value);
         }
 
         if vendor_enterprise_id == Some(9) {
@@ -1360,10 +1346,10 @@ fn query_u32_with_table_fallback(
     session: &mut SyncSession,
     oid: &[u32],
 ) -> Result<Option<u32>, AppError> {
-    if let Ok(value) = query_u32(session, oid) {
-        if value > 0 {
-            return Ok(Some(value));
-        }
+    if let Ok(value) = query_u32(session, oid)
+        && value > 0
+    {
+        return Ok(Some(value));
     }
     query_table_first_u32(session, oid)
 }
@@ -1736,7 +1722,7 @@ fn query_table_i64_values(
         };
 
         let value = match value {
-            Value::Integer(value) => Some(value as i64),
+            Value::Integer(value) => Some(value),
             Value::Unsigned32(value) => Some(value as i64),
             Value::Counter32(value) => Some(value as i64),
             Value::Counter64(value) => Some(value as i64),
@@ -1896,10 +1882,10 @@ impl SnmpClient {
     ) -> Result<HardwareInventory, AppError> {
         let mut inventory = query_hardware_inventory_with_session(session, vendor_enterprise_id)?;
 
-        if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id) {
-            if let Ok(template_sensors) = self.query_sensors_from_template(session, template) {
-                inventory.sensors.extend(template_sensors);
-            }
+        if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id)
+            && let Ok(template_sensors) = self.query_sensors_from_template(session, template)
+        {
+            inventory.sensors.extend(template_sensors);
         }
 
         // Cisco 機器向けハードウェアセンサー直接フォールバック

@@ -13,7 +13,7 @@ impl DeviceConfig {
     pub fn new(ip: impl Into<String>, community: impl Into<String>) -> Self {
         let ip = ip.into();
         let community = community.into();
-        let hostname = format!("device-{}", ip.split('.').last().unwrap_or("unknown"));
+        let hostname = format!("device-{}", ip.split('.').next_back().unwrap_or("unknown"));
 
         Self {
             id: None,

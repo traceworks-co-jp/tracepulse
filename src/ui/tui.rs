@@ -466,15 +466,13 @@ fn tui_help_text() -> String {
 }
 
 fn guess_local_cidr() -> String {
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("8.8.8.8:53").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                if let std::net::IpAddr::V4(ipv4) = addr.ip() {
-                    let octets = ipv4.octets();
-                    return format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2]);
-                }
-            }
-        }
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
+        && socket.connect("8.8.8.8:53").is_ok()
+        && let Ok(addr) = socket.local_addr()
+        && let std::net::IpAddr::V4(ipv4) = addr.ip()
+    {
+        let octets = ipv4.octets();
+        return format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2]);
     }
     "192.168.1.0/24".to_string()
 }
@@ -783,63 +781,59 @@ impl TuiRenderer {
 
         loop {
             // スキャン完了チェック
-            if let TuiMode::Scanning(ref task) = mode {
-                if task.finished.load(Ordering::SeqCst) {
-                    let found_devices = task.found.lock().map(|l| l.clone()).unwrap_or_default();
+            if let TuiMode::Scanning(ref task) = mode
+                && task.finished.load(Ordering::SeqCst)
+            {
+                let found_devices = task.found.lock().map(|l| l.clone()).unwrap_or_default();
 
-                    for dev in found_devices {
-                        let _ = repository.save_device_config(&dev);
+                for dev in found_devices {
+                    let _ = repository.save_device_config(&dev);
+                }
+
+                // 登録直後にプログレスバー付きで初回ポーリングタスクを開始
+                match start_poll_task(self.runner.config.clone(), self.runner.alert_broadcaster()) {
+                    Ok(poll_task) => {
+                        mode = TuiMode::Polling(poll_task);
                     }
-
-                    // 登録直後にプログレスバー付きで初回ポーリングタスクを開始
-                    match start_poll_task(
-                        self.runner.config.clone(),
-                        self.runner.alert_broadcaster(),
-                    ) {
-                        Ok(poll_task) => {
-                            mode = TuiMode::Polling(poll_task);
+                    Err(_) => {
+                        devices = self.load_device_summaries(&repository)?;
+                        if let Some(dev) = devices.get(selected_device_idx) {
+                            current_interfaces =
+                                self.load_interface_summaries(&dev.device, &repository);
                         }
-                        Err(_) => {
-                            devices = self.load_device_summaries(&repository)?;
-                            if let Some(dev) = devices.get(selected_device_idx) {
-                                current_interfaces =
-                                    self.load_interface_summaries(&dev.device, &repository);
-                            }
-                            interface_idx = 0;
-                            if !current_interfaces.is_empty() {
-                                if_table_state.select(Some(0));
-                            } else {
-                                if_table_state.select(None);
-                            }
-                            mode = TuiMode::Normal;
+                        interface_idx = 0;
+                        if !current_interfaces.is_empty() {
+                            if_table_state.select(Some(0));
+                        } else {
+                            if_table_state.select(None);
                         }
+                        mode = TuiMode::Normal;
                     }
                 }
             }
 
             // ポーリング完了チェック
-            if let TuiMode::Polling(ref task) = mode {
-                if task.finished.load(Ordering::SeqCst) {
-                    devices = self.load_device_summaries(&repository)?;
-                    if let Some(dev) = devices.get(selected_device_idx) {
-                        current_interfaces =
-                            self.load_interface_summaries(&dev.device, &repository);
-                    }
-                    if interface_idx >= current_interfaces.len() {
-                        interface_idx = current_interfaces.len().saturating_sub(1);
-                    }
-                    if !current_interfaces.is_empty() {
-                        if_table_state.select(Some(interface_idx));
-                    } else {
-                        if_table_state.select(None);
-                    }
-                    alerts = repository.get_recent_alerts(50).unwrap_or_default();
-
-                    status_msg = String::from(
-                        "Manual polling completed.\n[↑/↓/j/k] Select | [r] Poll | [d] Discovery | [q] Quit",
-                    );
-                    mode = TuiMode::Normal;
+            if let TuiMode::Polling(ref task) = mode
+                && task.finished.load(Ordering::SeqCst)
+            {
+                devices = self.load_device_summaries(&repository)?;
+                if let Some(dev) = devices.get(selected_device_idx) {
+                    current_interfaces = self.load_interface_summaries(&dev.device, &repository);
                 }
+                if interface_idx >= current_interfaces.len() {
+                    interface_idx = current_interfaces.len().saturating_sub(1);
+                }
+                if !current_interfaces.is_empty() {
+                    if_table_state.select(Some(interface_idx));
+                } else {
+                    if_table_state.select(None);
+                }
+                alerts = repository.get_recent_alerts(50).unwrap_or_default();
+
+                status_msg = String::from(
+                    "Manual polling completed.\n[↑/↓/j/k] Select | [r] Poll | [d] Discovery | [q] Quit",
+                );
+                mode = TuiMode::Normal;
             }
             // テスト通知の完了チェック
             if let TuiMode::Notifications(ref mut state) = mode {
@@ -891,7 +885,7 @@ impl TuiRenderer {
             if !tui_paused {
                 terminal
                 .draw(|f| {
-                    let footer_height = if matches!(mode, TuiMode::FilterInput(_)) { 3 } else { 3 };
+                    let footer_height = 3;
                     let chunks = Layout::default()
                         .direction(Direction::Vertical)
                         .margin(1)
@@ -1016,9 +1010,9 @@ impl TuiRenderer {
                             .and_then(|repo| repo.top_talkers_for_context(protocol_window, 5, exporter_ip, protocol_filter, protocol_sort.query_key()).ok())
                             .unwrap_or_else(|| repository.top_talkers_for_context(protocol_window, 5, exporter_ip, protocol_filter, protocol_sort.query_key()).unwrap_or_default());
                         match protocol_sort {
-                            ProtocolSort::Bps => talkers.sort_by(|a, b| b.bps.cmp(&a.bps)),
-                            ProtocolSort::Pps => talkers.sort_by(|a, b| b.pps.cmp(&a.pps)),
-                            ProtocolSort::Bytes => talkers.sort_by(|a, b| b.bytes.cmp(&a.bytes)),
+                            ProtocolSort::Bps => talkers.sort_by_key(|a| std::cmp::Reverse(a.bps)),
+                            ProtocolSort::Pps => talkers.sort_by_key(|a| std::cmp::Reverse(a.pps)),
+                            ProtocolSort::Bytes => talkers.sort_by_key(|a| std::cmp::Reverse(a.bytes)),
                         }
                         let visible_talkers: Vec<&TopTalker> = talkers.iter().filter(|talker| {
                             tui_filter_matches(&filter_query, &[
@@ -1638,382 +1632,364 @@ impl TuiRenderer {
             }
 
             // キー入力待ち (50ms タイムアウト)
-            if event::poll(Duration::from_millis(50)).map_err(|e| AppError::Io(e.to_string()))? {
-                if let Event::Key(key) = event::read().map_err(|e| AppError::Io(e.to_string()))? {
-                    if key.kind == KeyEventKind::Press {
-                        if status_msg.starts_with("Alert notifications are available") {
-                            status_msg = tui_help_text();
-                        }
-                        if key.code == KeyCode::Char(' ')
-                            && !matches!(mode, TuiMode::FilterInput(_))
-                        {
-                            tui_paused = !tui_paused;
-                            continue;
-                        }
-                        if key.code == KeyCode::Char('/')
-                            && !matches!(mode, TuiMode::FilterInput(_))
-                        {
-                            tui_paused = false;
-                            mode = TuiMode::FilterInput(filter_query.clone());
-                            continue;
-                        }
-                        match mode {
-                            TuiMode::Normal => match key.code {
-                                KeyCode::Char('q') => break,
-                                KeyCode::Tab => {
-                                    pane = match pane {
-                                        Pane::Devices => Pane::Interfaces,
-                                        Pane::Interfaces => Pane::Devices,
-                                        Pane::Protocol => Pane::Devices,
-                                    };
-                                    if pane == Pane::Interfaces {
-                                        if interface_idx >= current_interfaces.len() {
-                                            interface_idx =
-                                                current_interfaces.len().saturating_sub(1);
-                                        }
-                                        if !current_interfaces.is_empty() {
-                                            if_table_state.select(Some(interface_idx));
-                                        }
-                                    }
+            if event::poll(Duration::from_millis(50)).map_err(|e| AppError::Io(e.to_string()))?
+                && let Event::Key(key) = event::read().map_err(|e| AppError::Io(e.to_string()))?
+                && key.kind == KeyEventKind::Press
+            {
+                if status_msg.starts_with("Alert notifications are available") {
+                    status_msg = tui_help_text();
+                }
+                if key.code == KeyCode::Char(' ') && !matches!(mode, TuiMode::FilterInput(_)) {
+                    tui_paused = !tui_paused;
+                    continue;
+                }
+                if key.code == KeyCode::Char('/') && !matches!(mode, TuiMode::FilterInput(_)) {
+                    tui_paused = false;
+                    mode = TuiMode::FilterInput(filter_query.clone());
+                    continue;
+                }
+                match mode {
+                    TuiMode::Normal => match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Tab => {
+                            pane = match pane {
+                                Pane::Devices => Pane::Interfaces,
+                                Pane::Interfaces => Pane::Devices,
+                                Pane::Protocol => Pane::Devices,
+                            };
+                            if pane == Pane::Interfaces {
+                                if interface_idx >= current_interfaces.len() {
+                                    interface_idx = current_interfaces.len().saturating_sub(1);
                                 }
-                                KeyCode::Char('p') => {
-                                    if pane == Pane::Protocol {
-                                        protocol_filter = None;
-                                        pane = Pane::Interfaces;
+                                if !current_interfaces.is_empty() {
+                                    if_table_state.select(Some(interface_idx));
+                                }
+                            }
+                        }
+                        KeyCode::Char('p') => {
+                            if pane == Pane::Protocol {
+                                protocol_filter = None;
+                                pane = Pane::Interfaces;
+                            } else {
+                                protocol_filter = if pane == Pane::Interfaces {
+                                    current_interfaces
+                                        .get(interface_idx)
+                                        .map(|iface| iface.if_index)
+                                } else {
+                                    None
+                                };
+                                pane = Pane::Protocol;
+                            }
+                        }
+                        KeyCode::Char('c') if pane == Pane::Protocol => {
+                            protocol_filter = None;
+                            filter_query.clear();
+                        }
+                        KeyCode::Char('c') => {
+                            filter_query.clear();
+                        }
+                        KeyCode::Char('1') if pane == Pane::Protocol => {
+                            protocol_window = 60;
+                        }
+                        KeyCode::Char('2') if pane == Pane::Protocol => {
+                            protocol_window = 300;
+                        }
+                        KeyCode::Char('3') if pane == Pane::Protocol => {
+                            protocol_window = 3600;
+                        }
+                        KeyCode::Char('s') if pane == Pane::Protocol => {
+                            protocol_sort = protocol_sort.next();
+                        }
+                        KeyCode::Char('d') => {
+                            let default_comm =
+                                if self.runner.config.snmp.default_community.is_empty() {
+                                    "public".to_string()
+                                } else {
+                                    self.runner.config.snmp.default_community.clone()
+                                };
+                            let cidr = guess_local_cidr();
+                            let cursor_pos = cidr.chars().count();
+                            mode = TuiMode::DiscoveryModal(DiscoveryModalState {
+                                active_field: 0,
+                                cidr,
+                                community: default_comm,
+                                version: "v2c".to_string(),
+                                cursor_position: cursor_pos,
+                                error_msg: None,
+                            });
+                        }
+                        KeyCode::Char('n') => match self.runner.notification_provider() {
+                            Some(provider) => {
+                                mode = TuiMode::Notifications(NotificationStatusState {
+                                    status: provider.status(),
+                                    selected: 0,
+                                    test: None,
+                                    message: None,
+                                    message_is_error: false,
+                                });
+                            }
+                            None => {
+                                status_msg = String::from(
+                                    "Alert notifications are available in the Enterprise edition.",
+                                );
+                            }
+                        },
+                        KeyCode::Up | KeyCode::Char('k') => match pane {
+                            Pane::Devices => {
+                                if selected_device_idx > 0 {
+                                    selected_device_idx -= 1;
+                                    table_state.select(Some(selected_device_idx));
+                                    if let Some(dev) = devices.get(selected_device_idx) {
+                                        current_interfaces =
+                                            self.load_interface_summaries(&dev.device, &repository);
+                                    }
+                                    interface_idx = 0;
+                                    if !current_interfaces.is_empty() {
+                                        if_table_state.select(Some(0));
                                     } else {
-                                        protocol_filter = if pane == Pane::Interfaces {
-                                            current_interfaces
-                                                .get(interface_idx)
-                                                .map(|iface| iface.if_index)
-                                        } else {
-                                            None
-                                        };
-                                        pane = Pane::Protocol;
+                                        if_table_state.select(None);
                                     }
                                 }
-                                KeyCode::Char('c') if pane == Pane::Protocol => {
-                                    protocol_filter = None;
-                                    filter_query.clear();
+                            }
+                            Pane::Interfaces => {
+                                if interface_idx > 0 {
+                                    interface_idx -= 1;
+                                    if_table_state.select(Some(interface_idx));
                                 }
-                                KeyCode::Char('c') => {
-                                    filter_query.clear();
-                                }
-                                KeyCode::Char('1') if pane == Pane::Protocol => {
-                                    protocol_window = 60;
-                                }
-                                KeyCode::Char('2') if pane == Pane::Protocol => {
-                                    protocol_window = 300;
-                                }
-                                KeyCode::Char('3') if pane == Pane::Protocol => {
-                                    protocol_window = 3600;
-                                }
-                                KeyCode::Char('s') if pane == Pane::Protocol => {
-                                    protocol_sort = protocol_sort.next();
-                                }
-                                KeyCode::Char('d') => {
-                                    let default_comm =
-                                        if self.runner.config.snmp.default_community.is_empty() {
-                                            "public".to_string()
-                                        } else {
-                                            self.runner.config.snmp.default_community.clone()
-                                        };
-                                    let cidr = guess_local_cidr();
-                                    let cursor_pos = cidr.chars().count();
-                                    mode = TuiMode::DiscoveryModal(DiscoveryModalState {
-                                        active_field: 0,
-                                        cidr,
-                                        community: default_comm,
-                                        version: "v2c".to_string(),
-                                        cursor_position: cursor_pos,
-                                        error_msg: None,
-                                    });
-                                }
-                                KeyCode::Char('n') => match self.runner.notification_provider() {
-                                    Some(provider) => {
-                                        mode = TuiMode::Notifications(NotificationStatusState {
-                                            status: provider.status(),
-                                            selected: 0,
-                                            test: None,
-                                            message: None,
-                                            message_is_error: false,
-                                        });
+                            }
+                            Pane::Protocol => {
+                                protocol_talker_idx = protocol_talker_idx.saturating_sub(1);
+                            }
+                        },
+                        KeyCode::Down | KeyCode::Char('j') => match pane {
+                            Pane::Devices => {
+                                if !devices.is_empty() && selected_device_idx + 1 < devices.len() {
+                                    selected_device_idx += 1;
+                                    table_state.select(Some(selected_device_idx));
+                                    if let Some(dev) = devices.get(selected_device_idx) {
+                                        current_interfaces =
+                                            self.load_interface_summaries(&dev.device, &repository);
                                     }
-                                    None => {
-                                        status_msg = String::from(
-                                            "Alert notifications are available in the Enterprise edition.",
-                                        );
-                                    }
-                                },
-                                KeyCode::Up | KeyCode::Char('k') => match pane {
-                                    Pane::Devices => {
-                                        if selected_device_idx > 0 {
-                                            selected_device_idx -= 1;
-                                            table_state.select(Some(selected_device_idx));
-                                            if let Some(dev) = devices.get(selected_device_idx) {
-                                                current_interfaces = self.load_interface_summaries(
-                                                    &dev.device,
-                                                    &repository,
-                                                );
-                                            }
-                                            interface_idx = 0;
-                                            if !current_interfaces.is_empty() {
-                                                if_table_state.select(Some(0));
-                                            } else {
-                                                if_table_state.select(None);
-                                            }
-                                        }
-                                    }
-                                    Pane::Interfaces => {
-                                        if interface_idx > 0 {
-                                            interface_idx -= 1;
-                                            if_table_state.select(Some(interface_idx));
-                                        }
-                                    }
-                                    Pane::Protocol => {
-                                        if protocol_talker_idx > 0 {
-                                            protocol_talker_idx -= 1;
-                                        }
-                                    }
-                                },
-                                KeyCode::Down | KeyCode::Char('j') => match pane {
-                                    Pane::Devices => {
-                                        if !devices.is_empty()
-                                            && selected_device_idx + 1 < devices.len()
-                                        {
-                                            selected_device_idx += 1;
-                                            table_state.select(Some(selected_device_idx));
-                                            if let Some(dev) = devices.get(selected_device_idx) {
-                                                current_interfaces = self.load_interface_summaries(
-                                                    &dev.device,
-                                                    &repository,
-                                                );
-                                            }
-                                            interface_idx = 0;
-                                            if !current_interfaces.is_empty() {
-                                                if_table_state.select(Some(0));
-                                            } else {
-                                                if_table_state.select(None);
-                                            }
-                                        }
-                                    }
-                                    Pane::Interfaces => {
-                                        if !current_interfaces.is_empty()
-                                            && interface_idx + 1 < current_interfaces.len()
-                                        {
-                                            interface_idx += 1;
-                                            if_table_state.select(Some(interface_idx));
-                                        }
-                                    }
-                                    Pane::Protocol => {
-                                        protocol_talker_idx = protocol_talker_idx.saturating_add(1);
-                                    }
-                                },
-                                KeyCode::Enter if pane == Pane::Protocol => {
-                                    let exporter_ip = devices
-                                        .get(selected_device_idx)
-                                        .map(|item| item.device.ip.as_str());
-                                    let mut talkers = flow_repository
-                                        .as_ref()
-                                        .and_then(|repo| {
-                                            repo.top_talkers_for_context(
-                                                protocol_window,
-                                                5,
-                                                exporter_ip,
-                                                protocol_filter,
-                                                protocol_sort.query_key(),
-                                            )
-                                            .ok()
-                                        })
-                                        .unwrap_or_else(|| {
-                                            repository
-                                                .top_talkers_for_context(
-                                                    protocol_window,
-                                                    5,
-                                                    exporter_ip,
-                                                    protocol_filter,
-                                                    protocol_sort.query_key(),
-                                                )
-                                                .unwrap_or_default()
-                                        });
-                                    match protocol_sort {
-                                        ProtocolSort::Bps => {
-                                            talkers.sort_by(|a, b| b.bps.cmp(&a.bps))
-                                        }
-                                        ProtocolSort::Pps => {
-                                            talkers.sort_by(|a, b| b.pps.cmp(&a.pps))
-                                        }
-                                        ProtocolSort::Bytes => {
-                                            talkers.sort_by(|a, b| b.bytes.cmp(&a.bytes))
-                                        }
-                                    }
-                                    let visible = talkers
-                                        .into_iter()
-                                        .filter(|talker| {
-                                            tui_filter_matches(
-                                                &filter_query,
-                                                &[
-                                                    &talker.source_ip,
-                                                    &talker.destination_ip,
-                                                    &talker.protocol,
-                                                    &talker.app_name,
-                                                ],
-                                            )
-                                        })
-                                        .collect::<Vec<_>>();
-                                    if let Some(talker) =
-                                        visible.into_iter().nth(protocol_talker_idx)
-                                    {
-                                        mode = TuiMode::FlowInspector(talker);
+                                    interface_idx = 0;
+                                    if !current_interfaces.is_empty() {
+                                        if_table_state.select(Some(0));
+                                    } else {
+                                        if_table_state.select(None);
                                     }
                                 }
-                                KeyCode::Enter if pane == Pane::Interfaces => {
-                                    if let Some(iface) = current_interfaces.get(interface_idx) {
-                                        let device_id = devices
-                                            .get(selected_device_idx)
-                                            .and_then(|d| d.device.id)
-                                            .unwrap_or(0);
-                                        let delta = repository
-                                            .get_interface_port_deltas(device_id)
-                                            .ok()
-                                            .and_then(|m| m.get(&iface.if_index).copied())
-                                            .unwrap_or_default();
-                                        mode = TuiMode::PortErrorBreakdown(
-                                            PortErrorBreakdownState::from_delta(
-                                                iface.if_name.clone(),
-                                                iface.if_index,
-                                                delta,
-                                            ),
-                                        );
-                                    }
-                                }
-                                KeyCode::Char('r') => {
-                                    match start_poll_task(
-                                        self.runner.config.clone(),
-                                        self.runner.alert_broadcaster(),
-                                    ) {
-                                        Ok(poll_task) => {
-                                            mode = TuiMode::Polling(poll_task);
-                                        }
-                                        Err(err) => {
-                                            status_msg = format!("Poll failed: {}", err);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            },
-                            TuiMode::FilterInput(ref mut query) => match key.code {
-                                KeyCode::Esc | KeyCode::Enter => {
-                                    mode = TuiMode::Normal;
-                                }
-                                KeyCode::Char('c') => {
-                                    query.clear();
-                                    filter_query.clear();
-                                    mode = TuiMode::Normal;
-                                }
-                                KeyCode::Backspace => {
-                                    query.pop();
-                                    filter_query.clone_from(query);
-                                }
-                                KeyCode::Char(character) => {
-                                    query.push(character);
-                                    filter_query.clone_from(query);
-                                }
-                                _ => {}
-                            },
-                            TuiMode::FlowInspector(_) => match key.code {
-                                KeyCode::Esc | KeyCode::Enter => {
-                                    mode = TuiMode::Normal;
-                                }
-                                _ => {}
-                            },
-                            TuiMode::PortErrorBreakdown(_) => match key.code {
-                                KeyCode::Esc | KeyCode::Enter => {
-                                    mode = TuiMode::Normal;
-                                }
-                                _ => {}
-                            },
-                            TuiMode::Notifications(ref mut state) => match key.code {
-                                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
-                                    mode = TuiMode::Normal;
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    if state.selected > 0 {
-                                        state.selected -= 1;
-                                    }
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    if state.selected + 1 < state.status.channels.len() {
-                                        state.selected += 1;
-                                    }
-                                }
-                                KeyCode::Char('t') | KeyCode::Enter | KeyCode::Char('a')
-                                    if state.test.is_none() =>
+                            }
+                            Pane::Interfaces => {
+                                if !current_interfaces.is_empty()
+                                    && interface_idx + 1 < current_interfaces.len()
                                 {
-                                    let target = if key.code == KeyCode::Char('a') {
-                                        Some("all".to_string())
-                                    } else {
-                                        state
-                                            .status
-                                            .channels
-                                            .get(state.selected)
-                                            .map(|channel| channel.key.clone())
-                                    };
-
-                                    if let (Some(target), Some(provider)) =
-                                        (target, self.runner.notification_provider())
-                                    {
-                                        state.message = None;
-                                        state.test =
-                                            Some(start_notification_test(provider, target));
-                                    }
+                                    interface_idx += 1;
+                                    if_table_state.select(Some(interface_idx));
                                 }
-                                _ => {}
-                            },
-                            TuiMode::DiscoveryModal(ref mut modal) => match key.code {
-                                KeyCode::Esc => {
-                                    mode = TuiMode::Normal;
+                            }
+                            Pane::Protocol => {
+                                protocol_talker_idx = protocol_talker_idx.saturating_add(1);
+                            }
+                        },
+                        KeyCode::Enter if pane == Pane::Protocol => {
+                            let exporter_ip = devices
+                                .get(selected_device_idx)
+                                .map(|item| item.device.ip.as_str());
+                            let mut talkers = flow_repository
+                                .as_ref()
+                                .and_then(|repo| {
+                                    repo.top_talkers_for_context(
+                                        protocol_window,
+                                        5,
+                                        exporter_ip,
+                                        protocol_filter,
+                                        protocol_sort.query_key(),
+                                    )
+                                    .ok()
+                                })
+                                .unwrap_or_else(|| {
+                                    repository
+                                        .top_talkers_for_context(
+                                            protocol_window,
+                                            5,
+                                            exporter_ip,
+                                            protocol_filter,
+                                            protocol_sort.query_key(),
+                                        )
+                                        .unwrap_or_default()
+                                });
+                            match protocol_sort {
+                                ProtocolSort::Bps => {
+                                    talkers.sort_by_key(|a| std::cmp::Reverse(a.bps))
                                 }
-                                KeyCode::Tab | KeyCode::Down => {
-                                    modal.set_field(modal.active_field + 1);
+                                ProtocolSort::Pps => {
+                                    talkers.sort_by_key(|a| std::cmp::Reverse(a.pps))
                                 }
-                                KeyCode::BackTab | KeyCode::Up => {
-                                    modal.set_field(modal.active_field + 2);
+                                ProtocolSort::Bytes => {
+                                    talkers.sort_by_key(|a| std::cmp::Reverse(a.bytes))
                                 }
-                                KeyCode::Left => {
-                                    modal.move_cursor_left();
-                                }
-                                KeyCode::Right => {
-                                    modal.move_cursor_right();
-                                }
-                                KeyCode::Home => {
-                                    modal.cursor_position = 0;
-                                }
-                                KeyCode::End => {
-                                    modal.cursor_position =
-                                        modal.current_field_ref().chars().count();
-                                }
-                                KeyCode::Char(c) => {
-                                    modal.insert_char(c);
-                                }
-                                KeyCode::Backspace => {
-                                    modal.delete_backspace();
-                                }
-                                KeyCode::Delete => {
-                                    modal.delete_char();
-                                }
-                                KeyCode::Enter => match start_scan(&modal.cidr, &modal.community) {
-                                    Ok(task) => {
-                                        mode = TuiMode::Scanning(task);
-                                    }
-                                    Err(err) => {
-                                        modal.error_msg = Some(err.to_string());
-                                    }
-                                },
-                                _ => {}
-                            },
-                            TuiMode::Scanning(_) | TuiMode::Polling(_) => {}
+                            }
+                            let visible = talkers
+                                .into_iter()
+                                .filter(|talker| {
+                                    tui_filter_matches(
+                                        &filter_query,
+                                        &[
+                                            &talker.source_ip,
+                                            &talker.destination_ip,
+                                            &talker.protocol,
+                                            &talker.app_name,
+                                        ],
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            if let Some(talker) = visible.into_iter().nth(protocol_talker_idx) {
+                                mode = TuiMode::FlowInspector(talker);
+                            }
                         }
-                    }
+                        KeyCode::Enter if pane == Pane::Interfaces => {
+                            if let Some(iface) = current_interfaces.get(interface_idx) {
+                                let device_id = devices
+                                    .get(selected_device_idx)
+                                    .and_then(|d| d.device.id)
+                                    .unwrap_or(0);
+                                let delta = repository
+                                    .get_interface_port_deltas(device_id)
+                                    .ok()
+                                    .and_then(|m| m.get(&iface.if_index).copied())
+                                    .unwrap_or_default();
+                                mode = TuiMode::PortErrorBreakdown(
+                                    PortErrorBreakdownState::from_delta(
+                                        iface.if_name.clone(),
+                                        iface.if_index,
+                                        delta,
+                                    ),
+                                );
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            match start_poll_task(
+                                self.runner.config.clone(),
+                                self.runner.alert_broadcaster(),
+                            ) {
+                                Ok(poll_task) => {
+                                    mode = TuiMode::Polling(poll_task);
+                                }
+                                Err(err) => {
+                                    status_msg = format!("Poll failed: {}", err);
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    TuiMode::FilterInput(ref mut query) => match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            mode = TuiMode::Normal;
+                        }
+                        KeyCode::Char('c') => {
+                            query.clear();
+                            filter_query.clear();
+                            mode = TuiMode::Normal;
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            filter_query.clone_from(query);
+                        }
+                        KeyCode::Char(character) => {
+                            query.push(character);
+                            filter_query.clone_from(query);
+                        }
+                        _ => {}
+                    },
+                    TuiMode::FlowInspector(_) => match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            mode = TuiMode::Normal;
+                        }
+                        _ => {}
+                    },
+                    TuiMode::PortErrorBreakdown(_) => match key.code {
+                        KeyCode::Esc | KeyCode::Enter => {
+                            mode = TuiMode::Normal;
+                        }
+                        _ => {}
+                    },
+                    TuiMode::Notifications(ref mut state) => match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                            mode = TuiMode::Normal;
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if state.selected > 0 {
+                                state.selected -= 1;
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if state.selected + 1 < state.status.channels.len() {
+                                state.selected += 1;
+                            }
+                        }
+                        KeyCode::Char('t') | KeyCode::Enter | KeyCode::Char('a')
+                            if state.test.is_none() =>
+                        {
+                            let target = if key.code == KeyCode::Char('a') {
+                                Some("all".to_string())
+                            } else {
+                                state
+                                    .status
+                                    .channels
+                                    .get(state.selected)
+                                    .map(|channel| channel.key.clone())
+                            };
+
+                            if let (Some(target), Some(provider)) =
+                                (target, self.runner.notification_provider())
+                            {
+                                state.message = None;
+                                state.test = Some(start_notification_test(provider, target));
+                            }
+                        }
+                        _ => {}
+                    },
+                    TuiMode::DiscoveryModal(ref mut modal) => match key.code {
+                        KeyCode::Esc => {
+                            mode = TuiMode::Normal;
+                        }
+                        KeyCode::Tab | KeyCode::Down => {
+                            modal.set_field(modal.active_field + 1);
+                        }
+                        KeyCode::BackTab | KeyCode::Up => {
+                            modal.set_field(modal.active_field + 2);
+                        }
+                        KeyCode::Left => {
+                            modal.move_cursor_left();
+                        }
+                        KeyCode::Right => {
+                            modal.move_cursor_right();
+                        }
+                        KeyCode::Home => {
+                            modal.cursor_position = 0;
+                        }
+                        KeyCode::End => {
+                            modal.cursor_position = modal.current_field_ref().chars().count();
+                        }
+                        KeyCode::Char(c) => {
+                            modal.insert_char(c);
+                        }
+                        KeyCode::Backspace => {
+                            modal.delete_backspace();
+                        }
+                        KeyCode::Delete => {
+                            modal.delete_char();
+                        }
+                        KeyCode::Enter => match start_scan(&modal.cidr, &modal.community) {
+                            Ok(task) => {
+                                mode = TuiMode::Scanning(task);
+                            }
+                            Err(err) => {
+                                modal.error_msg = Some(err.to_string());
+                            }
+                        },
+                        _ => {}
+                    },
+                    TuiMode::Scanning(_) | TuiMode::Polling(_) => {}
                 }
             }
         }

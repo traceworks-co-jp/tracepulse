@@ -1,2 +1,9 @@
 /target
 /node_modules
+
+# Local runtime data and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
