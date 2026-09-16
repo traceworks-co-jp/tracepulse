@@ -204,6 +204,28 @@ This project is licensed under either of
 
 at your option.
 
+### Third-Party Licenses
+
+TracePulse depends on and distributes software under additional open-source
+licenses. The following runtime dependencies are especially relevant to
+redistribution:
+
+- Rust dependencies such as `chrono`, `serde`, `socket2`, `thiserror`, and
+  `toml` are available under MIT and/or Apache-2.0 terms. Other Rust
+  dependencies use MIT-compatible terms; see `Cargo.toml` and `Cargo.lock` for
+  the complete dependency set and versions.
+- The embedded Web UI includes Apache ECharts under the Apache License 2.0,
+  with its attribution in the ECharts `NOTICE` file.
+- The ECharts distribution also includes `zrender` under BSD-3-Clause and
+  `tslib` under 0BSD terms.
+
+When redistributing a TracePulse binary, retain the applicable third-party
+license and attribution notices. The development-only packages used for
+frontend builds and browser tests, including TypeScript, esbuild, and
+Playwright, are not embedded in the release binary. See
+[`THIRD_PARTY_LICENSES.html`](THIRD_PARTY_LICENSES.html) for the repository's
+third-party license notice page.
+
 ---
 
 <a id="日本語"></a>

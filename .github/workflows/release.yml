@@ -63,6 +63,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path release-package | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" release-package/
           Copy-Item -Recurse templates release-package/templates
+          Copy-Item LICENSE,LICENSE-MIT,LICENSE-APACHE,SECURITY.md,THIRD_PARTY_LICENSES.html release-package/
           Compress-Archive -Path release-package/* -DestinationPath "${{ matrix.archive }}"
 
       - name: Package Unix binary
@@ -72,6 +73,7 @@ jobs:
           mkdir -p release-package
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" release-package/
           cp -R templates release-package/templates
+          cp LICENSE LICENSE-MIT LICENSE-APACHE SECURITY.md THIRD_PARTY_LICENSES.html release-package/
           tar -czf "${{ matrix.archive }}" -C release-package .
 
       - name: Upload build artifact
