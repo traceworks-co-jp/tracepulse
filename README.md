@@ -87,7 +87,7 @@ Devices outside this list are expected to work as long as they expose the releva
 
 ### 1. First launch
 
-1. Extract the release archive and keep the executable, `config.toml`, and the `templates/` directory in the same folder.
+1. Download the archive for your platform from the [latest release](https://github.com/traceworks-co-jp/trace-pulse/releases/latest), then extract it. Keep the executable, `config.toml`, and the `templates/` directory in the same folder.
 2. Edit `config.toml`, at minimum `[snmp] default_community` and `[polling] interval_seconds`.
 3. Start the application in TUI or Web UI mode:
 
@@ -349,7 +349,7 @@ TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検�
 
 ### 1. 初回起動
 
-1. アーカイブを展開し、実行ファイル・`config.toml`・`templates/` ディレクトリを同じフォルダーに配置します。
+1. [GitHub Releases の最新版](https://github.com/traceworks-co-jp/trace-pulse/releases/latest) から利用環境向けのアーカイブをダウンロードして展開します。実行ファイル・`config.toml`・`templates/` ディレクトリは同じフォルダーに配置してください。
 2. `config.toml` を編集します。最低限 `[snmp] default_community` と `[polling] interval_seconds` を設定してください。
 3. TUI または WebGUI モードで起動します。
 
