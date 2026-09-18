@@ -105,6 +105,18 @@ export async function startScan(): Promise<void> {
     } catch (error: unknown) { finishScanError(`Failed to start scan: ${String(error)}`); }
 }
 
+export async function runTopologyOnly(): Promise<void> {
+    const seedIp = el<HTMLInputElement>("seed-ip").value.trim();
+    const community = el<HTMLInputElement>("community").value.trim() || "public";
+    if (!seedIp) { showScanError(t("topology_seed_required")); return; }
+    if (typeof window.startTopologyDiscovery !== "function") {
+        showScanError("Topology discovery is unavailable.");
+        return;
+    }
+    el<HTMLElement>("scan-error").style.display = "none";
+    await window.startTopologyDiscovery(seedIp, community);
+}
+
 function startPolling(total: number): void {
     elapsedTimer = window.setInterval(() => {
         if (!scanStartedAt) return;
@@ -203,5 +215,5 @@ export async function addManual(): Promise<void> {
     } catch (error: unknown) { result.textContent = String(error); }
 }
 
-window.addManual = addManual; window.cancelScan = cancelScan; window.hideManual = hideManual; window.registerSelected = registerSelected; window.showManual = showManual; window.startScan = startScan; window.toggleAll = toggleAll; window.updateHint = updateHint; window.updateRegisterBtn = updateRegisterBtn;
+window.addManual = addManual; window.cancelScan = cancelScan; window.hideManual = hideManual; window.registerSelected = registerSelected; window.runTopologyOnly = runTopologyOnly; window.showManual = showManual; window.startScan = startScan; window.toggleAll = toggleAll; window.updateHint = updateHint; window.updateRegisterBtn = updateRegisterBtn;
 window.applyPageLanguage = applyPageLanguage;

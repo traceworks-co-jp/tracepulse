@@ -60,6 +60,7 @@ declare global {
         cancelScan?: () => void;
         hideManual?: () => void;
         registerSelected?: () => Promise<void>;
+        runTopologyOnly?: () => Promise<void>;
         showManual?: () => void;
         startScan?: () => Promise<void>;
         toggleAll?: (master: HTMLInputElement) => void;

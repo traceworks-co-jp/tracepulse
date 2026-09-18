@@ -25,6 +25,7 @@ var TracePulseDiscovery = (() => {
     cancelScan: () => cancelScan,
     hideManual: () => hideManual,
     registerSelected: () => registerSelected,
+    runTopologyOnly: () => runTopologyOnly,
     showManual: () => showManual,
     startScan: () => startScan,
     toggleAll: () => toggleAll,
@@ -131,6 +132,20 @@ var TracePulseDiscovery = (() => {
     } catch (error) {
       finishScanError(`Failed to start scan: ${String(error)}`);
     }
+  }
+  async function runTopologyOnly() {
+    const seedIp = el("seed-ip").value.trim();
+    const community = el("community").value.trim() || "public";
+    if (!seedIp) {
+      showScanError(t("topology_seed_required"));
+      return;
+    }
+    if (typeof window.startTopologyDiscovery !== "function") {
+      showScanError("Topology discovery is unavailable.");
+      return;
+    }
+    el("scan-error").style.display = "none";
+    await window.startTopologyDiscovery(seedIp, community);
   }
   function startPolling(total) {
     elapsedTimer = window.setInterval(() => {
@@ -286,6 +301,7 @@ var TracePulseDiscovery = (() => {
   window.cancelScan = cancelScan;
   window.hideManual = hideManual;
   window.registerSelected = registerSelected;
+  window.runTopologyOnly = runTopologyOnly;
   window.showManual = showManual;
   window.startScan = startScan;
   window.toggleAll = toggleAll;

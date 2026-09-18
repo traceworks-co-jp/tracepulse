@@ -2867,7 +2867,9 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html.push_str("<div id='error-breakdown' class='error-breakdown'></div>");
     html.push_str("</section>");
 
-    html.push_str("<section class='detail-section'>");
+    html.push_str(
+        "<section class='detail-section' id='traffic-protocols-section' style='display:none'>",
+    );
     html.push_str("<h2 data-i18n='traffic_protocols_title'>Traffic &amp; Protocols</h2>");
     html.push_str("<p class='traffic-note' data-i18n='traffic_protocols_note'>Values are estimates based on received flows; device-side sampling is not corrected.</p>");
     html.push_str("<div id='traffic-protocols' class='traffic-protocols'></div>");
@@ -3921,13 +3923,22 @@ const FLOW_EXPLORER_CSS: &str = "<style>
 </style>";
 
 const DISCOVERY_CSS: &str = "<style>
-  .scan-form { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-start; margin-bottom:1.5rem; }
+    .scan-form { margin-bottom:1.5rem; }
+    .discovery-community { max-width:260px; margin-bottom:1rem; }
+    .discovery-workflows { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+    .discovery-workflow { display:flex; align-items:flex-end; gap:.75rem; padding:.9rem 1rem; border:1px solid #334155; border-radius:.5rem; background:#0f172a; }
+    .discovery-workflow .form-group { flex:1; min-width:0; }
+    .discovery-workflow .btn { flex:none; }
   .form-group { display:flex; flex-direction:column; gap:.25rem; }
   .form-group label { font-size:.85rem; color:#94a3b8; }
   .form-group input { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.5rem .75rem; border-radius:.375rem; font-size:.95rem; width:100%; box-sizing:border-box; }
   .form-group input:focus { outline:none; border-color:#3b82f6; }
-  .scan-form .btn, .scan-form .manual-link { margin-top:1.45rem; }
-  .manual-link { margin-left:auto; font-size:.85rem; }
+    .discovery-actions { display:flex; justify-content:flex-end; align-items:center; gap:.75rem; margin-top:.75rem; }
+    .manual-link { font-size:.85rem; }
+    .manual-box .scan-form { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-start; }
+    .manual-box .scan-form .btn { margin-top:1.45rem; }
+    @media (max-width:760px) { .discovery-workflows { grid-template-columns:1fr; } }
+    @media (max-width:480px) { .discovery-workflow { flex-direction:column; align-items:stretch; } .discovery-workflow .btn { width:100%; } }
   #scan-progress { display:none; background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1rem 1.25rem; margin-bottom:1.25rem; }
   .progress-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:.6rem; font-size:.9rem; }
   .progress-label { color:#94a3b8; }
@@ -3946,6 +3957,7 @@ const DISCOVERY_CSS: &str = "<style>
   .badge-registered { font-size:.75rem; background:#1e3a5f; color:#93c5fd; padding:.15rem .5rem; border-radius:9999px; }
   .manual-box { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1rem; margin-bottom:1.5rem; }
   .host-hint { font-size:.78rem; color:#64748b; margin-top:.25rem; line-height:1.5; }
+    .host-hint:empty { display:none; }
   .host-hint.warn { color:#fbbf24; }
   #topology-section { display:none; margin-top:1.25rem; }
   .topology-header { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-bottom:.6rem; }
@@ -4003,23 +4015,31 @@ const DISCOVERY_HTML: &str = "<main>
   <h1 data-i18n='discovery_title'>Device Discovery</h1>
 
   <div class='scan-form' id='scan-form'>
-    <div class='form-group' style='flex:2;min-width:180px'>
-      <label for='cidr' data-i18n='cidr_range'>CIDR Range</label>
-      <input id='cidr' type='text' placeholder='192.168.1.0/24' data-i18n-placeholder='cidr_range_placeholder' required oninput='updateHint()'>
-      <span id='host-hint' class='host-hint'></span>
-    </div>
-    <div class='form-group' style='flex:1;min-width:130px'>
+        <div class='form-group discovery-community'>
       <label for='community' data-i18n='community'>Community</label>
       <input id='community' type='text' value='public' data-i18n-placeholder='public_placeholder'>
     </div>
-    <div class='form-group' style='flex:1;min-width:160px'>
-      <label for='seed-ip' data-i18n='seed_device_ip'>Seed Device IP (LLDP/CDP)</label>
-      <input id='seed-ip' type='text' placeholder='192.168.11.23'>
+        <div class='discovery-workflows'>
+            <div class='discovery-workflow'>
+                <div class='form-group'>
+                    <label for='cidr' data-i18n='cidr_range'>CIDR Range</label>
+                    <input id='cidr' type='text' placeholder='192.168.1.0/24' data-i18n-placeholder='cidr_range_placeholder' required oninput='updateHint()'>
+                    <span id='host-hint' class='host-hint'></span>
+                </div>
+                <button class='btn' id='scan-btn' onclick='startScan()' data-i18n='scan'>Scan</button>
+            </div>
+            <div class='discovery-workflow'>
+                <div class='form-group'>
+                    <label for='seed-ip' data-i18n='seed_device_ip'>Seed Device IP (LLDP/CDP)</label>
+                    <input id='seed-ip' type='text' placeholder='192.168.11.23'>
+                </div>
+                <button class='btn btn-secondary' id='topology-btn' onclick='runTopologyOnly()' data-i18n='draw_topology'>Draw Topology</button>
+            </div>
     </div>
-    <button class='btn' id='scan-btn' onclick='startScan()' data-i18n='scan'>Scan</button>
-    <button class='btn btn-secondary' id='topology-btn' onclick='runTopologyOnly()' data-i18n='draw_topology'>Draw Topology</button>
-    <button class='btn btn-secondary' id='cancel-btn' style='display:none' onclick='cancelScan()' data-i18n='cancel'>Cancel</button>
-    <span class='manual-link'><a href='#' onclick='showManual();return false;' data-i18n='add_manually'>+ Add manually</a></span>
+        <div class='discovery-actions'>
+            <button class='btn btn-secondary' id='cancel-btn' style='display:none' onclick='cancelScan()' data-i18n='cancel'>Cancel</button>
+            <span class='manual-link'><a href='#' onclick='showManual();return false;' data-i18n='add_manually'>+ Add manually</a></span>
+        </div>
   </div>
 
   <div id='scan-progress'>
@@ -4582,8 +4602,8 @@ mod tests {
         CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebEdition, WebTopologyEdge,
         WebTopologyInterface, WebTopologyReport, annotate_edge_health, api_flow_analytics,
         api_live_flow_analytics, classify_interface_diagnostic, effective_interface_link_status,
-        evaluate_port_health, merge_duplicate_edges, page_dashboard, page_discovery,
-        parse_cdp_edges, persist_config,
+        evaluate_port_health, merge_duplicate_edges, page_dashboard, page_device_detail,
+        page_discovery, parse_cdp_edges, persist_config,
     };
     use crate::config::AppConfig;
     use crate::db::models::{Device, FlowRecord, InterfacePortDelta, InterfaceSample};
@@ -4655,6 +4675,33 @@ mod tests {
         assert!(enterprise.contains("Threat Badges"));
         assert!(enterprise.contains("enterprise-analytics.js"));
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn device_detail_hides_traffic_section_until_flow_data_arrives() {
+        let path = std::env::temp_dir().join(format!(
+            "tracepulse-device-traffic-section-{}.db",
+            std::process::id()
+        ));
+        let repository =
+            Repository::new(initialize_database(&path).expect("database should initialize"));
+        repository
+            .save_device(&Device {
+                id: None,
+                name: "router".to_string(),
+                ip: "192.0.2.1".to_string(),
+                community: "public".to_string(),
+                device_type: "router".to_string(),
+                status: "online".to_string(),
+                last_seen_at: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .expect("device should save");
+        let html = page_device_detail("192.0.2.1", &Arc::new(Mutex::new(repository)));
+
+        assert!(html.contains("id='traffic-protocols-section' style='display:none'"));
         let _ = std::fs::remove_file(path);
     }
 

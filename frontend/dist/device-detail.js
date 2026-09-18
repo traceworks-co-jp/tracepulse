@@ -221,9 +221,14 @@ var TracePulseDeviceDetail = (() => {
   }
   function renderTrafficProtocols(data) {
     const box = document.getElementById("traffic-protocols");
-    if (!box) return;
-    const protocols = (Array.isArray(data?.protocols) ? data.protocols : []).filter(includeTrafficItem);
-    const talkers = (Array.isArray(data?.top_talkers) ? data.top_talkers : []).filter(includeTrafficItem);
+    const section = document.getElementById("traffic-protocols-section");
+    if (!box || !section) return;
+    const allProtocols = Array.isArray(data?.protocols) ? data.protocols : [];
+    const allTalkers = Array.isArray(data?.top_talkers) ? data.top_talkers : [];
+    section.style.display = allProtocols.length || allTalkers.length ? "block" : "none";
+    if (section.style.display === "none") return;
+    const protocols = allProtocols.filter(includeTrafficItem);
+    const talkers = allTalkers.filter(includeTrafficItem);
     if (protocols.length === 0 && talkers.length === 0) {
       box.innerHTML = trafficProtocolsEmptyHtml();
       return;

@@ -180,6 +180,7 @@ The Protocol View is a compact, terminal-width-friendly view containing:
 ### Flow Analytics Scope
 
 - The protocol-share and Top Talkers views use decoded NetFlow v5/v9, IPFIX, and sFlow v5 records. Default ports are UDP 2055, 4739, and 6343; they can be overridden under `[flow]` in `config.toml`.
+- The WebGUI Device Detail page shows Traffic & Protocols only after at least one flow record has been received, so installations that do not export flow data do not show an empty analytics panel.
 - NetFlow v9 and IPFIX require a Template FlowSet before data records can be analyzed. Templates are scoped to the exporter and Observation Domain/Source ID, expire after 30 minutes, and are capped at 256 entries per scope.
 - sFlow v5 Flow Samples and Expanded Flow Samples decode Ethernet/VLAN, IPv4/IPv6, and TCP/UDP/ICMP headers. Sampling-rate correction is applied before persistence.
 - Flow data is retained as raw records for five minutes and as one-minute protocol rollups for 24 hours. Values remain estimates when the exporter does not provide sampling metadata.
@@ -200,7 +201,8 @@ The Protocol View is a compact, terminal-width-friendly view containing:
 
 
 3. **Device Discovery & Topology Map**
-   - CIDR scanner and auto-generated network topology map based on LLDP/CDP neighbors.
+  - Use the CIDR Range and Scan controls to find SNMP-responsive devices for registration.
+  - Enter a Seed Device IP and select Draw Topology to generate an LLDP/CDP topology map independently of a CIDR scan.
 4. **Settings & Diagnostics**
    - Configure polling intervals, alert thresholds, and retention periods.
    - Real-time probe tool for sysObjectID, vendor OIDs, and candidates.
@@ -440,6 +442,7 @@ TUI モードでは、キーボードのみで直感的に全操作を行えま�
 ### フロー分析の対象範囲
 
 - プロトコル別通信シェアと Top Talkers は、NetFlow v5/v9、IPFIX、sFlow v5 のデコード結果を対象とします。既定ポートは UDP 2055/4739/6343 で、`config.toml` の `[flow]` で変更できます。
+- WebGUI のデバイス詳細では、少なくとも1件のフローレコードを受信するまで「トラフィックとプロトコル」を表示しません。フローデータを送信しない環境では空の分析パネルは表示されません。
 - NetFlow v9/IPFIX は Template FlowSet 受信後に解析します。テンプレートは送信元・Observation Domain/Source ID ごとに管理し、30分で期限切れ、スコープごとに最大256件です。
 - sFlow v5はFlow Sample/Expanded Flow SampleのEthernet/VLAN、IPv4/IPv6、TCP/UDP/ICMPヘッダーを解析し、サンプリング率を補正して保存します。
 - フローデータはrawを5分、1分rollupを24時間保持します。サンプリング情報がない場合は補正なしの概算値です。
@@ -460,7 +463,8 @@ TUI モードでは、キーボードのみで直感的に全操作を行えま�
 
 
 3. **Device Discovery (デバイス探索)**
-   - CIDR スキャンおよび LLDP / CDP 隣接関係に基づくトポロジーマップ自動生成
+  - 「CIDR 範囲」と「スキャン」で SNMP 応答のある機器を検出して登録
+  - 「シード機器 IP」を入力し「トポロジー描画」を選択すると、CIDR スキャンを実行せずに LLDP / CDP 隣接関係のトポロジーマップを生成
 4. **Settings & Diagnostics (設定・診断)**
    - ポーリング間隔、アラート閾値の設定
    - ベンダー OID プリセット・候補のリアルタイム試行プローブ
