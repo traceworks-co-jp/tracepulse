@@ -3,7 +3,7 @@
 > Portable, single-binary network monitoring with an interactive TUI and an embedded Web UI.
 
 [![CI](https://github.com/traceworks-co-jp/trace-pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/traceworks-co-jp/trace-pulse/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 
 TracePulse is a Rust-powered network device monitoring tool for SNMP health
 monitoring, anomaly detection, flow analytics, discovery, and topology
