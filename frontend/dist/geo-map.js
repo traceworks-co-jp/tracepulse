@@ -276,8 +276,8 @@
                 <h3 style="font-size:13px;color:#94a3b8;margin:0 0 8px;text-transform:uppercase;letter-spacing:0.5px;">Grouped Hosts (${hostCount})</h3>
                 <div style="display:flex;flex-direction:column;gap:8px;max-height:260px;overflow-y:auto;">
                   ${hosts.map((h) => {
-                    const pct = meta.total_bytes > 0 ? ((h.traffic_bytes / meta.total_bytes) * 100).toFixed(1) : '0.0';
-                    return `
+              const pct = meta.total_bytes > 0 ? ((h.traffic_bytes / meta.total_bytes) * 100).toFixed(1) : '0.0';
+              return `
                       <div style="background:#0f172a;border:1px solid #1e293b;border-radius:4px;padding:8px 10px;">
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
                           <span style="font-family:monospace;color:#38bdf8;font-weight:600;font-size:12px;">${h.ip}</span>
@@ -288,7 +288,7 @@
                         </div>
                       </div>
                     `;
-                  }).join('')}
+            }).join('')}
                 </div>
               </div>
             `;

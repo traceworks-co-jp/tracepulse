@@ -76,6 +76,19 @@ pub trait EnterpriseAnalyticsProvider: Send + Sync {
     fn scope_json(&self) -> String;
     fn set_scope_json(&self, body: &str) -> String;
     fn bgp_qos_json(&self) -> String;
+    /// Multi-dimensional flow drill-down used by the Flow Explorer WebGUI.
+    /// `query_string` is the raw (percent-encoded) suffix of `/api/v1/flows?...`.
+    fn flows_json(&self, query_string: &str) -> String;
+    /// Bucketed current-vs-`compare_with` (1d/7d) timeseries for the Compare View overlay.
+    /// `query_string` is the raw suffix of `/api/v1/flows/timeseries?...`.
+    fn flows_timeseries_json(&self, query_string: &str) -> String;
+    /// Top-10 Top Talkers grouped by `axis=ip|app|country|dscp`.
+    /// `query_string` is the raw suffix of `/api/v1/top-talkers?...`.
+    fn top_talkers_axis_json(&self, query_string: &str) -> String;
+    /// Multi-stage `[Ingress IF] -> [Source Group] -> [Destination Group] -> [Egress IF]`
+    /// Sankey graph plus the four-zone traffic matrix. `query_string` is the raw suffix of
+    /// `/api/v1/sankey?...`.
+    fn sankey_v1_json(&self, query_string: &str) -> String;
 }
 
 type NotificationProvider = Option<Arc<dyn NotificationSettingsProvider>>;
@@ -382,6 +395,9 @@ fn handle_connection(
     if req.method == "GET" && clean_path == "/static/js/geo-map.js" {
         return respond_js(stream, GEO_MAP_BUNDLE_JS);
     }
+    if req.method == "GET" && clean_path == "/static/js/flow-explorer.js" {
+        return respond_js(stream, FLOW_EXPLORER_BUNDLE_JS);
+    }
     if req.method == "GET" && clean_path == "/static/js/echarts.min.js" {
         return respond_static(
             stream,
@@ -492,6 +508,58 @@ fn handle_connection(
             ),
         };
     }
+    if req.method == "GET" && req.path.starts_with("/api/v1/flows/timeseries") {
+        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(
+                stream,
+                "200 OK",
+                provider.flows_timeseries_json(query_string),
+            ),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path.starts_with("/api/v1/flows") {
+        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.flows_json(query_string)),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path.starts_with("/api/v1/top-talkers") {
+        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(
+                stream,
+                "200 OK",
+                provider.top_talkers_axis_json(query_string),
+            ),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
+    if req.method == "GET" && req.path.starts_with("/api/v1/sankey") {
+        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
+        return match enterprise_analytics.as_deref() {
+            Some(provider) => respond_json(stream, "200 OK", provider.sankey_v1_json(query_string)),
+            None => respond_json(
+                stream,
+                "404 Not Found",
+                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
+            ),
+        };
+    }
     if req.method == "GET" && req.path == "/api/system/metrics" {
         return respond_json(stream, "200 OK", api_system_metrics());
     }
@@ -510,6 +578,10 @@ fn handle_connection(
 
     if req.method == "GET" && req.path == "/geo-map" {
         return respond_html(stream, page_geo_map());
+    }
+
+    if req.method == "GET" && req.path == "/flow-explorer" {
+        return respond_html(stream, page_flow_explorer());
     }
 
     if req.method == "GET" && req.path.starts_with("/diagnostics") {
@@ -2586,7 +2658,7 @@ fn page_dashboard(
     html.push_str("<p id='last-refreshed' style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'></p>");
     if edition.is_enterprise() {
         html.push_str("<section class='enterprise-analytics-panel'>");
-        html.push_str("<div class='enterprise-analytics-toolbar'><label for='enterprise-scope'>Scope</label><select id='enterprise-scope' onchange='setEnterpriseScope(this.value)'><option value=''>All Devices</option><option value='10.0.0.0/8'>Core (10.0.0.0/8)</option><option value='192.168.0.0/16'>Edge (192.168.0.0/16)</option></select></div>");
+        html.push_str("<div class='enterprise-analytics-toolbar'><label for='enterprise-scope'>Scope</label><select id='enterprise-scope' onchange='setEnterpriseScope(this.value)'><option value=''>All Devices</option><option value='10.0.0.0/8'>Core (10.0.0.0/8)</option><option value='192.168.0.0/16'>Edge (192.168.0.0/16)</option></select><a class='enterprise-map-link' style='margin-left:auto' href='/flow-explorer'>Open Flow Explorer ↗</a></div>");
         html.push_str("<div class='enterprise-analytics-grid'>");
         html.push_str("<article class='enterprise-sankey-article'>");
         html.push_str("<div class='enterprise-card-heading'>");
@@ -2659,6 +2731,41 @@ fn page_geo_map() -> String {
         "{}<html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>TracePulse - GeoIP Map</title>{}<style>html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0b1220;color:#e2e8f0;font-family:system-ui,sans-serif}}#geo-map{{position:absolute;top:0;left:0;width:100vw;height:100vh;z-index:1}}.geo-map-nav{{position:fixed;z-index:10;top:16px;left:20px;display:flex;align-items:center;gap:12px;padding:8px 14px;background:rgba(15,23,42,.85);border:1px solid #334155;border-radius:6px;backdrop-filter:blur(6px)}}.geo-map-nav a{{color:#38bdf8;text-decoration:none;font-size:13px;font-weight:600}}.geo-map-nav span{{color:#94a3b8;font-size:13px}}#geo-panel{{position:fixed;z-index:20;top:0;right:0;width:min(380px,90vw);height:100%;padding:24px;background:rgba(17,28,48,.95);border-left:1px solid #334155;transform:translateX(100%);transition:transform .25s ease;box-sizing:border-box;overflow-y:auto;backdrop-filter:blur(8px)}}#geo-panel.open{{transform:translateX(0)}}.geo-panel-close{{float:right;background:#334155;color:#fff;border:0;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px}}</style></head><body><div class='geo-map-nav'><a href='/'>&#8592; Dashboard</a><span>|</span><strong>GeoIP Traffic Map</strong></div><div id='geo-map'></div><aside id='geo-panel'></aside><script src='/static/js/echarts.min.js'></script><script src='/static/js/geo-map.js?v=4'></script></body></html>",
         HTML_DOCTYPE, COMMON_CSS
     )
+}
+
+fn page_flow_explorer() -> String {
+    let mut html = String::new();
+    html.push_str(HTML_DOCTYPE);
+    html.push_str("<html lang='en'><head>");
+    html.push_str("<meta charset='utf-8'>");
+    html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str("<script src='/static/js/theme.js'></script>");
+    html.push_str("<title>TracePulse \u{2013} Flow Explorer</title>");
+    html.push_str(COMMON_CSS);
+    html.push_str(FLOW_EXPLORER_CSS);
+    html.push_str("</head><body data-title-key='flow_explorer_title'>");
+    html.push_str(NAV_HTML);
+    html.push_str("<main><h1>Flow Explorer</h1>");
+    html.push_str("<p class='fx-hint'>Drag-select a time range on the timeline (brush) or set filters below, then click Apply. The URL updates so the current view can be shared directly.</p>");
+    html.push_str("<div class='fx-filter-bar'>");
+    html.push_str("<div class='fx-field'><label>Source IP</label><input id='fx-src-ip' type='text' placeholder='10.0.0.1'></div>");
+    html.push_str("<div class='fx-field'><label>Destination IP</label><input id='fx-dst-ip' type='text' placeholder='198.51.100.1'></div>");
+    html.push_str("<div class='fx-field'><label>Port</label><input id='fx-port' type='number' min='0' max='65535' placeholder='443'></div>");
+    html.push_str("<div class='fx-field'><label>Protocol</label><input id='fx-proto' type='text' placeholder='TCP'></div>");
+    html.push_str("<div class='fx-field'><label>Interface Index</label><input id='fx-if-index' type='number' min='0' placeholder='1'></div>");
+    html.push_str("<div class='fx-field'><label>Compare with</label><select id='fx-compare-mode' onchange='window.FlowExplorer.setCompareMode(this.value)'><option value=''>Off</option><option value='1d'>Previous Day</option><option value='7d'>Previous Week (same weekday)</option></select></div>");
+    html.push_str("<div class='fx-field fx-actions'><button class='btn btn-primary' onclick='window.FlowExplorer.applyFilters()'>Apply</button><button class='btn btn-secondary' onclick='window.FlowExplorer.resetFilters()'>Reset</button></div>");
+    html.push_str("</div>");
+    html.push_str("<section class='detail-section'><h2>Timeline (drag to select a time range)</h2><div id='flow-explorer-timeline' class='fx-timeline'></div></section>");
+    html.push_str("<section class='detail-section'><div class='fx-section-heading'><h2>Route &amp; Zone Traffic Matrix</h2><span class='fx-hint' style='margin:0'>Click a Sankey node or link to filter the Flow Detail table below.</span></div>");
+    html.push_str("<div id='flow-explorer-zone-matrix' class='fx-zone-matrix'></div>");
+    html.push_str("<div id='flow-explorer-sankey' class='fx-sankey'></div></section>");
+    html.push_str("<section class='detail-section'><div class='fx-section-heading'><h2>Flow Detail</h2><span id='flow-explorer-summary' class='fx-summary'></span></div><div class='table-scroll'><table id='flow-explorer-table'><thead><tr><th>Time</th><th>Source</th><th>Destination</th><th>Proto</th><th>Ingress</th><th>Egress</th><th>Bytes</th><th>Packets</th></tr></thead><tbody id='flow-explorer-tbody'><tr><td colspan='8' class='empty'>Select a time range or apply filters to load flows.</td></tr></tbody></table></div></section>");
+    html.push_str("<section class='detail-section'><h2>Top Talkers (within current selection)</h2><div id='flow-explorer-top-talkers' class='fx-top-talkers'></div></section>");
+    html.push_str("<section class='detail-section'><div class='fx-section-heading'><h2>Top Talkers by Axis</h2><select id='fx-axis-select' onchange='window.FlowExplorer.setAxis(this.value)'><option value='ip'>IP Address</option><option value='app'>Application (L7)</option><option value='country'>Country (GeoIP)</option><option value='dscp'>DSCP (QoS)</option></select></div><div class='fx-axis-grid'><div id='flow-explorer-axis-chart' class='fx-axis-chart'></div><div class='table-scroll'><table id='flow-explorer-axis-table'><thead><tr><th>Rank</th><th>Label</th><th>Bytes</th><th>Share</th></tr></thead><tbody id='flow-explorer-axis-tbody'><tr><td colspan='4' class='empty'>Loading...</td></tr></tbody></table></div></div></section>");
+    html.push_str("</main>");
+    html.push_str("<script src='/static/js/echarts.min.js'></script><script src='/static/js/i18n.js'></script><script src='/static/js/flow-explorer.js'></script></body></html>");
+    html
 }
 
 fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> String {
@@ -3677,6 +3784,7 @@ const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js
 const ENTERPRISE_ANALYTICS_BUNDLE_JS: &str =
     include_str!("../../frontend/dist/enterprise-analytics.js");
 const GEO_MAP_BUNDLE_JS: &str = include_str!("../../frontend/dist/geo-map.js");
+const FLOW_EXPLORER_BUNDLE_JS: &str = include_str!("../../frontend/dist/flow-explorer.js");
 const ECHARTS_BUNDLE_JS: &str = include_str!("../../frontend/dist/echarts.min.js");
 const WORLD_GEOJSON: &str = include_str!("../../frontend/dist/world.json");
 const SETTINGS_BUNDLE_JS: &str = include_str!("../../frontend/dist/settings.js");
@@ -3772,6 +3880,44 @@ const DASHBOARD_CSS: &str = "<style>
     .enterprise-spinner { width:1.2rem; height:1.2rem; border:2px solid #334155; border-top-color:#38bdf8; border-radius:50%; animation:ent-spin .8s linear infinite; flex-shrink:0; }
     @keyframes ent-spin { to { transform:rotate(360deg); } }
     @media (max-width:768px) { .enterprise-analytics-grid { grid-template-columns:1fr; } }
+</style>";
+
+const FLOW_EXPLORER_CSS: &str = "<style>
+  .fx-hint { color:#94a3b8; font-size:.85rem; margin:.25rem 0 1rem; }
+  .fx-filter-bar { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-end; margin-bottom:1.25rem; padding:.85rem 1rem; border:1px solid #334155; border-radius:.5rem; background:rgba(15,23,42,.65); }
+  .fx-field { display:flex; flex-direction:column; gap:.25rem; min-width:140px; }
+  .fx-field label { font-size:.78rem; color:#94a3b8; }
+  .fx-field input { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.45rem .6rem; border-radius:.375rem; font-size:.88rem; }
+  .fx-field select { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.45rem .6rem; border-radius:.375rem; font-size:.88rem; }
+  .fx-actions { flex-direction:row; gap:.5rem; align-items:center; }
+  .fx-timeline { width:100%; height:220px; }
+  .fx-section-heading { display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.6rem; }
+  .fx-summary { font-size:.8rem; color:#94a3b8; }
+  #flow-explorer-table { width:100%; border-collapse:collapse; }
+  #flow-explorer-table th, #flow-explorer-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.82rem; text-align:left; white-space:nowrap; }
+  #flow-explorer-table th { color:#94a3b8; }
+  .fx-top-talkers { display:grid; gap:.5rem; }
+  .fx-talker-row { display:grid; grid-template-columns:1fr auto; gap:.75rem; align-items:center; font-size:.82rem; padding:.4rem .6rem; border:1px solid #334155; border-radius:.375rem; background:#0f172a; }
+  .fx-talker-endpoints { color:#e2e8f0; }
+  .fx-talker-bytes { color:#34d399; font-weight:600; white-space:nowrap; }
+  #fx-axis-select { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.4rem .6rem; border-radius:.375rem; font-size:.85rem; }
+  .fx-axis-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; align-items:start; }
+  .fx-axis-chart { width:100%; height:280px; }
+  #flow-explorer-axis-table { width:100%; border-collapse:collapse; }
+  #flow-explorer-axis-table th, #flow-explorer-axis-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.82rem; text-align:left; }
+  #flow-explorer-axis-table th { color:#94a3b8; }
+  @media (max-width:900px) { .fx-axis-grid { grid-template-columns:1fr; } }
+  .fx-zone-matrix { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.75rem; margin-bottom:1rem; }
+  .fx-zone-card { border:1px solid #334155; border-radius:.5rem; padding:.75rem .85rem; background:#0f172a; }
+  .fx-zone-card .fx-zone-name { font-size:.78rem; color:#94a3b8; margin-bottom:.35rem; }
+  .fx-zone-card .fx-zone-bytes { font-size:1.05rem; font-weight:700; color:#e2e8f0; }
+  .fx-zone-card .fx-zone-pct { font-size:.82rem; color:#38bdf8; font-weight:600; margin-left:.35rem; }
+  .fx-zone-card.fx-zone-outbound { border-color:#f97316; }
+  .fx-zone-card.fx-zone-outbound .fx-zone-pct { color:#f97316; }
+  .fx-zone-track { height:.4rem; border-radius:99px; overflow:hidden; background:#1e293b; margin-top:.5rem; }
+  .fx-zone-fill { height:100%; }
+  .fx-sankey { width:100%; height:340px; }
+  @media (max-width:900px) { .fx-zone-matrix { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>";
 
 const DISCOVERY_CSS: &str = "<style>
@@ -4469,6 +4615,7 @@ mod tests {
                 sampling_rate: 1,
                 dscp: 0,
                 bgp_next_hop: None,
+                l7_hostname: None,
                 observed_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             })
             .expect("flow should save");
@@ -4528,6 +4675,7 @@ mod tests {
             sampling_rate: 1,
             dscp: 0,
             bgp_next_hop: None,
+            l7_hostname: None,
             observed_at: "2026-09-12 12:00:00".to_string(),
         }];
         let body = api_live_flow_analytics(&records, 60, 10);
@@ -4612,6 +4760,7 @@ mod tests {
                 sampling_rate: 1,
                 dscp: 0,
                 bgp_next_hop: None,
+                l7_hostname: None,
                 observed_at: now,
             })
             .expect("flow should save");

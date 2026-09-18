@@ -706,6 +706,7 @@ fn decode_sflow_raw_packet(
         sampling_rate,
         dscp: 0,
         bgp_next_hop: None,
+        l7_hostname: None,
         observed_at: observed_at.to_string(),
     })
 }
@@ -1056,6 +1057,9 @@ fn decode_record(
     let mut sampling_rate = 1_u32;
     let mut dscp = 0_u8;
     let mut bgp_next_hop = None;
+    // Vendor-specific IPFIX/NetFlow v9 IEs (e.g. ntop nProbe) carrying L7 visibility fields.
+    let mut http_host = None;
+    let mut tls_sni = None;
 
     for field in fields {
         let length = if field.length == u16::MAX {
@@ -1092,9 +1096,12 @@ fn decode_record(
                     .max(1)
                     .min(u32::MAX as u64) as u32
             }
+            IE_HTTP_HOST => http_host = decode_string(value),
+            IE_TLS_SNI => tls_sni = decode_string(value),
             _ => {}
         }
     }
+    let l7_hostname = tls_sni.or(http_host);
 
     let record = match (source_ip, destination_ip, protocol) {
         (Some(source_ip), Some(destination_ip), Some(protocol)) => Some(FlowRecord {
@@ -1112,6 +1119,7 @@ fn decode_record(
             sampling_rate,
             dscp,
             bgp_next_hop,
+            l7_hostname,
             observed_at: observed_at.to_string(),
         }),
         _ => None,
@@ -1153,6 +1161,22 @@ fn decode_number(value: &[u8]) -> Option<u64> {
             .iter()
             .fold(0_u64, |number, byte| (number << 8) | u64::from(*byte)),
     )
+}
+
+/// Vendor-specific (non-IANA) IPFIX/NetFlow v9 information elements used by common L7-aware
+/// probes (e.g. ntop nProbe) to export the HTTP `Host` header and TLS ClientHello SNI.
+const IE_HTTP_HOST: u16 = 187;
+const IE_TLS_SNI: u16 = 198;
+
+fn decode_string(value: &[u8]) -> Option<String> {
+    let trimmed = match value.iter().position(|byte| *byte == 0) {
+        Some(end) => &value[..end],
+        None => value,
+    };
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(trimmed).trim().to_string()).filter(|value| !value.is_empty())
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
@@ -1217,6 +1241,7 @@ fn parse_netflow_v5(payload: &[u8], exporter: IpAddr, observed_at: &str) -> Vec<
             sampling_rate,
             dscp: 0,
             bgp_next_hop: None,
+            l7_hostname: None,
             observed_at: observed_at.to_string(),
         });
     }
@@ -1402,6 +1427,65 @@ mod tests {
     }
 
     #[test]
+    fn decodes_tls_sni_from_ipfix_variable_length_field() {
+        let exporter = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10));
+        let templates: TemplateCache = Arc::new(Mutex::new(HashMap::new()));
+        let orphans: OrphanCache = Arc::new(Mutex::new(Vec::new()));
+
+        let mut fields = BASIC_FIELDS.to_vec();
+        fields.push((198, u16::MAX)); // TLS SNI, variable length
+
+        let mut template_set = Vec::new();
+        template_set.extend_from_slice(&256_u16.to_be_bytes());
+        template_set.extend_from_slice(&(fields.len() as u16).to_be_bytes());
+        for (element, length) in &fields {
+            template_set.extend_from_slice(&element.to_be_bytes());
+            template_set.extend_from_slice(&length.to_be_bytes());
+        }
+        let mut template_message = vec![0; 16];
+        template_message[0..2].copy_from_slice(&10_u16.to_be_bytes());
+        template_message[12..16].copy_from_slice(&7_u32.to_be_bytes());
+        append_set(&mut template_message, 2, &template_set);
+        let template_message_len = template_message.len() as u16;
+        template_message[2..4].copy_from_slice(&template_message_len.to_be_bytes());
+        assert!(
+            parse_datagram_with_templates(
+                FlowProtocol::Ipfix,
+                &template_message,
+                exporter,
+                &templates,
+                &orphans,
+            )
+            .is_empty()
+        );
+
+        let sni = b"login.microsoftonline.com";
+        let mut data_set = Vec::new();
+        append_basic_record(&mut data_set);
+        data_set.push(sni.len() as u8);
+        data_set.extend_from_slice(sni);
+        let mut data_message = vec![0; 16];
+        data_message[0..2].copy_from_slice(&10_u16.to_be_bytes());
+        data_message[12..16].copy_from_slice(&7_u32.to_be_bytes());
+        append_set(&mut data_message, 256, &data_set);
+        let data_message_len = data_message.len() as u16;
+        data_message[2..4].copy_from_slice(&data_message_len.to_be_bytes());
+        let records = parse_datagram_with_templates(
+            FlowProtocol::Ipfix,
+            &data_message,
+            exporter,
+            &templates,
+            &orphans,
+        );
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].l7_hostname.as_deref(),
+            Some("login.microsoftonline.com")
+        );
+    }
+
+    #[test]
     fn decodes_sflow_ipv4_tcp_header() {
         let mut ethernet = vec![0u8; 14 + 20 + 20];
         ethernet[12..14].copy_from_slice(&0x0800_u16.to_be_bytes());
@@ -1535,6 +1619,7 @@ mod tests {
             sampling_rate: 1,
             dscp: 0,
             bgp_next_hop: None,
+            l7_hostname: None,
             observed_at,
         };
         let ring: FlowRingBuffer =

@@ -118,6 +118,8 @@ pub struct FlowRecord {
     pub sampling_rate: u32,
     pub dscp: u8,
     pub bgp_next_hop: Option<IpAddr>,
+    /// TLS SNI or HTTP Host extracted from vendor-specific IPFIX/NetFlow v9 L7 fields (SNI takes priority).
+    pub l7_hostname: Option<String>,
     pub observed_at: String,
 }
 

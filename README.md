@@ -14,6 +14,7 @@ UI.
 - [Quick Start](#quick-start)
 - [Screenshots](#screenshots)
 - [Key Features](#key-features)
+- [Contributing](CONTRIBUTING.md)
 - [English Documentation](#english)
 - [日本語ドキュメント](#日本語)
 
@@ -58,6 +59,57 @@ the release assets once a representative monitoring dataset is available.
   - Parallel CIDR host scanning and automated neighbor port discovery via LLDP and CDP.
 - **Health Scoring & Anomaly Detection**
   - Real-time detection of L1/L2 errors, discards, late collisions (duplex mismatch), traffic spikes, and automated health score calculation.
+
+---
+
+## System Requirements
+
+- **OS**: Verified on Windows 11 and Ubuntu 26.04. TracePulse also builds for macOS (see the `cfg(target_os = "macos")` branches in `src/web/server.rs`), but macOS has not yet been verified by the maintainers.
+- **Architecture**: x86_64.
+- **Network access**: SNMP reachability (UDP/161, v1/v2c/v3) to monitored devices, and optionally UDP 2055/4739/6343 if NetFlow/IPFIX/sFlow ingestion is used.
+- No external database or additional runtime is required; TracePulse ships as a single portable binary with an embedded SQLite database.
+
+## Supported Devices
+
+### Supported vendors (OID templates)
+
+TracePulse ships with OID templates (`templates/*.toml`) for the following vendors: Alcatel, Arista, Aruba, F5 (BIG-IP), Brocade, Brocade/Foundry, Check Point, Ciena, Cisco, Cradlepoint, Dell, D-Link, Extreme, Fortinet, Generic (standard RFC MIBs), HP, Huawei, Intel/QLogic, Juniper, Mellanox, Meraki, MikroTik, Morningstar, Netgear, Palo Alto, Qtech, Ribbon, Stormshield, TP-Link, Ubiquiti, VeloCloud, Vyatta, and Zyxel.
+
+Devices without a dedicated template can still be monitored through the `generic.toml` template, which relies on standard MIBs (IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB, etc.).
+
+### Verified hardware
+
+- Cisco Catalyst 2960X series (verified on real hardware by the maintainers)
+
+Devices outside this list are expected to work as long as they expose the relevant SNMP MIBs, but they have not been verified on real hardware. Verification reports from users are welcome via GitHub Discussions/Issues.
+
+## Getting Started
+
+### 1. First launch
+
+1. Extract the release archive and keep the executable, `config.toml`, and the `templates/` directory in the same folder.
+2. Edit `config.toml`, at minimum `[snmp] default_community` and `[polling] interval_seconds`.
+3. Start the application in TUI or Web UI mode:
+
+   ```bash
+   ./tracepulse --cli
+   # or
+   ./tracepulse --web
+   ```
+
+### 2. Register devices
+
+- **Discovery (recommended)**: In the TUI, press `d`; in the WebGUI, open the Device Discovery page. Specify a CIDR (e.g. `192.168.1.0/24`) and register the devices that respond over SNMP.
+- **Manual registration**: Register a single device by IP address, SNMP community, and device type.
+- **Bulk import**: Add `[[devices]]` entries to a TOML file, or import from CSV.
+
+### 3. Confirm monitoring is working
+
+1. After registration, the device appears in the device list and polling starts at the configured interval.
+2. Over 1-2 polling cycles, confirm that interface status, In/Out errors, discards, and bandwidth utilization are updating.
+3. Adjust thresholds under `[alert]` in `config.toml` as needed.
+
+See [docs/guide/user-operation-flow.md](docs/guide/user-operation-flow.md) for a more detailed walkthrough.
 
 ---
 
@@ -204,6 +256,18 @@ This project is licensed under either of
 
 at your option.
 
+## Disclaimer
+
+This software and its accompanying documentation are provided "AS IS",
+without warranty of any kind, whether express or implied, including warranties
+of quality, fitness for a particular purpose, and non-infringement.
+
+The developers and copyright holders assume no liability and provide no
+compensation for any direct or indirect damages arising from the use of, or
+inability to use, this software, including loss of data, system outages,
+business interruption, or financial loss. Use this software entirely at your
+own risk.
+
 ### Third-Party Licenses
 
 TracePulse depends on and distributes software under additional open-source
@@ -228,6 +292,16 @@ third-party license notice page.
 
 ---
 
+## Community Edition and Enterprise Features
+
+The public repository provides the Community edition. It applies a 25-device registration limit and restricts CIDR discovery to a single `/24` subnet. These limits are part of the Community product policy; because the Community implementation is open source and self-hosted, a user who modifies and rebuilds the source can technically remove them.
+
+Enterprise-only analytics and bundled assets are not included in the public repository. Enterprise integrations are supplied through private provider implementations using the public extension interfaces. Changing the Community edition flag alone therefore does not provide the Enterprise implementation.
+
+Modified builds must not be represented as official TracePulse Enterprise products or use TracePulse trademarks without permission. Organizations requiring unlimited monitoring, Enterprise integrations, support, or updates should use the official Enterprise offering or a separately agreed commercial contract.
+
+---
+
 <a id="日本語"></a>
 # 日本語
 
@@ -247,6 +321,57 @@ TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検�
   - CIDR 並列スキャンと LLDP / CDP 隣接情報取得による対向機器・対向ポートの自動マッピング。
 - **障害予兆＆健全度スコアリング**
   - L1/L2 エラー、ディスカード、Late Collision (Duplex 不整合)、帯域スパイクの検知とヘルススコア自動算出。
+
+---
+
+## 実行環境
+
+- **OS**: Windows 11 および Ubuntu 26.04 で動作確認済みです。macOS 向けのビルドにも対応しています（`src/web/server.rs` の `cfg(target_os = "macos")` 分岐を参照）が、現時点ではメンテナーによる動作確認は行われていません。
+- **アーキテクチャ**: x86_64。
+- **ネットワーク要件**: 監視対象機器への SNMP 到達性（UDP/161、v1/v2c/v3）。NetFlow/IPFIX/sFlow を利用する場合は UDP 2055/4739/6343 の受信も必要です。
+- 外部データベースや追加ランタイムは不要です。単一バイナリと内蔵 SQLite（`data.db`）で完結します。
+
+## 対応機器
+
+### 対応ベンダー（OID テンプレート提供）
+
+`templates/*.toml` として、以下のベンダー向け OID テンプレートを同梱しています: Alcatel, Arista, Aruba, F5 (BIG-IP), Brocade, Brocade/Foundry, Check Point, Ciena, Cisco, Cradlepoint, Dell, D-Link, Extreme, Fortinet, Generic（標準 RFC MIB）, HP, Huawei, Intel/QLogic, Juniper, Mellanox, Meraki, MikroTik, Morningstar, Netgear, Palo Alto, Qtech, Ribbon, Stormshield, TP-Link, Ubiquiti, VeloCloud, Vyatta, Zyxel。
+
+専用テンプレートがない機器でも、標準 MIB（IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB 等）に対応していれば `generic.toml` テンプレートで監視できます。
+
+### 動作検証済み機器
+
+- Cisco Catalyst 2960X シリーズ（メンテナーが実機で動作確認済み）
+
+上記以外の機器は、該当する SNMP MIB に対応していれば動作する見込みですが、実機での動作検証は行われていません。動作報告は GitHub Discussions / Issues 経由で歓迎します。
+
+## 利用の始め方
+
+### 1. 初回起動
+
+1. アーカイブを展開し、実行ファイル・`config.toml`・`templates/` ディレクトリを同じフォルダーに配置します。
+2. `config.toml` を編集します。最低限 `[snmp] default_community` と `[polling] interval_seconds` を設定してください。
+3. TUI または WebGUI モードで起動します。
+
+   ```bash
+   ./tracepulse --cli
+   # または
+   ./tracepulse --web
+   ```
+
+### 2. 機器の登録
+
+- **自動検出（推奨）**: TUI では `d` キー、WebGUI では Device Discovery ページで CIDR（例: `192.168.1.0/24`）を指定し、SNMP 応答のあった機器を登録します。
+- **手動登録**: IP アドレス・SNMP community・種別を指定して 1 台ずつ登録します。
+- **一括登録**: TOML の `[[devices]]` または CSV からまとめて読み込みます。
+
+### 3. 監視できていることの確認
+
+1. 登録後、機器一覧に追加され、設定した間隔でポーリングが開始されます。
+2. 1〜2 ポーリングサイクル観測し、インターフェース状態・In/Out エラー・ディスカード・帯域利用率が更新されることを確認します。
+3. 必要に応じて `config.toml` の `[alert]` でしきい値を調整します。
+
+より詳細な手順は [docs/guide/user-operation-flow.md](docs/guide/user-operation-flow.md) を参照してください。
 
 ---
 
@@ -383,6 +508,20 @@ history_days = 7
 ---
 
 ## ライセンス
+
+## 免責事項 (Disclaimer)
+
+本ソフトウェア（および付属ドキュメント）は現状有姿（As-Is）で提供され、明示・黙示を問わず、品質、特定目的への適合性、非侵害性等についていかなる保証も行いません。
+
+本ソフトウェアの使用、または使用不能から生じた直接的・間接的な損害（データの損失、システムの停止、事業の中断、金銭的損害等を含む）について、開発者および権利者は一切の責任および補償を負わないものとします。すべてご自身の責任においてご利用ください。
+
+### Community 版と Enterprise 機能
+
+公開リポジトリで提供するのは Community 版です。Community 版には登録機器数 25 台の上限と、CIDR 自動探索を単一の `/24` サブネットに制限する機能制限があります。これらは Community 版の製品ポリシーです。Community 版はソースコードが公開されたセルフホスト型のソフトウェアであるため、利用者がソースコードを改変して再ビルドすれば、技術的には制限を解除できます。
+
+Enterprise 専用の分析機能およびバンドル済みアセットは公開リポジトリには含めません。Enterprise 連携は、公開されている拡張インターフェースを通じて非公開のプロバイダー実装から提供します。そのため、Community 版のエディションフラグを変更するだけでは Enterprise 実装を利用できません。
+
+改変版を公式の TracePulse Enterprise と表示したり、許可なく TracePulse の商標を使用したりすることは禁止します。無制限監視、Enterprise 連携、サポート、アップデートが必要な場合は、公式 Enterprise 版または別途合意した商用契約を利用してください。
 
 本プロジェクトは、以下のいずれかのライセンスの下で提供されます。
 
