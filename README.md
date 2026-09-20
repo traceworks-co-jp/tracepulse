@@ -14,6 +14,7 @@ UI.
 - [Quick Start](#quick-start)
 - [Screenshots](#screenshots)
 - [Key Features](#key-features)
+- [Architecture](#architecture)
 - [Contributing](CONTRIBUTING.md)
 - [English Documentation](#english)
 - [日本語ドキュメント](#日本語)
@@ -59,6 +60,46 @@ the release assets once a representative monitoring dataset is available.
   - Parallel CIDR host scanning and automated neighbor port discovery via LLDP and CDP.
 - **Health Scoring & Anomaly Detection**
   - Real-time detection of L1/L2 errors, discards, late collisions (duplex mismatch), traffic spikes, and automated health score calculation.
+
+---
+
+## Architecture
+
+This repository is the public TracePulse Core. It owns the monitoring runtime,
+the generic Web UI host, and the `WebExtensionProvider` integration contract.
+It contains no Enterprise analytics routes, pages, or frontend assets. Licensed
+features are implemented and distributed separately by TracePulse Enterprise,
+which registers its own extension provider at startup.
+
+---
+
+## Notifications
+
+Community builds support alert delivery to Slack and Microsoft Teams incoming
+webhooks. Configure the channels from the Web UI Settings page, or add a
+`[notifications]` section to `config.toml`:
+
+```toml
+[notifications.slack]
+enabled = true
+webhook_url_env = "TRACEPULSE_SLACK_WEBHOOK_URL"
+
+[notifications.teams]
+enabled = true
+webhook_url_env = "TRACEPULSE_TEAMS_WEBHOOK_URL"
+
+[notifications.flap_guard]
+window_seconds = 60
+
+[notifications.retry]
+max_attempts = 3
+```
+
+Set the webhook URLs in the named environment variables, or enter them in the
+Web UI. The Web UI also provides per-channel test notifications. Use
+`flap_guard.window_seconds` to suppress repeated alerts for the same device and
+alert type, and `retry.max_attempts` to control delivery retries. Stored
+webhook URLs are not returned by the settings API.
 
 ---
 
@@ -245,6 +286,20 @@ health_critical_threshold = 60
 
 [retention]
 history_days = 7
+
+[notifications.slack]
+enabled = true
+webhook_url_env = "TRACEPULSE_SLACK_WEBHOOK_URL"
+
+[notifications.teams]
+enabled = true
+webhook_url_env = "TRACEPULSE_TEAMS_WEBHOOK_URL"
+
+[notifications.flap_guard]
+window_seconds = 60
+
+[notifications.retry]
+max_attempts = 3
 ```
 
 ---
@@ -323,6 +378,30 @@ TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検�
   - CIDR 並列スキャンと LLDP / CDP 隣接情報取得による対向機器・対向ポートの自動マッピング。
 - **障害予兆＆健全度スコアリング**
   - L1/L2 エラー、ディスカード、Late Collision (Duplex 不整合)、帯域スパイクの検知とヘルススコア自動算出。
+- **Slack / Microsoft Teams 通知 (Community 版)**
+  - アラートを Slack または Microsoft Teams の Incoming Webhook へ送信できます。WebGUI の Settings または `config.toml` から有効化できます。
+
+## Notifications
+
+Community 版では、Slack および Microsoft Teams の Incoming Webhook へアラートを送信できます。WebGUI の Settings 画面、または `config.toml` の `[notifications]` セクションで設定してください。
+
+```toml
+[notifications.slack]
+enabled = true
+webhook_url_env = "TRACEPULSE_SLACK_WEBHOOK_URL"
+
+[notifications.teams]
+enabled = true
+webhook_url_env = "TRACEPULSE_TEAMS_WEBHOOK_URL"
+
+[notifications.flap_guard]
+window_seconds = 60
+
+[notifications.retry]
+max_attempts = 3
+```
+
+Webhook URL は上記の環境変数に設定するか、WebGUI から入力できます。WebGUI では Slack / Teams ごとのテスト通知も送信できます。`flap_guard.window_seconds` は同じ機器・アラート種別の重複通知を抑制する時間、`retry.max_attempts` は通知失敗時の最大試行回数です。保存した Webhook URL は設定 API から返されません。
 
 ---
 
@@ -507,6 +586,20 @@ health_critical_threshold = 60
 
 [retention]
 history_days = 7
+
+[notifications.slack]
+enabled = true
+webhook_url_env = "TRACEPULSE_SLACK_WEBHOOK_URL"
+
+[notifications.teams]
+enabled = true
+webhook_url_env = "TRACEPULSE_TEAMS_WEBHOOK_URL"
+
+[notifications.flap_guard]
+window_seconds = 60
+
+[notifications.retry]
+max_attempts = 3
 ```
 
 ---

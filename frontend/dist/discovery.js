@@ -45,8 +45,8 @@ var TracePulseDiscovery = (() => {
   function el(id) {
     return document.getElementById(id);
   }
-  function isEnterprise() {
-    return !!window.TRACEPULSE_WEB_EDITION?.enterprise;
+  function maxDiscoveryCidrs() {
+    return window.TRACEPULSE_DISCOVERY_LIMITS?.maxCidrs ?? null;
   }
   function existingIps() {
     return window.DISCOVERY_EXISTING || /* @__PURE__ */ new Set();
@@ -77,9 +77,9 @@ var TracePulseDiscovery = (() => {
       return;
     }
     const smallestPrefix = Math.min(...entries.map((entry) => parseInt(entry.split("/")[1], 10)));
-    const maxPrefix = isEnterprise() ? 0 : 24;
-    if (!isEnterprise() && smallestPrefix < maxPrefix) {
-      hint.textContent = `Community\u7248\u3067\u306F\u5358\u4E00\u30B5\u30D6\u30CD\u30C3\u30C8\uFF08/${maxPrefix}\u4EE5\u4E0A\uFF09\u306E\u307F\u30B9\u30AD\u30E3\u30F3\u53EF\u80FD\u3067\u3059\u3002\u73FE\u5728: /${smallestPrefix}`;
+    const maxCidrs = maxDiscoveryCidrs();
+    if (maxCidrs !== null && (entries.length > maxCidrs || smallestPrefix < 24)) {
+      hint.textContent = `This deployment accepts up to ${maxCidrs} CIDR range(s) at /24 or narrower. Current: /${smallestPrefix}`;
       hint.className = "host-hint warn";
       return;
     }
@@ -88,8 +88,6 @@ var TracePulseDiscovery = (() => {
     hint.className = "host-hint";
   }
   function applyPageLanguage(_lang) {
-    const cidr = document.getElementById("cidr");
-    if (cidr && isEnterprise()) cidr.placeholder = t("cidr_range_placeholder_enterprise");
     window.refreshTopologyTexts?.();
   }
   async function startScan() {
@@ -103,8 +101,9 @@ var TracePulseDiscovery = (() => {
     const entries = cidrEntries(cidr);
     const prefixes = entries.map((entry) => parseInt(entry.split("/")[1] || "33", 10));
     const smallestPrefix = Math.min(...prefixes);
-    if (!isEnterprise() && (entries.length > 1 || smallestPrefix < 24)) {
-      showScanError("Community\u7248\u3067\u306F\u5358\u4E00\u30B5\u30D6\u30CD\u30C3\u30C8\uFF08/24\u4EE5\u4E0A\uFF09\u306E\u307F\u30B9\u30AD\u30E3\u30F3\u53EF\u80FD\u3067\u3059\u3002");
+    const maxCidrs = maxDiscoveryCidrs();
+    if (maxCidrs !== null && (entries.length > maxCidrs || smallestPrefix < 24)) {
+      showScanError(`This deployment accepts up to ${maxCidrs} CIDR range(s) at /24 or narrower.`);
       return;
     }
     const total = entries.map(cidrHostCount).reduce((sum, count) => sum + (count || 0), 0);

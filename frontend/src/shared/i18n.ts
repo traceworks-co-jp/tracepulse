@@ -13,6 +13,14 @@ function translationData(): TranslationData {
     return translations;
 }
 
+export function registerTranslations(extension: TranslationData): void {
+    const data = translations as TranslationData;
+    Object.entries(extension).forEach(([language, entries]) => {
+        if (!entries) return;
+        Object.assign(data[language as keyof TranslationData] ||= {}, entries);
+    });
+}
+
 export function t(key: string, lang = currentLanguage()): string {
     const data = translationData();
     return data[lang as keyof TranslationData]?.[key] || data.en?.[key] || key;
@@ -48,6 +56,7 @@ export function applyTheme(theme = currentTheme()): void {
     document.documentElement.dataset.theme = theme;
     const select = document.getElementById("theme-select") as HTMLSelectElement | null;
     if (select && select.value !== theme) select.value = theme;
+    window.dispatchEvent(new CustomEvent("tracepulse-theme-change", { detail: { theme } }));
 }
 
 export function applyLanguage(lang = currentLanguage()): void {
@@ -60,6 +69,7 @@ export function applyLanguage(lang = currentLanguage()): void {
     const titleKey = document.body?.dataset.titleKey;
     if (titleKey) document.title = `TracePulse - ${t(titleKey, lang)}`;
     window.applyPageLanguage?.(lang);
+    window.dispatchEvent(new CustomEvent("tracepulse-language-change", { detail: { lang } }));
 }
 
 export function currentTimeZoneSetting(): string {
@@ -90,7 +100,7 @@ export function formatTracePulseClock(value: unknown): string {
     return `${map.hour}:${map.minute}`;
 }
 
-Object.assign(window, { t, tf, currentLanguage, setLanguage, currentTheme, setTheme, applyTheme, applyLanguage, formatTracePulseTimestamp, formatTracePulseClock });
+Object.assign(window, { t, tf, registerTranslations, currentLanguage, setLanguage, currentTheme, setTheme, applyTheme, applyLanguage, currentTimeZoneSetting, formatTracePulseTimestamp, formatTracePulseClock });
 
 document.addEventListener("DOMContentLoaded", () => {
     applyTheme();

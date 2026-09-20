@@ -31,7 +31,7 @@ let cancelled = false;
 
 function t(key: string): string { return typeof window.t === "function" ? window.t(key) : key; }
 function el<T extends HTMLElement>(id: string): T { return document.getElementById(id) as T; }
-function isEnterprise(): boolean { return !!window.TRACEPULSE_WEB_EDITION?.enterprise; }
+function maxDiscoveryCidrs(): number | null { return window.TRACEPULSE_DISCOVERY_LIMITS?.maxCidrs ?? null; }
 function existingIps(): Set<string> { return window.DISCOVERY_EXISTING || new Set<string>(); }
 
 function cidrHostCount(cidr: string): number | null {
@@ -54,9 +54,9 @@ export function updateHint(): void {
     const total = counts.reduce((sum: number, count) => sum + (count || 0), 0);
     if (!total) { hint.innerHTML = ""; return; }
     const smallestPrefix = Math.min(...entries.map((entry) => parseInt(entry.split("/")[1], 10)));
-    const maxPrefix = isEnterprise() ? 0 : 24;
-    if (!isEnterprise() && smallestPrefix < maxPrefix) {
-        hint.textContent = `Community版では単一サブネット（/${maxPrefix}以上）のみスキャン可能です。現在: /${smallestPrefix}`;
+    const maxCidrs = maxDiscoveryCidrs();
+    if (maxCidrs !== null && (entries.length > maxCidrs || smallestPrefix < 24)) {
+        hint.textContent = `This deployment accepts up to ${maxCidrs} CIDR range(s) at /24 or narrower. Current: /${smallestPrefix}`;
         hint.className = "host-hint warn";
         return;
     }
@@ -66,8 +66,6 @@ export function updateHint(): void {
 }
 
 function applyPageLanguage(_lang?: string): void {
-    const cidr = document.getElementById("cidr") as HTMLInputElement | null;
-    if (cidr && isEnterprise()) cidr.placeholder = t("cidr_range_placeholder_enterprise");
     window.refreshTopologyTexts?.();
 }
 
@@ -79,8 +77,9 @@ export async function startScan(): Promise<void> {
     const entries = cidrEntries(cidr);
     const prefixes = entries.map((entry) => parseInt(entry.split("/")[1] || "33", 10));
     const smallestPrefix = Math.min(...prefixes);
-    if (!isEnterprise() && (entries.length > 1 || smallestPrefix < 24)) {
-        showScanError("Community版では単一サブネット（/24以上）のみスキャン可能です。");
+    const maxCidrs = maxDiscoveryCidrs();
+    if (maxCidrs !== null && (entries.length > maxCidrs || smallestPrefix < 24)) {
+        showScanError(`This deployment accepts up to ${maxCidrs} CIDR range(s) at /24 or narrower.`);
         return;
     }
     const total = entries.map(cidrHostCount).reduce((sum: number, count) => sum + (count || 0), 0);

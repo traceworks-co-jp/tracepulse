@@ -1,9 +1,10 @@
-use crate::alert::{AlertBroadcaster, AlertEvent, AlertKind};
+use crate::alert::AlertBroadcaster;
 use crate::config::AppConfig;
 use crate::db::models::InterfacePortDelta;
 use crate::db::repository::{Repository, counter32_delta};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
+use crate::notifications::NotificationSettingsProvider;
 use crate::snmp::SnmpClient;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,26 +13,27 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-// ─── Community版 制限値 ────────────────────────────────────────────────────
-// 最大登録ノード数（Community版）。有償版では別リポジトリで解放する。
+// ─── Default web limits ──────────────────────────────────────────────────────
 const COMMUNITY_MAX_DEVICES: usize = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebEdition {
-    Community,
-    Enterprise,
+pub struct WebLimits {
+    pub max_devices: Option<usize>,
+    pub max_discovery_cidrs: Option<usize>,
 }
 
-impl WebEdition {
-    pub fn is_enterprise(self) -> bool {
-        matches!(self, Self::Enterprise)
+impl WebLimits {
+    pub const fn community() -> Self {
+        Self {
+            max_devices: Some(COMMUNITY_MAX_DEVICES),
+            max_discovery_cidrs: Some(1),
+        }
     }
 
-    pub fn node_limit(self) -> Option<usize> {
-        if self.is_enterprise() {
-            None
-        } else {
-            Some(COMMUNITY_MAX_DEVICES)
+    pub const fn unrestricted() -> Self {
+        Self {
+            max_devices: None,
+            max_discovery_cidrs: None,
         }
     }
 }
@@ -67,31 +69,57 @@ impl ScanJob {
 }
 
 type JobStore = Arc<Mutex<HashMap<String, ScanJob>>>;
+type NotificationProvider = Option<Arc<dyn NotificationSettingsProvider>>;
 
-pub use crate::notifications::NotificationSettingsProvider;
-
-pub trait EnterpriseAnalyticsProvider: Send + Sync {
-    fn sankey_json(&self) -> String;
-    fn geoip_json(&self) -> String;
-    fn scope_json(&self) -> String;
-    fn set_scope_json(&self, body: &str) -> String;
-    fn bgp_qos_json(&self) -> String;
-    /// Multi-dimensional flow drill-down used by the Flow Explorer WebGUI.
-    /// `query_string` is the raw (percent-encoded) suffix of `/api/v1/flows?...`.
-    fn flows_json(&self, query_string: &str) -> String;
-    /// Bucketed current-vs-`compare_with` (1d/7d) timeseries for the Compare View overlay.
-    /// `query_string` is the raw suffix of `/api/v1/flows/timeseries?...`.
-    fn flows_timeseries_json(&self, query_string: &str) -> String;
-    /// Top-10 Top Talkers grouped by `axis=ip|app|country|dscp`.
-    /// `query_string` is the raw suffix of `/api/v1/top-talkers?...`.
-    fn top_talkers_axis_json(&self, query_string: &str) -> String;
-    /// Multi-stage `[Ingress IF] -> [Source Group] -> [Destination Group] -> [Egress IF]`
-    /// Sankey graph plus the four-zone traffic matrix. `query_string` is the raw suffix of
-    /// `/api/v1/sankey?...`.
-    fn sankey_v1_json(&self, query_string: &str) -> String;
+pub struct WebExtensionResponse {
+    pub status: String,
+    pub content_type: String,
+    pub body: String,
+    pub no_cache: bool,
 }
 
-type NotificationProvider = Option<Arc<dyn NotificationSettingsProvider>>;
+pub trait WebExtensionProvider: Send + Sync {
+    fn handle_request(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &str,
+    ) -> Option<WebExtensionResponse>;
+
+    fn dashboard_html(&self) -> Option<String> {
+        None
+    }
+
+    fn dashboard_styles(&self) -> String {
+        String::new()
+    }
+
+    fn dashboard_scripts(&self) -> String {
+        String::new()
+    }
+
+    fn navigation_html(&self) -> String {
+        String::new()
+    }
+
+    fn settings_html(&self) -> String {
+        String::new()
+    }
+
+    fn settings_scripts(&self) -> String {
+        String::new()
+    }
+
+    fn observe_interface_sample(
+        &self,
+        _device: &DeviceConfig,
+        _sample: &crate::db::models::InterfaceSample,
+        _history: &[crate::db::models::InterfaceSample],
+        _alerts: &AlertBroadcaster,
+    ) {
+    }
+}
 
 pub struct WebServer {
     pub host: String,
@@ -100,10 +128,10 @@ pub struct WebServer {
     config_path: std::path::PathBuf,
     repository: Arc<Mutex<Repository>>,
     jobs: JobStore,
-    edition: WebEdition,
+    limits: WebLimits,
     alerts: AlertBroadcaster,
     notifications: NotificationProvider,
-    enterprise_analytics: Option<Arc<dyn EnterpriseAnalyticsProvider>>,
+    web_extension: Option<Arc<dyn WebExtensionProvider>>,
     flow_repository: Option<Arc<dyn crate::flow::FlowRepository>>,
 }
 
@@ -114,39 +142,39 @@ impl WebServer {
         config: AppConfig,
         repository: Repository,
     ) -> Self {
-        Self::with_edition_and_broadcaster(
+        Self::with_limits_and_broadcaster(
             host,
             port,
             config,
             repository,
-            WebEdition::Community,
+            WebLimits::community(),
             AlertBroadcaster::new(),
         )
     }
 
-    pub fn with_edition(
+    pub fn with_limits(
         host: impl Into<String>,
         port: u16,
         config: AppConfig,
         repository: Repository,
-        edition: WebEdition,
+        limits: WebLimits,
     ) -> Self {
-        Self::with_edition_and_broadcaster(
+        Self::with_limits_and_broadcaster(
             host,
             port,
             config,
             repository,
-            edition,
+            limits,
             AlertBroadcaster::new(),
         )
     }
 
-    pub fn with_edition_and_broadcaster(
+    pub fn with_limits_and_broadcaster(
         host: impl Into<String>,
         port: u16,
         config: AppConfig,
         repository: Repository,
-        edition: WebEdition,
+        limits: WebLimits,
         alerts: AlertBroadcaster,
     ) -> Self {
         let config_path = crate::config_path();
@@ -157,20 +185,12 @@ impl WebServer {
             config_path,
             repository: Arc::new(Mutex::new(repository)),
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            edition,
+            limits,
             alerts,
             notifications: None,
-            enterprise_analytics: None,
+            web_extension: None,
             flow_repository: None,
         }
-    }
-
-    pub fn with_notification_provider(
-        mut self,
-        provider: Arc<dyn NotificationSettingsProvider>,
-    ) -> Self {
-        self.notifications = Some(provider);
-        self
     }
 
     pub fn with_flow_repository(
@@ -181,11 +201,16 @@ impl WebServer {
         self
     }
 
-    pub fn with_enterprise_analytics(
+    pub fn with_notification_provider(
         mut self,
-        provider: Arc<dyn EnterpriseAnalyticsProvider>,
+        provider: Arc<dyn NotificationSettingsProvider>,
     ) -> Self {
-        self.enterprise_analytics = Some(provider);
+        self.notifications = Some(provider);
+        self
+    }
+
+    pub fn with_web_extension(mut self, provider: Arc<dyn WebExtensionProvider>) -> Self {
+        self.web_extension = Some(provider);
         self
     }
 
@@ -201,8 +226,9 @@ impl WebServer {
             let repo = Arc::clone(&self.repository);
             let cfg = Arc::clone(&self.config);
             let alerts = self.alerts.clone();
+            let extension = self.web_extension.clone();
             std::thread::spawn(move || {
-                run_polling_loop(cfg, repo, alerts, true);
+                run_polling_loop_with_observer(cfg, repo, alerts, extension, true);
             });
         }
         let flow_config = self
@@ -229,9 +255,9 @@ impl WebServer {
                     let jobs = Arc::clone(&self.jobs);
                     let cfg = Arc::clone(&self.config);
                     let cfg_path = self.config_path.clone();
-                    let edition = self.edition;
+                    let limits = self.limits;
                     let notifications = self.notifications.clone();
-                    let enterprise_analytics = self.enterprise_analytics.clone();
+                    let web_extension = self.web_extension.clone();
                     std::thread::spawn(move || {
                         let _ = handle_connection(
                             stream,
@@ -239,9 +265,9 @@ impl WebServer {
                             jobs,
                             cfg,
                             cfg_path,
-                            edition,
+                            limits,
                             notifications,
-                            enterprise_analytics,
+                            web_extension,
                         );
                     });
                 }
@@ -328,22 +354,6 @@ fn respond(
     Ok(())
 }
 
-fn respond_static(
-    mut stream: TcpStream,
-    status: &str,
-    content_type: &str,
-    body: &str,
-) -> Result<(), AppError> {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: public, max-age=86400\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    stream.write_all(response.as_bytes())?;
-    stream.flush()?;
-    Ok(())
-}
-
 fn respond_app_js(mut stream: TcpStream, body: &str) -> Result<(), AppError> {
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/javascript; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache, must-revalidate\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
@@ -367,6 +377,28 @@ fn respond_js(stream: TcpStream, body: &str) -> Result<(), AppError> {
     respond_app_js(stream, body)
 }
 
+fn respond_extension(
+    mut stream: TcpStream,
+    response: WebExtensionResponse,
+) -> Result<(), AppError> {
+    let cache_control = if response.no_cache {
+        "Cache-Control: no-cache, must-revalidate"
+    } else {
+        "Cache-Control: public, max-age=86400"
+    };
+    let wire = format!(
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        response.status,
+        response.content_type,
+        response.body.len(),
+        cache_control,
+        response.body
+    );
+    stream.write_all(wire.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -376,43 +408,29 @@ fn handle_connection(
     jobs: JobStore,
     cfg: Arc<Mutex<AppConfig>>,
     cfg_path: std::path::PathBuf,
-    edition: WebEdition,
+    limits: WebLimits,
     notifications: NotificationProvider,
-    enterprise_analytics: Option<Arc<dyn EnterpriseAnalyticsProvider>>,
+    web_extension: Option<Arc<dyn WebExtensionProvider>>,
 ) -> Result<(), AppError> {
     let req = parse_request(&stream)?;
     let clean_path = req.path.split('?').next().unwrap_or(&req.path);
+    let query = req
+        .path
+        .split_once('?')
+        .map(|(_, value)| value)
+        .unwrap_or("");
+
+    if let Some(extension) = web_extension.as_deref()
+        && let Some(response) = extension.handle_request(&req.method, clean_path, query, &req.body)
+    {
+        return respond_extension(stream, response);
+    }
 
     if req.method == "GET" && clean_path == "/static/js/device-detail.js" {
         return respond_js(stream, DEVICE_DETAIL_BUNDLE_JS);
     }
     if req.method == "GET" && clean_path == "/static/js/dashboard.js" {
         return respond_js(stream, DASHBOARD_BUNDLE_JS);
-    }
-    if req.method == "GET" && clean_path == "/static/js/enterprise-analytics.js" {
-        return respond_js(stream, ENTERPRISE_ANALYTICS_BUNDLE_JS);
-    }
-    if req.method == "GET" && clean_path == "/static/js/geo-map.js" {
-        return respond_js(stream, GEO_MAP_BUNDLE_JS);
-    }
-    if req.method == "GET" && clean_path == "/static/js/flow-explorer.js" {
-        return respond_js(stream, FLOW_EXPLORER_BUNDLE_JS);
-    }
-    if req.method == "GET" && clean_path == "/static/js/echarts.min.js" {
-        return respond_static(
-            stream,
-            "200 OK",
-            "application/javascript; charset=utf-8",
-            ECHARTS_BUNDLE_JS,
-        );
-    }
-    if req.method == "GET" && clean_path == "/static/world.json" {
-        return respond_static(
-            stream,
-            "200 OK",
-            "application/json; charset=utf-8",
-            WORLD_GEOJSON,
-        );
     }
     if req.method == "GET" && clean_path == "/static/js/settings.js" {
         return respond_js(stream, SETTINGS_BUNDLE_JS);
@@ -458,108 +476,6 @@ fn handle_connection(
         let body = api_flow_analytics(&repo, window_seconds, limit);
         return respond_json(stream, "200 OK", body);
     }
-    if req.method == "GET" && req.path == "/api/enterprise/sankey" {
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.sankey_json()),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path == "/api/enterprise/geoip" {
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.geoip_json()),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path == "/api/enterprise/bgp-qos" {
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.bgp_qos_json()),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path == "/api/enterprise/scope" {
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.scope_json()),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "POST" && req.path == "/api/enterprise/scope" {
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.set_scope_json(&req.body)),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path.starts_with("/api/v1/flows/timeseries") {
-        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(
-                stream,
-                "200 OK",
-                provider.flows_timeseries_json(query_string),
-            ),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path.starts_with("/api/v1/flows") {
-        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.flows_json(query_string)),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path.starts_with("/api/v1/top-talkers") {
-        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(
-                stream,
-                "200 OK",
-                provider.top_talkers_axis_json(query_string),
-            ),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
-    if req.method == "GET" && req.path.starts_with("/api/v1/sankey") {
-        let query_string = req.path.split_once('?').map(|(_, q)| q).unwrap_or("");
-        return match enterprise_analytics.as_deref() {
-            Some(provider) => respond_json(stream, "200 OK", provider.sankey_v1_json(query_string)),
-            None => respond_json(
-                stream,
-                "404 Not Found",
-                r#"{"error":"enterprise analytics unavailable"}"#.to_string(),
-            ),
-        };
-    }
     if req.method == "GET" && req.path == "/api/system/metrics" {
         return respond_json(stream, "200 OK", api_system_metrics());
     }
@@ -576,40 +492,48 @@ fn handle_connection(
         return respond_html(stream, page_device_detail(&ip, &repo));
     }
 
-    if req.method == "GET" && req.path == "/geo-map" {
-        return respond_html(stream, page_geo_map());
-    }
-
-    if req.method == "GET" && req.path == "/flow-explorer" {
-        return respond_html(stream, page_flow_explorer());
-    }
-
     if req.method == "GET" && req.path.starts_with("/diagnostics") {
-        return respond_html(stream, page_diagnostics(&req.path, &cfg));
+        return respond_html(
+            stream,
+            page_diagnostics(&req.path, &cfg, web_extension.as_deref()),
+        );
     }
 
     match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") | ("GET", "/dashboard") => {
-            respond_html(stream, page_dashboard(&repo, &cfg, edition))
-        }
-        ("GET", "/discovery") => respond_html(stream, page_discovery(&repo, edition)),
-        ("GET", "/diagnostics") => respond_html(stream, page_diagnostics("/diagnostics", &cfg)),
-        ("GET", "/settings") => respond_html(stream, page_settings(&cfg, notifications.is_some())),
+        ("GET", "/") | ("GET", "/dashboard") => respond_html(
+            stream,
+            page_dashboard(&repo, &cfg, web_extension.as_deref()),
+        ),
+        ("GET", "/discovery") => respond_html(
+            stream,
+            page_discovery(&repo, limits, web_extension.as_deref()),
+        ),
+        ("GET", "/diagnostics") => respond_html(
+            stream,
+            page_diagnostics("/diagnostics", &cfg, web_extension.as_deref()),
+        ),
+        ("GET", "/settings") => respond_html(
+            stream,
+            page_settings(&cfg, notifications.is_some(), web_extension.as_deref()),
+        ),
         ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
         ("GET", "/api/devices") => respond_json(stream, "200 OK", api_devices(&repo, &cfg)),
         ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
-        ("GET", "/api/notifications") => {
-            let (status, body) = api_get_notifications(notifications.as_deref());
-            respond_json(stream, &status, body)
-        }
-        ("POST", "/api/notifications") => {
-            let (status, body) = api_post_notifications(&req.body, notifications.as_deref());
-            respond_json(stream, &status, body)
-        }
-        ("POST", "/api/notifications/test") => {
-            let (status, body) = api_test_notification(&req.body, notifications.as_deref());
-            respond_json(stream, &status, body)
-        }
+        ("GET", "/api/notifications") => respond_json(
+            stream,
+            "200 OK",
+            api_get_notifications(notifications.as_deref()),
+        ),
+        ("POST", "/api/notifications") => respond_json(
+            stream,
+            "200 OK",
+            api_post_notifications(&req.body, notifications.as_deref()),
+        ),
+        ("POST", "/api/notifications/test") => respond_json(
+            stream,
+            "200 OK",
+            api_test_notification(&req.body, notifications.as_deref()),
+        ),
         ("POST", "/api/settings") => respond_json(
             stream,
             "200 OK",
@@ -621,15 +545,15 @@ fn handle_connection(
             api_post_oid_overrides(&req.body, &cfg, &cfg_path),
         ),
         ("POST", "/api/discovery/scan") => {
-            respond_json(stream, "200 OK", api_scan_start(&req.body, jobs, edition))
+            respond_json(stream, "200 OK", api_scan_start(&req.body, jobs, limits))
         }
         ("POST", "/api/discovery/topology") => respond_json(
             stream,
             "200 OK",
-            api_discovery_topology(&req.body, &cfg, &repo, edition),
+            api_discovery_topology(&req.body, &cfg, &repo, limits),
         ),
         ("POST", "/api/discovery/register") => {
-            respond_json(stream, "200 OK", api_register(&req.body, &repo, edition))
+            respond_json(stream, "200 OK", api_register(&req.body, &repo, limits))
         }
         _ => respond_json(
             stream,
@@ -1105,7 +1029,6 @@ fn api_device_detail(
         let alignment_errors_delta = prev.map(|p| counter32_delta(p.alignment_errors, s.alignment_errors)).unwrap_or(0);
         let frame_too_longs_delta = prev.map(|p| counter32_delta(p.frame_too_longs, s.frame_too_longs)).unwrap_or(0);
         let internal_mac_receive_errors_delta = prev.map(|p| counter32_delta(p.internal_mac_receive_errors, s.internal_mac_receive_errors)).unwrap_or(0);
-        let predictive = crate::monitor::predictive::evaluate_predictive(&recent);
         let link_status = effective_interface_link_status(&device.status, &s.link_status);
         let health_status = classify_interface_diagnostic(
             &link_status,
@@ -1116,12 +1039,8 @@ fn api_device_detail(
             late_collisions_delta,
         );
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","predictive_status":{{"error_ratio":{:.8},"trend_warning":{},"dom_warning":{},"rx_optical_power_dbm":{}}},"metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}"}}"#,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}"}}"#,
             s.if_index, escape_json(&s.if_name), escape_json(&link_status), health_status,
-            predictive.map(|value| value.error_ratio).unwrap_or(0.0),
-            predictive.map(|value| value.trend_warning).unwrap_or(false),
-            predictive.map(|value| value.dom_warning).unwrap_or(false),
-            predictive.and_then(|value| value.rx_optical_power_dbm).map(|value| format!("{value:.2}")).unwrap_or_else(|| "null".to_string()),
             s.in_errors, in_errors_delta,
             s.out_errors, out_errors_delta,
             s.in_discards, in_discards_delta,
@@ -1413,60 +1332,36 @@ fn api_post_settings(
     r#"{"ok":true}"#.to_string()
 }
 
-fn api_get_notifications(provider: Option<&dyn NotificationSettingsProvider>) -> (String, String) {
-    match provider {
-        Some(provider) => ("200 OK".to_string(), provider.load_json()),
-        None => (
-            "404 Not Found".to_string(),
-            r#"{"error":"notification settings are available in the Enterprise edition"}"#
-                .to_string(),
-        ),
-    }
+fn api_get_notifications(provider: Option<&dyn NotificationSettingsProvider>) -> String {
+    provider
+        .map(NotificationSettingsProvider::load_json)
+        .unwrap_or_else(|| r#"{"error":"notification settings unavailable"}"#.to_string())
 }
 
 fn api_post_notifications(
     body: &str,
     provider: Option<&dyn NotificationSettingsProvider>,
-) -> (String, String) {
+) -> String {
     let Some(provider) = provider else {
-        return (
-            "404 Not Found".to_string(),
-            r#"{"error":"notification settings are available in the Enterprise edition"}"#
-                .to_string(),
-        );
+        return r#"{"error":"notification settings unavailable"}"#.to_string();
     };
-
     match provider.save_json(body) {
-        Ok(()) => ("200 OK".to_string(), r#"{"ok":true}"#.to_string()),
-        Err(err) => (
-            "400 Bad Request".to_string(),
-            format!(r#"{{"error":"{}"}}"#, escape_json(&err)),
-        ),
+        Ok(()) => r#"{"ok":true}"#.to_string(),
+        Err(error) => format!(r#"{{"error":"{}"}}"#, escape_json(&error)),
     }
 }
 
 fn api_test_notification(
     body: &str,
     provider: Option<&dyn NotificationSettingsProvider>,
-) -> (String, String) {
+) -> String {
     let Some(provider) = provider else {
-        return (
-            "404 Not Found".to_string(),
-            r#"{"error":"notification settings are available in the Enterprise edition"}"#
-                .to_string(),
-        );
+        return r#"{"error":"notification settings unavailable"}"#.to_string();
     };
-
     let channel = extract_json_str(body, "channel").unwrap_or_else(|| "all".to_string());
     match provider.send_test(&channel) {
-        Ok(message) => (
-            "200 OK".to_string(),
-            format!(r#"{{"ok":true,"message":"{}"}}"#, escape_json(&message)),
-        ),
-        Err(err) => (
-            "502 Bad Gateway".to_string(),
-            format!(r#"{{"error":"{}"}}"#, escape_json(&err)),
-        ),
+        Ok(message) => format!(r#"{{"ok":true,"message":"{}"}}"#, escape_json(&message)),
+        Err(error) => format!(r#"{{"error":"{}"}}"#, escape_json(&error)),
     }
 }
 
@@ -1626,14 +1521,14 @@ fn extract_interface_from_alert(alert_type: &str, details: &str) -> String {
 /// POST /api/discovery/scan
 /// Body: cidr=...&community=...&max_hosts=...
 /// Returns immediately with {"job_id":"..."} then caller polls GET /api/discovery/scan/<id>
-fn api_scan_start(body: &str, jobs: JobStore, edition: WebEdition) -> String {
+fn api_scan_start(body: &str, jobs: JobStore, limits: WebLimits) -> String {
     let params = parse_form(body);
     let cidr = params.get("cidr").cloned().unwrap_or_default();
     let community = params
         .get("community")
         .cloned()
         .unwrap_or_else(|| "public".to_string());
-    // max_hosts はクライアントが CIDR から計算して送る実際のホスト数。Community版は単一サブネット(/24以上)に限定。
+    // max_hosts is calculated by the client from the requested CIDRs.
     let max_hosts: usize = params
         .get("max_hosts")
         .and_then(|s| s.parse().ok())
@@ -1643,7 +1538,7 @@ fn api_scan_start(body: &str, jobs: JobStore, edition: WebEdition) -> String {
         return r#"{"error":"cidr is required"}"#.to_string();
     }
 
-    let hosts = match enumerate_discovery_hosts(&cidr, edition) {
+    let hosts = match enumerate_discovery_hosts(&cidr, limits) {
         Ok(hosts) => hosts,
         Err(err) => return format!(r#"{{"error":"{}"}}"#, escape_json(&err.to_string())),
     };
@@ -1672,7 +1567,7 @@ fn api_scan_start(body: &str, jobs: JobStore, edition: WebEdition) -> String {
     // Spawn background scan thread
     let job_id_thread = job_id.clone();
     std::thread::spawn(move || {
-        run_scan_job(job_id_thread, cidr, community, max_hosts, jobs, edition);
+        run_scan_job(job_id_thread, cidr, community, max_hosts, jobs, limits);
     });
 
     format!(r#"{{"job_id":"{job_id}","total":{host_count}}}"#)
@@ -1684,14 +1579,14 @@ fn run_scan_job(
     community: String,
     max_hosts: usize,
     jobs: JobStore,
-    edition: WebEdition,
+    limits: WebLimits,
 ) {
     use crate::snmp::SnmpClient;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const CONCURRENCY: usize = 256;
 
-    let hosts = match enumerate_discovery_hosts(&cidr, edition) {
+    let hosts = match enumerate_discovery_hosts(&cidr, limits) {
         Ok(h) => h,
         Err(err) => {
             if let Ok(mut store) = jobs.lock()
@@ -1761,7 +1656,7 @@ fn run_scan_job(
 
 fn enumerate_discovery_hosts(
     cidr_input: &str,
-    edition: WebEdition,
+    limits: WebLimits,
 ) -> Result<Vec<std::net::Ipv4Addr>, AppError> {
     let cidrs = cidr_input
         .split(',')
@@ -1772,15 +1667,18 @@ fn enumerate_discovery_hosts(
     if cidrs.is_empty() {
         return Err(AppError::Validation("cidr is required".to_string()));
     }
-    if !edition.is_enterprise() && cidrs.len() > 1 {
+    if limits
+        .max_discovery_cidrs
+        .is_some_and(|limit| cidrs.len() > limit)
+    {
         return Err(AppError::Validation(
-            "Community版では CIDR を1つだけ指定してください".to_string(),
+            "too many CIDR ranges requested".to_string(),
         ));
     }
 
     let mut hosts = Vec::new();
     for cidr in cidrs {
-        if !edition.is_enterprise() {
+        if limits.max_discovery_cidrs.is_some() {
             crate::device::discovery::validate_community_scan_range(cidr)?;
         }
         hosts.extend(crate::device::discovery::enumerate_cidr_hosts(cidr)?);
@@ -1845,7 +1743,7 @@ fn api_discovery_topology(
     body: &str,
     cfg: &Arc<Mutex<AppConfig>>,
     repo: &Arc<Mutex<Repository>>,
-    edition: WebEdition,
+    limits: WebLimits,
 ) -> String {
     let params = parse_form(body);
     let seed_ip = params.get("seed_ip").cloned().unwrap_or_default();
@@ -1867,7 +1765,7 @@ fn api_discovery_topology(
         Ok(mut report) => {
             enrich_topology_nodes(&mut report, repo);
             annotate_edge_health(&mut report);
-            report.apply_node_limit(edition);
+            report.apply_node_limit(limits);
             report.to_json()
         }
         Err(err) => format!(r#"{{"error":"{}"}}"#, escape_json(&err.to_string())),
@@ -2017,24 +1915,12 @@ fn enrich_topology_nodes(report: &mut WebTopologyReport, repo: &Arc<Mutex<Reposi
                 .map(|sample| {
                     let delta = deltas.get(&sample.if_index).copied().unwrap_or_default();
                     let (health_status, alerts) = evaluate_port_health(&delta);
-                    let predictive_warning = crate::monitor::predictive::evaluate_predictive(
-                        &repo
-                            .get_recent_interface_samples(device_id, sample.if_index, 3)
-                            .unwrap_or_default(),
-                    )
-                    .map(|indicators| {
-                        indicators.error_ratio_warning
-                            || indicators.trend_warning
-                            || indicators.dom_warning
-                    })
-                    .unwrap_or(false);
                     WebTopologyInterface {
                         if_index: Some(i64::from(sample.if_index)),
                         if_name: sample.if_name,
                         link_status: sample.link_status,
                         metrics: delta,
                         health_status,
-                        predictive_warning,
                         alerts,
                     }
                 })
@@ -2095,7 +1981,6 @@ fn annotate_edge_health(report: &mut WebTopologyReport) {
         if iface.health_status != "Healthy" {
             edge.health_status = Some(iface.health_status.clone());
         }
-        edge.predictive_warning = iface.predictive_warning;
     }
 }
 
@@ -2128,7 +2013,6 @@ impl WebTopologyReport {
                     link_status: "unknown".to_string(),
                     metrics: InterfacePortDelta::default(),
                     health_status: "Healthy".to_string(),
-                    predictive_warning: false,
                     alerts: Vec::new(),
                 })
                 .collect(),
@@ -2160,9 +2044,8 @@ impl WebTopologyReport {
         self.nodes = nodes;
     }
 
-    /// Community 版のノード上限を適用する。Enterprise 版では無制限。
-    fn apply_node_limit(&mut self, edition: WebEdition) {
-        self.node_limit = edition.node_limit();
+    fn apply_node_limit(&mut self, limits: WebLimits) {
+        self.node_limit = limits.max_devices;
         let Some(limit) = self.node_limit else {
             self.hidden_nodes = 0;
             return;
@@ -2203,11 +2086,7 @@ impl WebTopologyReport {
         format!(
             r#"{{"seed_ip":"{}","edition":"{}","node_limit":{},"total_nodes":{},"hidden_nodes":{},"nodes":[{}],"edges":[{}],"warnings":[{}]}}"#,
             escape_json(&self.seed_ip),
-            if self.node_limit.is_none() {
-                "enterprise"
-            } else {
-                "community"
-            },
+            "configured",
             self.node_limit
                 .map(|limit| limit.to_string())
                 .unwrap_or_else(|| "null".to_string()),
@@ -2227,7 +2106,6 @@ struct WebTopologyInterface {
     link_status: String,
     metrics: InterfacePortDelta,
     health_status: String,
-    predictive_warning: bool,
     alerts: Vec<String>,
 }
 
@@ -2240,7 +2118,7 @@ impl WebTopologyInterface {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","metrics":{{"in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"late_collisions_delta":{}}},"health_status":"{}","predictive_warning":{},"alerts":[{}]}}"#,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","metrics":{{"in_errors_delta":{},"out_errors_delta":{},"in_discards_delta":{},"out_discards_delta":{},"late_collisions_delta":{}}},"health_status":"{}","alerts":[{}]}}"#,
             json_opt_i64(self.if_index),
             escape_json(&self.if_name),
             escape_json(&self.link_status),
@@ -2250,7 +2128,6 @@ impl WebTopologyInterface {
             self.metrics.out_discards_delta,
             self.metrics.late_collisions_delta,
             escape_json(&self.health_status),
-            self.predictive_warning,
             alerts
         )
     }
@@ -2312,13 +2189,12 @@ struct WebTopologyEdge {
     remote_hostname: Option<String>,
     remote_port: Option<String>,
     health_status: Option<String>,
-    predictive_warning: bool,
 }
 
 impl WebTopologyEdge {
     fn to_json(&self) -> String {
         format!(
-            r#"{{"id":"{}","protocol":"{}","source":"{}","target":"{}","label":"{}","local_ip":"{}","local_if_index":{},"local_port":"{}","remote_ip":"{}","remote_hostname":"{}","remote_port":"{}","health_status":"{}","predictive_warning":{}}}"#,
+            r#"{{"id":"{}","protocol":"{}","source":"{}","target":"{}","label":"{}","local_ip":"{}","local_if_index":{},"local_port":"{}","remote_ip":"{}","remote_hostname":"{}","remote_port":"{}","health_status":"{}"}}"#,
             escape_json(&self.id),
             escape_json(&self.protocol),
             escape_json(&self.source),
@@ -2331,7 +2207,6 @@ impl WebTopologyEdge {
             escape_json(self.remote_hostname.as_deref().unwrap_or("")),
             escape_json(self.remote_port.as_deref().unwrap_or("")),
             escape_json(self.health_status.as_deref().unwrap_or("Healthy")),
-            self.predictive_warning,
         )
     }
 
@@ -2407,7 +2282,6 @@ fn parse_lldp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec
             remote_hostname: row.remote_hostname,
             remote_port: row.remote_port,
             health_status: None,
-            predictive_warning: false,
         })
         .collect()
 }
@@ -2467,7 +2341,6 @@ fn parse_cdp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec<
             remote_hostname: row.remote_hostname,
             remote_port: row.remote_port,
             health_status: None,
-            predictive_warning: false,
         })
         .collect()
 }
@@ -2519,7 +2392,7 @@ fn snmp_value_to_ip(value: &crate::snmp::SnmpValue) -> Option<String> {
 }
 
 /// POST /api/discovery/register
-fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String {
+fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) -> String {
     let devices = parse_register_body(body);
     if devices.is_empty() {
         return r#"{"error":"no devices provided"}"#.to_string();
@@ -2530,8 +2403,8 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, edition: WebEdition) 
     };
 
     let current_count = repo.list_devices().map(|d| d.len()).unwrap_or(0);
-    let mut remaining_slots = edition
-        .node_limit()
+    let mut remaining_slots = limits
+        .max_devices
         .map(|limit| limit.saturating_sub(current_count));
 
     let mut registered = Vec::new();
@@ -2597,7 +2470,7 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, edition: WebEdition) 
 fn page_dashboard(
     repo: &Arc<Mutex<Repository>>,
     cfg: &Arc<Mutex<AppConfig>>,
-    edition: WebEdition,
+    extension: Option<&dyn WebExtensionProvider>,
 ) -> String {
     let spike_threshold = cfg.lock().map(|c| c.alert.spike_threshold).unwrap_or(10);
     let (devices, spikes_count, devices_json, recent_alerts) = {
@@ -2646,8 +2519,11 @@ fn page_dashboard(
     html.push_str("<title>TracePulse \u{2013} Dashboard</title>");
     html.push_str(COMMON_CSS);
     html.push_str(DASHBOARD_CSS);
+    if let Some(extension) = extension {
+        html.push_str(&extension.dashboard_styles());
+    }
     html.push_str("</head><body data-title-key='dashboard_title'>");
-    html.push_str(NAV_HTML);
+    html.push_str(&navigation_html(extension));
     html.push_str("<main><h1 data-i18n='dashboard_title'>Dashboard</h1><div id='summary-cards' class='summary-cards'>");
     html.push_str(&format!("<div class='card card-online'><div class='card-num'>{healthy}</div><div class='card-label' data-i18n='online'>Online</div></div>"));
     html.push_str(&format!("<div class='card card-warning'><div class='card-num'>{warning}</div><div class='card-label' data-i18n='warning'>Warning</div></div>"));
@@ -2656,29 +2532,10 @@ fn page_dashboard(
     html.push_str(&format!("<div class='{spike_card_cls}'><div class='card-num'>{spikes_count}</div><div class='card-label' data-i18n='error_spikes'>Error Spikes</div></div>"));
     html.push_str("</div>");
     html.push_str("<p id='last-refreshed' style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'></p>");
-    if edition.is_enterprise() {
-        html.push_str("<section class='enterprise-analytics-panel'>");
-        html.push_str("<div class='enterprise-analytics-toolbar'><label for='enterprise-scope'>Scope</label><select id='enterprise-scope' onchange='setEnterpriseScope(this.value)'><option value=''>All Devices</option><option value='10.0.0.0/8'>Core (10.0.0.0/8)</option><option value='192.168.0.0/16'>Edge (192.168.0.0/16)</option></select><a class='enterprise-map-link' style='margin-left:auto' href='/flow-explorer'>Open Flow Explorer ↗</a></div>");
-        html.push_str("<div class='enterprise-analytics-grid'>");
-        html.push_str("<article class='enterprise-sankey-article'>");
-        html.push_str("<div class='enterprise-card-heading'>");
-        html.push_str("<div class='sankey-title-group'><h2>Sankey Flow</h2><div class='sankey-help-wrap'><button class='sankey-help-btn' type='button' aria-label='Help' title='Sankey Flow について'>ℹ️</button><div class='sankey-help-popover'><div class='sankey-help-title'>Sankey Flow について</div><div class='sankey-help-body'><p>トラフィックがどのポートを通過し、どこへ向かったかの「流動経路」と「流量」を示しています。</p><ul><li><strong>左 ➔ 右:</strong> 送信元 IP ➔ 入力 IF ➔ 出力 IF ➔ 宛先 IP</li><li><strong>帯の太さ:</strong> トラフィック量（Bps / PPS）</li></ul></div></div></div></div>");
-        html.push_str("</div>");
-        html.push_str("<div class='sankey-headers'>");
-        html.push_str("<div class='sankey-col-header col-src'><span class='col-dot dot-src'></span><span class='col-title'>Source IP</span><span class='col-sub'>送信元</span></div>");
-        html.push_str("<div class='sankey-col-header col-ing'><span class='col-dot dot-ing'></span><span class='col-title'>Ingress IF</span><span class='col-sub'>入力IF</span></div>");
-        html.push_str("<div class='sankey-col-header col-egr'><span class='col-dot dot-egr'></span><span class='col-title'>Egress IF</span><span class='col-sub'>出力IF</span></div>");
-        html.push_str("<div class='sankey-col-header col-dst'><span class='col-dot dot-dst'></span><span class='col-title'>Destination IP</span><span class='col-sub'>宛先</span></div>");
-        html.push_str("</div>");
-        html.push_str("<div id='enterprise-sankey' class='enterprise-sankey'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading flow records...</span></div></div>");
-        html.push_str("</article>");
-        html.push_str("<article class='enterprise-geo-article'><div class='enterprise-card-heading'><h2>GeoIP / ASN</h2><a class='enterprise-map-link' href='/geo-map'>Open full-screen map ↗</a></div><div id='enterprise-geoip-list' class='enterprise-geoip-list'><div class='enterprise-loading-wrap'><span class='enterprise-spinner'></span><span>Loading GeoIP / ASN data...</span></div></div></article>");
-        html.push_str(
-            "<article class='enterprise-bgp-article'><h2>BGP / QoS</h2><div id='enterprise-bgp-qos'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>",
-        );
-        html.push_str("<article class='enterprise-threat-article'><h2>Threat Badges</h2><div id='enterprise-threat-badges'><div class='enterprise-loading-wrap' style='min-height:40px'><span class='enterprise-spinner' style='width:1rem;height:1rem;'></span><span>Loading...</span></div></div></article>");
-        html.push_str("</div>");
-        html.push_str("</section>");
+    if let Some(extension) = extension {
+        if let Some(markup) = extension.dashboard_html() {
+            html.push_str(&markup);
+        }
     }
     html.push_str("<table id='dash-table'><thead><tr>");
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");
@@ -2718,57 +2575,19 @@ fn page_dashboard(
     html.push_str("<script>\nvar DEVICES = [");
     html.push_str(&devices_json.join(","));
     html.push_str("];\n");
-    html.push_str("</script><script src='/static/js/echarts.min.js'></script><script src='/static/js/i18n.js?v=2'></script><script src='/static/js/dashboard.js?v=2'></script>");
-    if edition.is_enterprise() {
-        html.push_str("<script src='/static/js/enterprise-analytics.js?v=6'></script>");
+    html.push_str("</script><script src='/static/js/i18n.js?v=2'></script><script src='/static/js/dashboard.js?v=2'></script>");
+    if let Some(extension) = extension {
+        html.push_str(&extension.dashboard_scripts());
     }
     html.push_str("</body></html>");
     html
 }
 
-fn page_geo_map() -> String {
-    format!(
-        "{}<html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>TracePulse - GeoIP Map</title>{}<style>html,body{{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#0b1220;color:#e2e8f0;font-family:system-ui,sans-serif}}#geo-map{{position:absolute;top:0;left:0;width:100vw;height:100vh;z-index:1}}.geo-map-nav{{position:fixed;z-index:10;top:16px;left:20px;display:flex;align-items:center;gap:12px;padding:8px 14px;background:rgba(15,23,42,.85);border:1px solid #334155;border-radius:6px;backdrop-filter:blur(6px)}}.geo-map-nav a{{color:#38bdf8;text-decoration:none;font-size:13px;font-weight:600}}.geo-map-nav span{{color:#94a3b8;font-size:13px}}#geo-panel{{position:fixed;z-index:20;top:0;right:0;width:min(380px,90vw);height:100%;padding:24px;background:rgba(17,28,48,.95);border-left:1px solid #334155;transform:translateX(100%);transition:transform .25s ease;box-sizing:border-box;overflow-y:auto;backdrop-filter:blur(8px)}}#geo-panel.open{{transform:translateX(0)}}.geo-panel-close{{float:right;background:#334155;color:#fff;border:0;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px}}</style></head><body><div class='geo-map-nav'><a href='/'>&#8592; Dashboard</a><span>|</span><strong>GeoIP Traffic Map</strong></div><div id='geo-map'></div><aside id='geo-panel'></aside><script src='/static/js/echarts.min.js'></script><script src='/static/js/geo-map.js?v=4'></script></body></html>",
-        HTML_DOCTYPE, COMMON_CSS
-    )
-}
-
-fn page_flow_explorer() -> String {
-    let mut html = String::new();
-    html.push_str(HTML_DOCTYPE);
-    html.push_str("<html lang='en'><head>");
-    html.push_str("<meta charset='utf-8'>");
-    html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
-    html.push_str("<script src='/static/js/theme.js'></script>");
-    html.push_str("<title>TracePulse \u{2013} Flow Explorer</title>");
-    html.push_str(COMMON_CSS);
-    html.push_str(FLOW_EXPLORER_CSS);
-    html.push_str("</head><body data-title-key='flow_explorer_title'>");
-    html.push_str(NAV_HTML);
-    html.push_str("<main><h1>Flow Explorer</h1>");
-    html.push_str("<p class='fx-hint'>Drag-select a time range on the timeline (brush) or set filters below, then click Apply. The URL updates so the current view can be shared directly.</p>");
-    html.push_str("<div class='fx-filter-bar'>");
-    html.push_str("<div class='fx-field'><label>Source IP</label><input id='fx-src-ip' type='text' placeholder='10.0.0.1'></div>");
-    html.push_str("<div class='fx-field'><label>Destination IP</label><input id='fx-dst-ip' type='text' placeholder='198.51.100.1'></div>");
-    html.push_str("<div class='fx-field'><label>Port</label><input id='fx-port' type='number' min='0' max='65535' placeholder='443'></div>");
-    html.push_str("<div class='fx-field'><label>Protocol</label><input id='fx-proto' type='text' placeholder='TCP'></div>");
-    html.push_str("<div class='fx-field'><label>Interface Index</label><input id='fx-if-index' type='number' min='0' placeholder='1'></div>");
-    html.push_str("<div class='fx-field'><label>Compare with</label><select id='fx-compare-mode' onchange='window.FlowExplorer.setCompareMode(this.value)'><option value=''>Off</option><option value='1d'>Previous Day</option><option value='7d'>Previous Week (same weekday)</option></select></div>");
-    html.push_str("<div class='fx-field fx-actions'><button class='btn btn-primary' onclick='window.FlowExplorer.applyFilters()'>Apply</button><button class='btn btn-secondary' onclick='window.FlowExplorer.resetFilters()'>Reset</button></div>");
-    html.push_str("</div>");
-    html.push_str("<section class='detail-section'><h2>Timeline (drag to select a time range)</h2><div id='flow-explorer-timeline' class='fx-timeline'></div></section>");
-    html.push_str("<section class='detail-section'><div class='fx-section-heading'><h2>Route &amp; Zone Traffic Matrix</h2><span class='fx-hint' style='margin:0'>Click a Sankey node or link to filter the Flow Detail table below.</span></div>");
-    html.push_str("<div id='flow-explorer-zone-matrix' class='fx-zone-matrix'></div>");
-    html.push_str("<div id='flow-explorer-sankey' class='fx-sankey'></div></section>");
-    html.push_str("<section class='detail-section'><div class='fx-section-heading'><h2>Flow Detail</h2><span id='flow-explorer-summary' class='fx-summary'></span></div><div class='table-scroll'><table id='flow-explorer-table'><thead><tr><th>Time</th><th>Source</th><th>Destination</th><th>Proto</th><th>Ingress</th><th>Egress</th><th>Bytes</th><th>Packets</th></tr></thead><tbody id='flow-explorer-tbody'><tr><td colspan='8' class='empty'>Select a time range or apply filters to load flows.</td></tr></tbody></table></div></section>");
-    html.push_str("<section class='detail-section'><h2>Top Talkers (within current selection)</h2><div id='flow-explorer-top-talkers' class='fx-top-talkers'></div></section>");
-    html.push_str("<section class='detail-section'><div class='fx-section-heading'><h2>Top Talkers by Axis</h2><select id='fx-axis-select' onchange='window.FlowExplorer.setAxis(this.value)'><option value='ip'>IP Address</option><option value='app'>Application (L7)</option><option value='country'>Country (GeoIP)</option><option value='dscp'>DSCP (QoS)</option></select></div><div class='fx-axis-grid'><div id='flow-explorer-axis-chart' class='fx-axis-chart'></div><div class='table-scroll'><table id='flow-explorer-axis-table'><thead><tr><th>Rank</th><th>Label</th><th>Bytes</th><th>Share</th></tr></thead><tbody id='flow-explorer-axis-tbody'><tr><td colspan='4' class='empty'>Loading...</td></tr></tbody></table></div></div></section>");
-    html.push_str("</main>");
-    html.push_str("<script src='/static/js/echarts.min.js'></script><script src='/static/js/i18n.js'></script><script src='/static/js/flow-explorer.js'></script></body></html>");
-    html
-}
-
-fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> String {
+fn page_settings(
+    cfg: &Arc<Mutex<AppConfig>>,
+    notifications_enabled: bool,
+    extension: Option<&dyn WebExtensionProvider>,
+) -> String {
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
     html.push_str("<html lang='en'><head>");
@@ -2779,11 +2598,20 @@ fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> St
     html.push_str(COMMON_CSS);
     html.push_str(SETTINGS_CSS);
     html.push_str("</head><body data-title-key='settings_title'>");
-    html.push_str(NAV_HTML);
-    html.push_str(SETTINGS_HTML);
+    html.push_str(&navigation_html(extension));
+    html.push_str(
+        SETTINGS_HTML
+            .strip_suffix("</main>")
+            .unwrap_or(SETTINGS_HTML),
+    );
     if notifications_enabled {
         html.push_str(NOTIFICATIONS_HTML);
     }
+    if let Some(extension) = extension {
+        html.push_str(&extension.settings_html());
+    }
+    html.push_str(SETTINGS_ACTIONS_HTML);
+    html.push_str("</main>");
     html.push_str("<script>\n");
     // 現在値をサーバー側でレンダリングして初期値として埋め込む
     if let Ok(c) = cfg.lock() {
@@ -2804,6 +2632,9 @@ fn page_settings(cfg: &Arc<Mutex<AppConfig>>, notifications_enabled: bool) -> St
     html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/settings.js'></script>");
     if notifications_enabled {
         html.push_str("<script src='/static/js/notifications.js'></script>");
+    }
+    if let Some(extension) = extension {
+        html.push_str(&extension.settings_scripts());
     }
     html.push_str("</body></html>");
     html
@@ -2936,7 +2767,11 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     html
 }
 
-fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String {
+fn page_discovery(
+    repo: &Arc<Mutex<Repository>>,
+    limits: WebLimits,
+    extension: Option<&dyn WebExtensionProvider>,
+) -> String {
     let existing_ips: Vec<String> = repo
         .lock()
         .ok()
@@ -2963,7 +2798,7 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String 
     html.push_str(COMMON_CSS);
     html.push_str(DISCOVERY_CSS);
     html.push_str("</head><body data-title-key='discovery_title'>");
-    html.push_str(NAV_HTML);
+    html.push_str(&navigation_html(extension));
     html.push_str(DISCOVERY_HTML);
     html.push_str("<script>\nconst EXISTING = new Set(");
     html.push_str(&existing_set);
@@ -2971,10 +2806,13 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String 
     html.push_str(&existing_set);
     html.push_str(");\n");
     html.push_str(&format!(
-        "window.TRACEPULSE_WEB_EDITION = {{enterprise:{},nodeLimit:{}}};\n",
-        edition.is_enterprise(),
-        edition
-            .node_limit()
+        "window.TRACEPULSE_DISCOVERY_LIMITS = {{maxCidrs:{},nodeLimit:{}}};\n",
+        limits
+            .max_discovery_cidrs
+            .map(|limit| limit.to_string())
+            .unwrap_or_else(|| "null".to_string()),
+        limits
+            .max_devices
             .map(|limit| limit.to_string())
             .unwrap_or_else(|| "null".to_string())
     ));
@@ -2982,7 +2820,11 @@ fn page_discovery(repo: &Arc<Mutex<Repository>>, edition: WebEdition) -> String 
     html
 }
 
-fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
+fn page_diagnostics(
+    path: &str,
+    cfg: &Arc<Mutex<AppConfig>>,
+    extension: Option<&dyn WebExtensionProvider>,
+) -> String {
     use crate::snmp::SnmpClient;
 
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
@@ -3239,7 +3081,7 @@ fn page_diagnostics(path: &str, cfg: &Arc<Mutex<AppConfig>>) -> String {
     html.push_str(SETTINGS_CSS);
     html.push_str(DIAGNOSTICS_CSS);
     html.push_str("</head><body data-title-key='diagnostics_title'>");
-    html.push_str(NAV_HTML);
+    html.push_str(&navigation_html(extension));
     html.push_str("<main>");
     html.push_str("<h1 data-i18n='diagnostics_title'>SNMP Diagnostics</h1>");
     html.push_str("<div class='settings-section'>");
@@ -3444,10 +3286,25 @@ const COMMON_CSS: &str = "<style>
   html[data-theme='light'] .counter-delta.duplex { color:#6d28d9; }
 </style>";
 
+fn navigation_html(extension: Option<&dyn WebExtensionProvider>) -> String {
+    let mut navigation = NAV_HTML.to_string();
+    if let Some(extension) = extension {
+        navigation = navigation.replacen(
+            "<a href='/discovery' data-i18n='nav_discovery'>Discovery</a>",
+            &format!(
+                "{}<a href='/discovery' data-i18n='nav_discovery'>Discovery</a>",
+                extension.navigation_html()
+            ),
+            1,
+        );
+    }
+    navigation
+}
+
 const NAV_HTML: &str = "<nav>
   <a class='brand' href='/'>TracePulse</a>
-  <a href='/' data-i18n='nav_dashboard'>Dashboard</a>
-  <a href='/discovery' data-i18n='nav_discovery'>Discovery</a>
+    <a href='/' data-i18n='nav_dashboard'>Dashboard</a>
+    <a href='/discovery' data-i18n='nav_discovery'>Discovery</a>
   <a href='/diagnostics' data-i18n='nav_diagnostics'>Diagnostics</a>
   <a href='/settings' data-i18n='nav_settings'>Settings</a>
   <div class='nav-spacer'></div>
@@ -3575,62 +3432,16 @@ const SETTINGS_HTML: &str = "<main>
   </div>
 </div>
 
-<div class='actions'>
-  <button class='btn btn-primary' onclick='saveSettings()' data-i18n='save_settings'>Save Settings</button>
-  <button class='btn' onclick='resetDefaults()' style='background:#334155' data-i18n='reset_defaults'>Reset to Defaults</button>
-  <span class='toast toast-ok' id='toast-ok' data-i18n='settings_saved'>&#10003; Settings saved</span>
-  <span class='toast toast-err' id='toast-err'></span>
-</div>
 </main>";
 
-const NOTIFICATIONS_HTML: &str = "<main>
-<div class='settings-section'>
-  <h2 data-i18n='notifications'>Alert Notifications (Slack / Teams)</h2>
+const SETTINGS_ACTIONS_HTML: &str = "<div class='actions'>
+    <button class='btn btn-primary' onclick='saveSettings()' data-i18n='save_settings'>Save Settings</button>
+    <button class='btn' onclick='resetDefaults()' style='background:#334155' data-i18n='reset_defaults'>Reset to Defaults</button>
+    <span class='toast toast-ok' id='toast-ok' data-i18n='settings_saved'>&#10003; Settings saved</span>
+    <span class='toast toast-err' id='toast-err'></span>
+</div>";
 
-  <div class='field-row'>
-    <div class='field-group'>
-      <label><input type='checkbox' id='slack_enabled'> <span data-i18n='slack_enabled'>Enable Slack notifications</span></label>
-      <input type='text' id='slack_url' placeholder='https://hooks.slack.com/services/...'>
-      <div class='field-hint' data-i18n='webhook_url_hint'>Leave empty to fall back to the environment variable below. ${ENV_NAME} placeholders are expanded.</div>
-      <input type='text' id='slack_url_env' placeholder='TRACEPULSE_SLACK_WEBHOOK_URL'>
-      <div class='field-hint' data-i18n='webhook_env_hint'>Environment variable used when no URL is set</div>
-      <div class='actions'>
-        <button class='btn' style='background:#334155' onclick=\"testNotification('slack')\" data-i18n='send_test'>Send test notification</button>
-      </div>
-    </div>
-    <div class='field-group'>
-      <label><input type='checkbox' id='teams_enabled'> <span data-i18n='teams_enabled'>Enable Teams notifications</span></label>
-      <input type='text' id='teams_url' placeholder='https://outlook.office.com/webhook/...'>
-      <div class='field-hint' data-i18n='webhook_url_hint'>Leave empty to fall back to the environment variable below. ${ENV_NAME} placeholders are expanded.</div>
-      <input type='text' id='teams_url_env' placeholder='TRACEPULSE_TEAMS_WEBHOOK_URL'>
-      <div class='field-hint' data-i18n='webhook_env_hint'>Environment variable used when no URL is set</div>
-      <div class='actions'>
-        <button class='btn' style='background:#334155' onclick=\"testNotification('teams')\" data-i18n='send_test'>Send test notification</button>
-      </div>
-    </div>
-  </div>
-
-  <div class='field-row'>
-    <div class='field-group'>
-      <label data-i18n='flap_window'>Flap Guard Window (seconds)</label>
-      <input type='number' id='flap_window' min='0' max='600' step='1'>
-      <div class='field-hint' data-i18n='flap_window_hint'>Alerts of the same kind are aggregated within this window</div>
-    </div>
-    <div class='field-group'>
-      <label data-i18n='retry_max_attempts'>Retry Attempts</label>
-      <input type='number' id='retry_attempts' min='1' max='10' step='1'>
-      <div class='field-hint' data-i18n='retry_max_attempts_hint'>Number of webhook delivery attempts (1 – 10)</div>
-    </div>
-  </div>
-
-  <div class='actions'>
-    <button class='btn btn-primary' onclick='saveNotifications()' data-i18n='save_notifications'>Save Notification Settings</button>
-    <button class='btn' style='background:#334155' onclick=\"testNotification('all')\" data-i18n='send_test_all'>Test all enabled channels</button>
-    <span class='toast toast-ok' id='ntoast-ok'></span>
-    <span class='toast toast-err' id='ntoast-err'></span>
-  </div>
-</div>
-</main>";
+const NOTIFICATIONS_HTML: &str = "<section class='settings-section'><h2 data-i18n='notifications'>Alert Notifications (Slack / Teams)</h2><div class='field-row'><div class='field-group'><label><input type='checkbox' id='slack_enabled'> <span data-i18n='slack_enabled'>Enable Slack notifications</span></label><input type='text' id='slack_url' placeholder='https://hooks.slack.com/services/...'><input type='text' id='slack_url_env' placeholder='TRACEPULSE_SLACK_WEBHOOK_URL'></div><div class='field-group'><label><input type='checkbox' id='teams_enabled'> <span data-i18n='teams_enabled'>Enable Teams notifications</span></label><input type='text' id='teams_url' placeholder='https://outlook.office.com/webhook/...'><input type='text' id='teams_url_env' placeholder='TRACEPULSE_TEAMS_WEBHOOK_URL'></div></div><div class='field-row'><div class='field-group'><label data-i18n='flap_window'>Flap Guard Window (seconds)</label><input type='number' id='flap_window' min='0' max='3600'></div><div class='field-group'><label data-i18n='retry_max_attempts'>Retry Attempts</label><input type='number' id='retry_attempts' min='1' max='10'></div></div><div class='actions'><button class='btn btn-primary' onclick='saveNotifications()' data-i18n='save_notifications'>Save Notification Settings</button><button class='btn' onclick=\"testNotification('all')\" data-i18n='send_test_all'>Test enabled channels</button><span class='toast toast-ok' id='ntoast-ok'></span><span class='toast toast-err' id='ntoast-err'></span></div></section>";
 
 const DIAGNOSTICS_CSS: &str = "<style>
   .diag-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
@@ -3783,12 +3594,6 @@ const DEVICE_DETAIL_CSS: &str = "<style>
 
 const DEVICE_DETAIL_BUNDLE_JS: &str = include_str!("../../frontend/dist/device-detail.js");
 const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js");
-const ENTERPRISE_ANALYTICS_BUNDLE_JS: &str =
-    include_str!("../../frontend/dist/enterprise-analytics.js");
-const GEO_MAP_BUNDLE_JS: &str = include_str!("../../frontend/dist/geo-map.js");
-const FLOW_EXPLORER_BUNDLE_JS: &str = include_str!("../../frontend/dist/flow-explorer.js");
-const ECHARTS_BUNDLE_JS: &str = include_str!("../../frontend/dist/echarts.min.js");
-const WORLD_GEOJSON: &str = include_str!("../../frontend/dist/world.json");
 const SETTINGS_BUNDLE_JS: &str = include_str!("../../frontend/dist/settings.js");
 const NOTIFICATIONS_BUNDLE_JS: &str = include_str!("../../frontend/dist/notifications.js");
 const DIAGNOSTICS_BUNDLE_JS: &str = include_str!("../../frontend/dist/diagnostics.js");
@@ -3812,114 +3617,6 @@ const DASHBOARD_CSS: &str = "<style>
   .btn-row-danger { background:#7f1d1d; color:#fecaca; border:1px solid #991b1b; padding:.3rem .55rem; border-radius:.35rem; font-size:.78rem; cursor:pointer; }
   .btn-row-danger:hover:not(:disabled) { background:#991b1b; }
   .btn-row-danger:disabled { opacity:.55; cursor:not-allowed; }
-    .enterprise-analytics-panel { margin:1.25rem 0; padding:1.1rem; border:1px solid #334155; border-radius:.5rem; background:rgba(15,23,42,.65); }
-    .enterprise-analytics-toolbar { display:flex; align-items:center; gap:.5rem; margin-bottom:.85rem; color:#cbd5e1; }
-    .enterprise-analytics-toolbar select { background:#1e293b; color:#f8fafc; border:1px solid #475569; border-radius:.3rem; padding:.35rem .55rem; }
-    .enterprise-analytics-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
-    .enterprise-analytics-grid article { min-width:0; border:1px solid #334155; border-radius:.4rem; padding:.85rem; background:#0f172a; display:flex; flex-direction:column; }
-    .enterprise-analytics-grid h2 { font-size:.9rem; color:#e2e8f0; margin-bottom:.6rem; }
-    .enterprise-sankey-article { grid-column: 1 / -1; }
-    .enterprise-geo-article { grid-column: 1 / -1; }
-    .enterprise-sankey { width:100%; height:280px; min-height:280px; color:#94a3b8; font-size:.8rem; }
-    .sankey-title-group { display:flex; align-items:center; gap:.45rem; }
-    .sankey-help-wrap { position:relative; display:inline-flex; align-items:center; }
-    .sankey-help-btn { background:none; border:none; cursor:pointer; font-size:.85rem; padding:2px; line-height:1; opacity:.75; transition:opacity .2s; }
-    .sankey-help-btn:hover, .sankey-help-btn:focus { opacity:1; }
-    .sankey-help-popover {
-      display:none; position:absolute; top:calc(100% + 6px); left:0; z-index:30;
-      width:300px; background:#0f172a; border:1px solid #334155; border-radius:.4rem;
-      padding:.75rem .85rem; font-size:.78rem; color:#cbd5e1; box-shadow:0 8px 24px rgba(0,0,0,.6);
-      line-height:1.5; pointer-events:auto;
-    }
-    .sankey-help-wrap:hover .sankey-help-popover,
-    .sankey-help-wrap:focus-within .sankey-help-popover { display:block; }
-    .sankey-help-title { font-weight:700; color:#38bdf8; font-size:.85rem; margin-bottom:.35rem; }
-    .sankey-help-body p { margin:0 0 .4rem; color:#94a3b8; }
-    .sankey-help-body ul { margin:0; padding-left:1.1rem; }
-    .sankey-help-body li { margin-bottom:.25rem; }
-    .sankey-help-body strong { color:#f8fafc; }
-
-    .sankey-headers {
-      display:grid; grid-template-columns:repeat(4, 1fr); gap:.75rem; margin:.3rem 0 .5rem;
-      padding:.45rem .85rem; background:#1e293b; border-radius:.375rem; border:1px solid #334155;
-    }
-    .sankey-col-header { display:flex; align-items:center; gap:.45rem; font-size:.78rem; font-weight:600; color:#e2e8f0; white-space:nowrap; }
-    .sankey-col-header .col-title { font-weight:600; }
-    .sankey-col-header .col-sub { font-size:.7rem; color:#94a3b8; font-weight:400; margin-left:.35rem; }
-    .col-dot { width:.45rem; height:.45rem; border-radius:50%; display:inline-block; flex-shrink:0; }
-    .dot-src { background:#38bdf8; }
-    .dot-ing { background:#34d399; }
-    .dot-egr { background:#fbbf24; }
-    .dot-dst { background:#c084fc; }
-    .enterprise-threat-badge { display:inline-block; margin:.2rem; padding:.2rem .4rem; color:#fecaca; background:#7f1d1d; border:1px solid #ef4444; border-radius:.25rem; font-size:.75rem; font-weight:700; }
-    .enterprise-card-heading { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
-    .enterprise-card-heading h2 { margin:0; }
-    .enterprise-map-link { color:#7dd3fc; font-size:.75rem; text-decoration:none; white-space:nowrap; }
-    .enterprise-geoip-list { display:grid; gap:.65rem; min-height:140px; align-content:start; }
-    .enterprise-class-wrapper { margin-bottom:.65rem; padding-bottom:.65rem; border-bottom:1px solid #1e293b; }
-    .enterprise-class-legend { display:flex; gap:.75rem; font-size:.73rem; color:#cbd5e1; margin-bottom:.35rem; flex-wrap:wrap; }
-    .class-tag { display:inline-flex; align-items:center; gap:.25rem; }
-    .class-dot { width:.45rem; height:.45rem; border-radius:50%; display:inline-block; }
-    .class-priv .class-dot { background:#38bdf8; }
-    .class-inet .class-dot { background:#f97316; }
-    .class-bcast .class-dot { background:#a855f7; }
-    .enterprise-class-track { display:flex; height:.45rem; border-radius:99px; overflow:hidden; background:#1e293b; }
-    .class-seg-priv { background:#38bdf8; height:100%; transition:width .3s; }
-    .class-seg-inet { background:#f97316; height:100%; transition:width .3s; }
-    .class-seg-bcast { background:#a855f7; height:100%; transition:width .3s; }
-    .enterprise-geo-row { display:grid; grid-template-columns:minmax(9rem, 1fr) 2fr auto; gap:.85rem; align-items:center; font-size:.78rem; }
-    .enterprise-geo-label { display:flex; align-items:center; gap:.4rem; min-width:0; }
-    .enterprise-asn-pill { display:inline-block; padding:.1rem .4rem; background:#1e293b; border:1px solid #334155; border-radius:.25rem; font-size:.7rem; font-weight:700; color:#38bdf8; flex-shrink:0; }
-    .enterprise-asn-pill.local { color:#94a3b8; }
-    .enterprise-geo-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#e2e8f0; font-weight:500; }
-    .enterprise-geo-bar { height:.4rem; background:#1e293b; border-radius:99px; overflow:hidden; }
-    .enterprise-geo-bar i { display:block; height:100%; background:#38bdf8; border-radius:inherit; }
-    .enterprise-geo-meta { text-align:right; white-space:nowrap; color:#94a3b8; font-variant-numeric:tabular-nums; }
-    .enterprise-geo-bytes { color:#e2e8f0; font-weight:600; }
-    .enterprise-geo-pct { font-size:.72rem; margin-left:.3rem; }
-    .enterprise-muted { color:#64748b; }
-    .enterprise-loading-wrap { display:flex; align-items:center; justify-content:center; height:100%; min-height:160px; color:#94a3b8; font-size:.84rem; gap:.6rem; }
-    .enterprise-spinner { width:1.2rem; height:1.2rem; border:2px solid #334155; border-top-color:#38bdf8; border-radius:50%; animation:ent-spin .8s linear infinite; flex-shrink:0; }
-    @keyframes ent-spin { to { transform:rotate(360deg); } }
-    @media (max-width:768px) { .enterprise-analytics-grid { grid-template-columns:1fr; } }
-</style>";
-
-const FLOW_EXPLORER_CSS: &str = "<style>
-  .fx-hint { color:#94a3b8; font-size:.85rem; margin:.25rem 0 1rem; }
-  .fx-filter-bar { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-end; margin-bottom:1.25rem; padding:.85rem 1rem; border:1px solid #334155; border-radius:.5rem; background:rgba(15,23,42,.65); }
-  .fx-field { display:flex; flex-direction:column; gap:.25rem; min-width:140px; }
-  .fx-field label { font-size:.78rem; color:#94a3b8; }
-  .fx-field input { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.45rem .6rem; border-radius:.375rem; font-size:.88rem; }
-  .fx-field select { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.45rem .6rem; border-radius:.375rem; font-size:.88rem; }
-  .fx-actions { flex-direction:row; gap:.5rem; align-items:center; }
-  .fx-timeline { width:100%; height:220px; }
-  .fx-section-heading { display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.6rem; }
-  .fx-summary { font-size:.8rem; color:#94a3b8; }
-  #flow-explorer-table { width:100%; border-collapse:collapse; }
-  #flow-explorer-table th, #flow-explorer-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.82rem; text-align:left; white-space:nowrap; }
-  #flow-explorer-table th { color:#94a3b8; }
-  .fx-top-talkers { display:grid; gap:.5rem; }
-  .fx-talker-row { display:grid; grid-template-columns:1fr auto; gap:.75rem; align-items:center; font-size:.82rem; padding:.4rem .6rem; border:1px solid #334155; border-radius:.375rem; background:#0f172a; }
-  .fx-talker-endpoints { color:#e2e8f0; }
-  .fx-talker-bytes { color:#34d399; font-weight:600; white-space:nowrap; }
-  #fx-axis-select { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.4rem .6rem; border-radius:.375rem; font-size:.85rem; }
-  .fx-axis-grid { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:1rem; align-items:start; }
-  .fx-axis-chart { width:100%; height:280px; }
-  #flow-explorer-axis-table { width:100%; border-collapse:collapse; }
-  #flow-explorer-axis-table th, #flow-explorer-axis-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.82rem; text-align:left; }
-  #flow-explorer-axis-table th { color:#94a3b8; }
-  @media (max-width:900px) { .fx-axis-grid { grid-template-columns:1fr; } }
-  .fx-zone-matrix { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:.75rem; margin-bottom:1rem; }
-  .fx-zone-card { border:1px solid #334155; border-radius:.5rem; padding:.75rem .85rem; background:#0f172a; }
-  .fx-zone-card .fx-zone-name { font-size:.78rem; color:#94a3b8; margin-bottom:.35rem; }
-  .fx-zone-card .fx-zone-bytes { font-size:1.05rem; font-weight:700; color:#e2e8f0; }
-  .fx-zone-card .fx-zone-pct { font-size:.82rem; color:#38bdf8; font-weight:600; margin-left:.35rem; }
-  .fx-zone-card.fx-zone-outbound { border-color:#f97316; }
-  .fx-zone-card.fx-zone-outbound .fx-zone-pct { color:#f97316; }
-  .fx-zone-track { height:.4rem; border-radius:99px; overflow:hidden; background:#1e293b; margin-top:.5rem; }
-  .fx-zone-fill { height:100%; }
-  .fx-sankey { width:100%; height:340px; }
-  @media (max-width:900px) { .fx-zone-matrix { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 </style>";
 
 const DISCOVERY_CSS: &str = "<style>
@@ -4257,6 +3954,16 @@ pub(crate) fn run_polling_loop(
     alerts: crate::alert::AlertBroadcaster,
     verbose: bool,
 ) {
+    run_polling_loop_with_observer(config, repo, alerts, None, verbose);
+}
+
+fn run_polling_loop_with_observer(
+    config: Arc<Mutex<AppConfig>>,
+    repo: Arc<Mutex<Repository>>,
+    alerts: crate::alert::AlertBroadcaster,
+    observer: Option<Arc<dyn WebExtensionProvider>>,
+    verbose: bool,
+) {
     use crate::db::models::{AlertEvent, DeviceMetrics, InterfaceSample};
     use crate::monitor::calculate_bandwidth_utilization_from_delta;
     use crate::snmp::SnmpClient;
@@ -4459,7 +4166,12 @@ pub(crate) fn run_polling_loop(
                         );
                     }
                     let _ = r.save_sample(&sample);
-                    publish_predictive_alerts(&alerts, &dev_config, &sample, &r);
+                    if let Some(observer) = observer.as_deref() {
+                        let history = r
+                            .get_recent_interface_samples(sample.device_id, sample.if_index, 3)
+                            .unwrap_or_default();
+                        observer.observe_interface_sample(&dev_config, &sample, &history, &alerts);
+                    }
                 }
 
                 // スパイク検出（インターフェース単位）
@@ -4529,58 +4241,6 @@ struct PollResult {
     samples: Vec<crate::db::models::InterfaceSample>,
 }
 
-fn publish_predictive_alerts(
-    alerts: &crate::alert::AlertBroadcaster,
-    device: &DeviceConfig,
-    sample: &crate::db::models::InterfaceSample,
-    repository: &Repository,
-) {
-    let Ok(history) = repository.get_recent_interface_samples(sample.device_id, sample.if_index, 3)
-    else {
-        return;
-    };
-    let Some(indicators) = crate::monitor::predictive::evaluate_predictive(&history) else {
-        return;
-    };
-    let publish = |kind, observed: String, threshold: String, message: String| {
-        alerts.publish(AlertEvent::predictive(
-            kind,
-            device,
-            sample.if_index,
-            &sample.if_name,
-            observed,
-            threshold,
-            message,
-        ));
-    };
-    if indicators.error_ratio_warning {
-        publish(
-            AlertKind::PredictiveErrorRate,
-            format!("{:.6}%", indicators.error_ratio * 100.0),
-            "0.001%".to_string(),
-            format!("[PRED] Error ratio rising on {}", sample.if_name),
-        );
-    }
-    if indicators.trend_warning {
-        publish(
-            AlertKind::PredictiveTrend,
-            format!("{:.0}", indicators.error_acceleration),
-            "> 0 errors/poll acceleration".to_string(),
-            format!("[PRED] Error acceleration rising on {}", sample.if_name),
-        );
-    }
-    if indicators.dom_warning
-        && let Some(power) = indicators.rx_optical_power_dbm
-    {
-        publish(
-            AlertKind::PredictiveDom,
-            format!("{power:.1} dBm"),
-            "-18 dBm".to_string(),
-            format!("[PRED] SFP Rx optical power degraded on {}", sample.if_name),
-        );
-    }
-}
-
 impl PollResult {
     fn default_for(ip: String) -> Self {
         Self {
@@ -4599,7 +4259,7 @@ impl PollResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebEdition, WebTopologyEdge,
+        CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebLimits, WebTopologyEdge,
         WebTopologyInterface, WebTopologyReport, annotate_edge_health, api_flow_analytics,
         api_live_flow_analytics, classify_interface_diagnostic, effective_interface_link_status,
         evaluate_port_health, merge_duplicate_edges, page_dashboard, page_device_detail,
@@ -4651,7 +4311,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_hides_enterprise_analytics_for_community() {
+    fn dashboard_has_no_extension_without_provider() {
         let path = std::env::temp_dir().join(format!(
             "tracepulse-dashboard-edition-{}.db",
             std::process::id()
@@ -4661,19 +4321,12 @@ mod tests {
         let repository = Arc::new(Mutex::new(repository));
         let config = Arc::new(Mutex::new(AppConfig::default()));
 
-        let community = page_dashboard(&repository, &config, WebEdition::Community);
+        let community = page_dashboard(&repository, &config, None);
         assert!(!community.contains("Sankey Flow"));
         assert!(!community.contains("GeoIP / ASN"));
         assert!(!community.contains("BGP / QoS"));
         assert!(!community.contains("Threat Badges"));
-        assert!(!community.contains("enterprise-analytics.js"));
-
-        let enterprise = page_dashboard(&repository, &config, WebEdition::Enterprise);
-        assert!(enterprise.contains("Sankey Flow"));
-        assert!(enterprise.contains("GeoIP / ASN"));
-        assert!(enterprise.contains("BGP / QoS"));
-        assert!(enterprise.contains("Threat Badges"));
-        assert!(enterprise.contains("enterprise-analytics.js"));
+        assert!(!community.contains("Flow Explorer"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -4868,28 +4521,30 @@ mod tests {
     }
 
     #[test]
-    fn discovery_page_exposes_enterprise_edition_to_browser_js() {
+    fn discovery_page_exposes_unrestricted_limits_to_browser_js() {
         let repo = Arc::new(Mutex::new(Repository::new(
             Connection::open_in_memory().expect("in-memory db should open"),
         )));
 
-        let html = page_discovery(&repo, WebEdition::Enterprise);
+        let html = page_discovery(&repo, WebLimits::unrestricted(), None);
 
-        assert!(html.contains("window.TRACEPULSE_WEB_EDITION = {enterprise:true,nodeLimit:null};"));
+        assert!(
+            html.contains("window.TRACEPULSE_DISCOVERY_LIMITS = {maxCidrs:null,nodeLimit:null};")
+        );
         assert!(html.contains("/static/js/discovery.js"));
         assert!(html.contains("/static/js/topology.js"));
         assert!(html.contains("id='seed-ip'"));
     }
 
     #[test]
-    fn discovery_page_exposes_community_node_limit_to_browser_js() {
+    fn discovery_page_exposes_default_limits_to_browser_js() {
         let repo = Arc::new(Mutex::new(Repository::new(
             Connection::open_in_memory().expect("in-memory db should open"),
         )));
 
-        let html = page_discovery(&repo, WebEdition::Community);
+        let html = page_discovery(&repo, WebLimits::community(), None);
 
-        assert!(html.contains("window.TRACEPULSE_WEB_EDITION = {enterprise:false,nodeLimit:25};"));
+        assert!(html.contains("window.TRACEPULSE_DISCOVERY_LIMITS = {maxCidrs:1,nodeLimit:25};"));
     }
 
     fn topology_report_with(node_count: usize) -> WebTopologyReport {
@@ -4907,7 +4562,6 @@ mod tests {
                 remote_hostname: Some(format!("sw-{index}")),
                 remote_port: Some("Gi1/0/23".to_string()),
                 health_status: None,
-                predictive_warning: false,
             });
         }
 
@@ -4938,7 +4592,6 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/23".to_string()),
             health_status: None,
-            predictive_warning: false,
         };
         let cdp = WebTopologyEdge {
             id: "e1".to_string(),
@@ -4952,7 +4605,6 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/23".to_string()),
             health_status: None,
-            predictive_warning: false,
         };
 
         let merged = merge_duplicate_edges(vec![lldp, cdp]);
@@ -4977,7 +4629,6 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/23".to_string()),
             health_status: None,
-            predictive_warning: false,
         };
         let b = WebTopologyEdge {
             id: "e1".to_string(),
@@ -4991,7 +4642,6 @@ mod tests {
             remote_hostname: Some("core-sw-02".to_string()),
             remote_port: Some("Gi1/0/24".to_string()),
             health_status: None,
-            predictive_warning: false,
         };
 
         let merged = merge_duplicate_edges(vec![a, b]);
@@ -5012,9 +4662,9 @@ mod tests {
     }
 
     #[test]
-    fn community_topology_is_truncated_to_node_limit() {
+    fn topology_is_truncated_to_configured_node_limit() {
         let mut report = topology_report_with(30);
-        report.apply_node_limit(WebEdition::Community);
+        report.apply_node_limit(WebLimits::community());
 
         assert_eq!(report.nodes.len(), COMMUNITY_MAX_DEVICES);
         assert_eq!(report.hidden_nodes, 30 - COMMUNITY_MAX_DEVICES);
@@ -5027,9 +4677,9 @@ mod tests {
     }
 
     #[test]
-    fn enterprise_topology_keeps_every_node() {
+    fn unrestricted_topology_keeps_every_node() {
         let mut report = topology_report_with(30);
-        report.apply_node_limit(WebEdition::Enterprise);
+        report.apply_node_limit(WebLimits::unrestricted());
 
         assert_eq!(report.nodes.len(), 30);
         assert_eq!(report.hidden_nodes, 0);
@@ -5039,7 +4689,7 @@ mod tests {
     #[test]
     fn topology_json_exposes_graph_schema() {
         let mut report = topology_report_with(3);
-        report.apply_node_limit(WebEdition::Community);
+        report.apply_node_limit(WebLimits::community());
         let json = report.to_json();
 
         assert!(json.contains(r#""nodes":[{"id":"10.0.0.1""#));
@@ -5117,7 +4767,6 @@ mod tests {
                 ..Default::default()
             },
             health_status: "Warning".to_string(),
-            predictive_warning: false,
             alerts: vec!["L1 Physical Error (CRC/Frame Error)".to_string()],
         };
         report.nodes[0].interfaces = vec![unhealthy_iface];

@@ -29,6 +29,7 @@ var TracePulseI18n = (() => {
     formatTracePulseClock: () => formatTracePulseClock,
     formatTracePulseTimestamp: () => formatTracePulseTimestamp,
     parseTracePulseTime: () => parseTracePulseTime,
+    registerTranslations: () => registerTranslations,
     setLanguage: () => setLanguage,
     setTheme: () => setTheme,
     t: () => t,
@@ -115,7 +116,6 @@ var TracePulseI18n = (() => {
       device_discovery: "Device Discovery",
       cidr_range: "CIDR Range",
       cidr_range_placeholder: "192.168.1.0/24",
-      cidr_range_placeholder_enterprise: "Example: 192.168.11.0/24, 10.0.0.0/24 (comma-separated)",
       community: "Community",
       scan: "Scan",
       cancel: "Cancel",
@@ -216,7 +216,6 @@ var TracePulseI18n = (() => {
       topology_summary: "{nodes} nodes / {edges} links discovered from {ip}",
       topology_seed_required: "Seed device IP is required to draw the topology map.",
       topology_export_empty: "Run topology discovery before exporting.",
-      topology_hidden_nodes: "+ {count} nodes hidden (Enterprise Edition for unlimited)",
       topology_protocol: "Protocol",
       topology_local_side: "Local side",
       topology_remote_side: "Remote side",
@@ -228,7 +227,6 @@ var TracePulseI18n = (() => {
       node_type_switch: "Switch / Router",
       node_type_endpoint: "Endpoint",
       edition_community: "Community Edition ({limit} Node Limit)",
-      edition_enterprise: "Enterprise Edition (Unlimited Nodes)",
       port_health: "Port Health",
       port_health_crc: "CRC Errors",
       port_health_late_collisions: "Late Collisions",
@@ -352,7 +350,6 @@ var TracePulseI18n = (() => {
       device_discovery: "\u30C7\u30D0\u30A4\u30B9\u63A2\u7D22",
       cidr_range: "CIDR \u7BC4\u56F2",
       cidr_range_placeholder: "192.168.1.0/24",
-      cidr_range_placeholder_enterprise: "\u4F8B: 192.168.11.0/24, 10.0.0.0/24 (\u30AB\u30F3\u30DE\u533A\u5207\u308A\u3067\u8907\u6570\u6307\u5B9A\u53EF)",
       error_breakdown_title: "\u30A8\u30E9\u30FC\u8A73\u7D30\uFF08Error Breakdown\uFF09",
       error_breakdown_select_hint: "\u30A4\u30F3\u30BF\u30FC\u30D5\u30A7\u30FC\u30B9\u3092\u9078\u629E\u3059\u308B\u3068\u7834\u640D\u30D1\u30B1\u30C3\u30C8\u306E\u5185\u8A33\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
       error_breakdown_no_data: "\u307E\u3060\u30A8\u30E9\u30FC\u5185\u8A33\u30C7\u30FC\u30BF\u304C\u53CE\u96C6\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002",
@@ -461,7 +458,6 @@ var TracePulseI18n = (() => {
       topology_summary: "{ip} \u304B\u3089 {nodes} \u30CE\u30FC\u30C9 / {edges} \u30EA\u30F3\u30AF\u3092\u691C\u51FA\u3057\u307E\u3057\u305F",
       topology_seed_required: "\u30C8\u30DD\u30ED\u30B8\u30FC\u63CF\u753B\u306B\u306F\u30B7\u30FC\u30C9\u6A5F\u5668\u306E IP \u304C\u5FC5\u8981\u3067\u3059\u3002",
       topology_export_empty: "\u30A8\u30AF\u30B9\u30DD\u30FC\u30C8\u524D\u306B\u30C8\u30DD\u30ED\u30B8\u30FC\u63A2\u7D22\u3092\u5B9F\u884C\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-      topology_hidden_nodes: "+ {count} \u30CE\u30FC\u30C9\u3092\u975E\u8868\u793A\u4E2D\uFF08\u7121\u5236\u9650\u306F Enterprise Edition\uFF09",
       topology_protocol: "\u30D7\u30ED\u30C8\u30B3\u30EB",
       topology_local_side: "\u63A5\u7D9A\u5143",
       topology_remote_side: "\u63A5\u7D9A\u5148",
@@ -473,7 +469,6 @@ var TracePulseI18n = (() => {
       node_type_switch: "\u30B9\u30A4\u30C3\u30C1 / \u30EB\u30FC\u30BF\u30FC",
       node_type_endpoint: "\u7AEF\u672B\u30FB\u305D\u306E\u4ED6",
       edition_community: "Community Edition\uFF08\u4E0A\u9650 {limit} \u30CE\u30FC\u30C9\uFF09",
-      edition_enterprise: "Enterprise Edition\uFF08\u30CE\u30FC\u30C9\u6570\u7121\u5236\u9650\uFF09",
       port_health: "\u30DD\u30FC\u30C8\u5065\u5168\u6027",
       port_health_crc: "CRC \u30A8\u30E9\u30FC",
       port_health_late_collisions: "Late Collision",
@@ -516,6 +511,13 @@ var TracePulseI18n = (() => {
   // frontend/src/shared/i18n.ts
   function translationData() {
     return translations;
+  }
+  function registerTranslations(extension) {
+    const data = translations;
+    Object.entries(extension).forEach(([language, entries]) => {
+      if (!entries) return;
+      Object.assign(data[language] || (data[language] = {}), entries);
+    });
   }
   function t(key, lang = currentLanguage()) {
     const data = translationData();
@@ -560,6 +562,7 @@ var TracePulseI18n = (() => {
     document.documentElement.dataset.theme = theme;
     const select = document.getElementById("theme-select");
     if (select && select.value !== theme) select.value = theme;
+    window.dispatchEvent(new CustomEvent("tracepulse-theme-change", { detail: { theme } }));
   }
   function applyLanguage(lang = currentLanguage()) {
     document.documentElement.lang = lang;
@@ -577,6 +580,7 @@ var TracePulseI18n = (() => {
     const titleKey = document.body?.dataset.titleKey;
     if (titleKey) document.title = `TracePulse - ${t(titleKey, lang)}`;
     window.applyPageLanguage?.(lang);
+    window.dispatchEvent(new CustomEvent("tracepulse-language-change", { detail: { lang } }));
   }
   function currentTimeZoneSetting() {
     try {
@@ -610,7 +614,7 @@ var TracePulseI18n = (() => {
     });
     return `${map.hour}:${map.minute}`;
   }
-  Object.assign(window, { t, tf, currentLanguage, setLanguage, currentTheme, setTheme, applyTheme, applyLanguage, formatTracePulseTimestamp, formatTracePulseClock });
+  Object.assign(window, { t, tf, registerTranslations, currentLanguage, setLanguage, currentTheme, setTheme, applyTheme, applyLanguage, currentTimeZoneSetting, formatTracePulseTimestamp, formatTracePulseClock });
   document.addEventListener("DOMContentLoaded", () => {
     applyTheme();
     applyLanguage();

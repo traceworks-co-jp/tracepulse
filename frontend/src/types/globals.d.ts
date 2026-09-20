@@ -4,8 +4,8 @@ declare global {
     interface Window {
         DEVICE_IP?: string;
         DEVICES?: DashboardDevice[];
-        TRACEPULSE_WEB_EDITION?: {
-            enterprise?: boolean;
+        TRACEPULSE_DISCOVERY_LIMITS?: {
+            maxCidrs?: number | null;
             nodeLimit?: number;
         };
         TRACEPULSE_SPIKE_THRESHOLD?: number;
@@ -13,6 +13,7 @@ declare global {
         esc: (value: unknown) => string;
         t?: (key: string) => string;
         tf?: (key: string, params?: Record<string, string | number>) => string;
+        registerTranslations?: (translations: { en?: Record<string, string>; ja?: Record<string, string> }) => void;
         isInterfaceSelected?: (ifIndex: unknown) => boolean;
         loadDeviceDetail?: () => void;
         renderDetail?: (device: DeviceDetail) => void;
@@ -122,7 +123,6 @@ declare global {
         health_status?: string;
         metrics?: InterfaceMetrics;
         error_breakdown?: ErrorBreakdown;
-        predictive_status?: PredictiveStatus;
         sampled_at?: string;
     }
 
@@ -138,12 +138,6 @@ declare global {
         late_collisions?: number;
         late_collisions_delta?: number;
         bandwidth_utilization?: number;
-    }
-
-    interface PredictiveStatus {
-        dom_warning?: boolean;
-        trend_warning?: boolean;
-        rx_optical_power_dbm?: number | null;
     }
 
     interface DeviceDetail {

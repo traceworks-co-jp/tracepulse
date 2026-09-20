@@ -264,9 +264,6 @@ pub struct InterfaceSummary {
     pub in_discards: u64,
     pub out_discards: u64,
     pub late_collisions: u64,
-    pub rx_optical_power_dbm: Option<f64>,
-    pub predictive_dom: bool,
-    pub predictive_trend: bool,
     pub neighbor: String,
 }
 
@@ -1114,26 +1111,9 @@ impl TuiRenderer {
                             Style::default()
                         };
 
-                        let mut port_name = iface.if_name.clone();
-                        if iface.predictive_dom {
-                            port_name.push_str(" [PRED: DOM]");
-                        }
-                        if iface.predictive_trend {
-                            port_name.push_str(" [PRED: Trend]");
-                        }
-                        let predictive = iface.predictive_dom || iface.predictive_trend;
                         let cells = vec![
-                            Cell::from(port_name),
-                            Cell::from(if predictive {
-                                format!("{} [PRED]", status_text)
-                            } else {
-                                status_text.to_string()
-                            })
-                            .style(if predictive {
-                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                            } else {
-                                status_style
-                            }),
+                            Cell::from(iface.if_name.clone()),
+                            Cell::from(status_text).style(status_style),
                             Cell::from(rate_text),
                             Cell::from(err_disc).style(err_style),
                             Cell::from(iface.late_collisions.to_string()),
@@ -2093,12 +2073,6 @@ impl TuiRenderer {
                 } else {
                     iface.bandwidth_utilization
                 };
-                let indicators = crate::monitor::predictive::evaluate_predictive(
-                    &repository
-                        .get_recent_interface_samples(dev_id, iface.if_index, 3)
-                        .unwrap_or_default(),
-                );
-
                 InterfaceSummary {
                     if_index: iface.if_index,
                     if_name: iface.if_name,
@@ -2109,9 +2083,6 @@ impl TuiRenderer {
                     in_discards: iface.in_discards,
                     out_discards: iface.out_discards,
                     late_collisions: iface.late_collisions,
-                    rx_optical_power_dbm: iface.rx_optical_power_dbm,
-                    predictive_dom: indicators.map(|value| value.dom_warning).unwrap_or(false),
-                    predictive_trend: indicators.map(|value| value.trend_warning).unwrap_or(false),
                     neighbor,
                 }
             })

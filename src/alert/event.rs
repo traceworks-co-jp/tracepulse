@@ -6,27 +6,23 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// アラートの種別。外部モジュール（通知プラグイン等）が分岐に利用する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlertKind {
     InterfaceSpike,
     ErrorRate,
-    PredictiveErrorRate,
-    PredictiveTrend,
-    PredictiveDom,
     HealthDegraded,
     DeviceOffline,
+    Custom(String),
 }
 
 impl AlertKind {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::InterfaceSpike => "SPIKE",
             Self::ErrorRate => "ERROR_RATE",
-            Self::PredictiveErrorRate => "PREDICTIVE_ERROR_RATE",
-            Self::PredictiveTrend => "PREDICTIVE_TREND",
-            Self::PredictiveDom => "PREDICTIVE_DOM",
             Self::HealthDegraded => "HEALTH_DEGRADED",
             Self::DeviceOffline => "DEVICE_OFFLINE",
+            Self::Custom(name) => name,
         }
     }
 }
@@ -63,7 +59,7 @@ impl AlertEvent {
     ) -> Self {
         let occurred_at = Utc::now();
         Self {
-            id: next_event_id(kind, &occurred_at),
+            id: next_event_id(&kind, &occurred_at),
             device_id: device.id,
             device_name: device.name.clone(),
             device_ip: device.ip.clone(),
@@ -140,8 +136,8 @@ impl AlertEvent {
         )
     }
 
-    pub fn predictive(
-        kind: AlertKind,
+    pub fn custom(
+        kind: impl Into<String>,
         device: &DeviceConfig,
         interface_id: i32,
         interface_name: &str,
@@ -149,15 +145,20 @@ impl AlertEvent {
         threshold: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
-        Self::new(kind, AlertSeverity::Warning, device, message)
-            .with_interface(interface_name)
-            .with_interface_id(i64::from(interface_id))
-            .with_observed_value(observed)
-            .with_threshold(threshold)
+        Self::new(
+            AlertKind::Custom(kind.into()),
+            AlertSeverity::Warning,
+            device,
+            message,
+        )
+        .with_interface(interface_name)
+        .with_interface_id(i64::from(interface_id))
+        .with_observed_value(observed)
+        .with_threshold(threshold)
     }
 }
 
-fn next_event_id(kind: AlertKind, occurred_at: &DateTime<Utc>) -> String {
+fn next_event_id(kind: &AlertKind, occurred_at: &DateTime<Utc>) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
