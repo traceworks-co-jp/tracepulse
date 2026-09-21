@@ -2532,10 +2532,10 @@ fn page_dashboard(
     html.push_str(&format!("<div class='{spike_card_cls}'><div class='card-num'>{spikes_count}</div><div class='card-label' data-i18n='error_spikes'>Error Spikes</div></div>"));
     html.push_str("</div>");
     html.push_str("<p id='last-refreshed' style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'></p>");
-    if let Some(extension) = extension {
-        if let Some(markup) = extension.dashboard_html() {
-            html.push_str(&markup);
-        }
+    if let Some(extension) = extension
+        && let Some(markup) = extension.dashboard_html()
+    {
+        html.push_str(&markup);
     }
     html.push_str("<table id='dash-table'><thead><tr>");
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");

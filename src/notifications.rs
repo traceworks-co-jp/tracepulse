@@ -39,22 +39,12 @@ pub trait NotificationSettingsProvider: Send + Sync {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct WebhookChannel {
     enabled: bool,
     webhook_url: String,
     webhook_url_env: String,
-}
-
-impl Default for WebhookChannel {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            webhook_url: String::new(),
-            webhook_url_env: String::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,16 +56,10 @@ struct CommunityNotificationConfig {
     retry: RetryConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 struct FlapGuardConfig {
     window_seconds: u64,
-}
-
-impl Default for FlapGuardConfig {
-    fn default() -> Self {
-        Self { window_seconds: 0 }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
