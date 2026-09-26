@@ -116,25 +116,32 @@ impl Connection {
 }
 
 pub fn handle(mut connection: Connection) -> Result<(), String> {
-    let result = handle_request(&mut connection);
+    let result = (|| {
+        let request = connection
+            .read_text()?
+            .ok_or_else(|| "diagnostic request is missing".to_string())?;
+        run_basic(&request, |message| connection.send(message))
+    })();
     if let Err(error) = &result {
         let _ = connection.send(&serde_json::json!({"error":error,"done":true}).to_string());
     }
     result
 }
 
-fn handle_request(connection: &mut Connection) -> Result<(), String> {
-    let request: Request = serde_json::from_str(
-        &connection
-            .read_text()?
-            .ok_or_else(|| "diagnostic request is missing".to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+pub fn run_basic(
+    request: &str,
+    mut send: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let request: Request = serde_json::from_str(request).map_err(|error| error.to_string())?;
     let target: IpAddr = request
         .target
         .parse()
         .map_err(|_| "target must be an IP address".to_string())?;
-    let count = request.count.unwrap_or(5).clamp(1, 20);
+    let count = if matches!(request.kind, BasicKind::Traceroute) {
+        30
+    } else {
+        request.count.unwrap_or(5).clamp(1, 20)
+    };
     match request.kind {
         BasicKind::Port => {
             let port = request.port.ok_or_else(|| "port is required".to_string())?;
@@ -144,7 +151,7 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
                 Ok(_) => format!("PORT {port}: Success - OPEN"),
                 Err(error) => format!("PORT {port}: Failed - {error}"),
             };
-            connection.send(
+            send(
                 &serde_json::json!({"event":"diagnostic","line":line,"done":true,
                 "message_type":"port_result","data":{
                     "target":address.to_string(),
@@ -165,13 +172,14 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
                 let mut min_rtt_ms = f64::INFINITY;
                 let mut max_rtt_ms = 0.0_f64;
                 for sequence in 1..=count {
-                    let (line, rtt_ms) = if matches!(request.kind, BasicKind::Ping) { probe(target, sequence, None).await } else { probe(target, sequence, Some(sequence)).await };
+                    let (line, rtt_ms, reached_target) = if matches!(request.kind, BasicKind::Ping) { probe(target, sequence, None).await } else { probe(target, sequence, Some(sequence)).await };
                     if let Some(rtt_ms) = rtt_ms {
                         responses += 1;
                         rtt_total_ms += rtt_ms;
                         min_rtt_ms = min_rtt_ms.min(rtt_ms);
                         max_rtt_ms = max_rtt_ms.max(rtt_ms);
                     }
+                    let done = sequence == count || matches!(request.kind, BasicKind::Traceroute) && reached_target;
                     let result = if matches!(request.kind, BasicKind::Ping) {
                         serde_json::json!({"message_type":"ping_result","data":{
                             "target":target.to_string(),"sent":count,"received":responses,
@@ -183,17 +191,18 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
                         }})
                     } else {
                         serde_json::json!({"message_type":"traceroute_result","data":{
-                            "target":target.to_string(),"hops_probed":count,"responding_hops":responses,
-                            "verdict":if responses > 0 { "RESPONSES RECEIVED" } else { "NO RESPONSE" }
+                            "target":target.to_string(),"hops_probed":sequence,"responding_hops":responses,
+                            "verdict":if reached_target { "DESTINATION REACHED" } else if responses > 0 { "HOP LIMIT REACHED" } else { "NO RESPONSE" }
                         }})
                     };
-                    let mut message = serde_json::json!({"event":"diagnostic","line":line,"done":sequence == count});
-                    if sequence == count {
+                    let mut message = serde_json::json!({"event":"diagnostic","line":line,"done":done});
+                    if done {
                         message["message_type"] = result["message_type"].clone();
                         message["data"] = result["data"].clone();
                     }
-                    connection.send(&message.to_string())?;
-                    if sequence != count { tokio::time::sleep(Duration::from_secs(1)).await; }
+                    send(&message.to_string())?;
+                    if done { break; }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
                 Ok::<(), String>(())
             })
@@ -201,7 +210,7 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
     }
 }
 
-async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>) {
+async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>, bool) {
     #[cfg(windows)]
     {
         return windows_probe(target, sequence, ttl);
@@ -221,6 +230,7 @@ async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option
                     if ttl.is_some() { "HOP" } else { "PING" }
                 ),
                 None,
+                false,
             );
         };
         let mut pinger = client.pinger(target, PingIdentifier(0x5450)).await;
@@ -236,6 +246,7 @@ async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option
                     elapsed.as_secs_f64() * 1000.0
                 ),
                 Some(elapsed.as_secs_f64() * 1000.0),
+                true,
             ),
             Err(error) => (
                 format!(
@@ -244,16 +255,18 @@ async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option
                     started.elapsed().as_secs_f64() * 1000.0
                 ),
                 None,
+                false,
             ),
         }
     }
 }
 
 #[cfg(windows)]
-fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>) {
+fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>, bool) {
     use std::net::Ipv4Addr;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        ICMP_ECHO_REPLY, IP_OPTION_INFORMATION, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho2,
+        ICMP_ECHO_REPLY, IP_OPTION_INFORMATION, IP_SUCCESS, IcmpCloseHandle, IcmpCreateFile,
+        IcmpSendEcho2,
     };
     let IpAddr::V4(address) = target else {
         return (
@@ -262,6 +275,7 @@ fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Opti
                 if ttl.is_some() { "HOP" } else { "PING" }
             ),
             None,
+            false,
         );
     };
     let handle = unsafe { IcmpCreateFile() };
@@ -272,6 +286,7 @@ fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Opti
                 if ttl.is_some() { "HOP" } else { "PING" }
             ),
             None,
+            false,
         );
     }
     let options = IP_OPTION_INFORMATION {
@@ -313,10 +328,12 @@ fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Opti
                 if ttl.is_some() { "HOP" } else { "PING" }
             ),
             None,
+            false,
         );
     }
     let echo = unsafe { &(*reply.as_ptr()).echo };
     let responder = Ipv4Addr::from(u32::from_be(echo.Address));
+    let reached_target = echo.Status == IP_SUCCESS && IpAddr::V4(responder) == target;
     (
         format!(
             "{} {sequence}: Success - {responder} ({:.2}ms)",
@@ -324,5 +341,6 @@ fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Opti
             echo.RoundTripTime
         ),
         Some(f64::from(echo.RoundTripTime)),
+        reached_target,
     )
 }

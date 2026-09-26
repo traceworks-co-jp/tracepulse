@@ -111,6 +111,14 @@ pub trait WebExtensionProvider: Send + Sync {
         String::new()
     }
 
+    fn device_diagnostics_buttons(&self) -> String {
+        String::new()
+    }
+
+    fn device_diagnostics_scripts(&self) -> String {
+        String::new()
+    }
+
     fn handle_websocket_upgrade(
         &self,
         _path: &str,
@@ -552,7 +560,7 @@ fn handle_connection(
         let ip = req.path.trim_start_matches("/device/").to_string();
         return respond_html(
             stream,
-            page_device_detail(&ip, &repo, web_extension.is_some()),
+            page_device_detail(&ip, &repo, web_extension.as_deref()),
         );
     }
 
@@ -2712,7 +2720,7 @@ fn page_settings(
 fn page_device_detail(
     ip: &str,
     repo: &Arc<Mutex<Repository>>,
-    enterprise_diagnostics: bool,
+    extension: Option<&dyn WebExtensionProvider>,
 ) -> String {
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
@@ -2726,9 +2734,6 @@ fn page_device_detail(
     ));
     html.push_str(COMMON_CSS);
     html.push_str(DEVICE_DETAIL_CSS);
-    if enterprise_diagnostics {
-        html.push_str("<style>#active-diagnostic-panel{position:fixed;z-index:1000;top:0;right:0;width:380px;max-width:100vw;height:100vh;background:#07111f;color:#dbeafe;box-shadow:-8px 0 24px #0008;transform:translateX(100%);transition:transform .2s ease;display:flex;flex-direction:column;font-family:monospace}#active-diagnostic-panel.open{transform:translateX(0)}#active-diagnostic-panel header,#active-diagnostic-panel footer{padding:1rem;border-bottom:1px solid #334155;display:flex;justify-content:space-between;gap:.5rem}#active-diagnostic-panel header button{background:none;border:0;color:#cbd5e1;font-size:1.3rem}#active-diagnostic-target{padding:.75rem 1rem;color:#38bdf8}#active-diagnostic-output{flex:1;overflow:auto;padding:1rem;white-space:pre-wrap;color:#a7f3d0}#active-diagnostic-panel footer{border-top:1px solid #334155;border-bottom:0}#active-diagnostic-panel footer button{width:100%;padding:.6rem;background:#0ea5e9;border:0;color:#fff;cursor:pointer}</style>");
-    }
     html.push_str("</head><body data-title-key='device_title_prefix'>");
     html.push_str(NAV_HTML);
 
@@ -2754,14 +2759,15 @@ fn page_device_detail(
          <span id='dev-status' class='status-unknown'>unknown</span>\
          <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Device data auto-refresh: 30s</span>\
          </div>");
-    let marker = if enterprise_diagnostics {
-        "<button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'ping')\">Ping</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'traceroute')\">Traceroute</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)\">Port Check</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'latency_breakdown',443)\">Latency Breakdown</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'mtr')\">MTR &amp; MTU</button>"
-    } else {
-        "<button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'ping')\">Ping</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'traceroute')\">Traceroute</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)\">Port Check</button>"
-    };
+    let marker = "<button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'ping')\">Ping</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'traceroute')\">Traceroute</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)\">Port Check</button>";
+    let extra_buttons = extension.map_or_else(String::new, |provider| {
+        provider.device_diagnostics_buttons()
+    });
     html = html.replace(
         "<span id='dev-status' class='status-unknown'>unknown</span>",
-        &format!("<span id='dev-status' class='status-unknown'>unknown</span>{marker}"),
+        &format!(
+            "<span id='dev-status' class='status-unknown'>unknown</span>{marker}{extra_buttons}"
+        ),
     );
 
     // セクション: インターフェース一覧
@@ -2845,12 +2851,14 @@ fn page_device_detail(
 
     html.push_str("</main>");
     html.push_str(&format!(
-        "<script>\nvar DEVICE_IP = '{}';\nwindow.TRACEPULSE_ENTERPRISE_DIAGNOSTICS = {};\n",
-        escape_json(ip),
-        enterprise_diagnostics
+        "<script>\nvar DEVICE_IP = '{}';\n",
+        escape_json(ip)
     ));
     html.push_str("</script><script src='/static/js/i18n.js'></script>");
     html.push_str("<script src='/static/js/diagnostics.js'></script>");
+    if let Some(provider) = extension {
+        html.push_str(&provider.device_diagnostics_scripts());
+    }
     html.push_str("<script src='/static/js/device-detail.js'></script></body></html>");
     html
 }
@@ -4510,6 +4518,27 @@ mod tests {
 
     #[test]
     fn device_detail_hides_traffic_section_until_flow_data_arrives() {
+        struct ExtraDiagnostics;
+        impl super::WebExtensionProvider for ExtraDiagnostics {
+            fn handle_request(
+                &self,
+                _method: &str,
+                _path: &str,
+                _query: &str,
+                _body: &str,
+            ) -> Option<super::WebExtensionResponse> {
+                None
+            }
+
+            fn device_diagnostics_buttons(&self) -> String {
+                "<button>Extra Probe</button>".to_string()
+            }
+
+            fn device_diagnostics_scripts(&self) -> String {
+                "<script src='/static/js/extra-probe.js'></script>".to_string()
+            }
+        }
+
         let path = std::env::temp_dir().join(format!(
             "tracepulse-device-traffic-section-{}.db",
             std::process::id()
@@ -4529,14 +4558,20 @@ mod tests {
                 updated_at: None,
             })
             .expect("device should save");
-        let html = page_device_detail("192.0.2.1", &Arc::new(Mutex::new(repository)), false);
+        let repository = Arc::new(Mutex::new(repository));
+        let html = page_device_detail("192.0.2.1", &repository, None);
         assert!(html.contains("openActiveDiagnostic(DEVICE_IP,'ping')"));
         assert!(html.contains("openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)"));
         assert!(html.contains("/static/js/diagnostics.js"));
-        assert!(!html.contains("latency_breakdown"));
-        assert!(!html.contains("MTR &amp; MTU"));
+        assert!(!html.contains("Extra Probe"));
 
         assert!(html.contains("id='traffic-protocols-section' style='display:none'"));
+        let extended = page_device_detail("192.0.2.1", &repository, Some(&ExtraDiagnostics));
+        assert!(extended.contains("<button>Extra Probe</button>"));
+        let base_script = extended.find("/static/js/diagnostics.js").unwrap();
+        let extra_script = extended.find("/static/js/extra-probe.js").unwrap();
+        assert!(base_script < extra_script);
+        assert!(!html.contains("extra-probe.js"));
         let _ = std::fs::remove_file(path);
     }
 

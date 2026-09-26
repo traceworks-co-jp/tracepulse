@@ -7,10 +7,23 @@ let diagnosticToastTimer: number | undefined;
 let diagnosticTimeoutTimer: number | undefined;
 let diagnosticLastPhase = "connecting";
 
+type DiagnosticExtension = {
+    tabs: Array<{ kind: string; label: string; portPrompt?: boolean; initialPort?: number; promptTitle?: string }>;
+    resultTitles: Record<string, string>;
+    timeouts: Record<string, number>;
+    counts: Record<string, number>;
+    reportTitle?: string;
+    formatValue?: (type: string, key: string, value: unknown) => string | undefined;
+};
+let diagnosticExtension: DiagnosticExtension | null = null;
+
+export function registerDiagnosticExtension(extension: DiagnosticExtension): void {
+    diagnosticExtension = extension;
+}
+
 function diagnosticTimeoutMs(kind: string): number {
-    if (kind === "mtr") return 360_000;
-    if (kind === "path_mtu") return 30_000;
-    if (kind === "latency_breakdown") return 15_000;
+    if (diagnosticExtension?.timeouts[kind]) return diagnosticExtension.timeouts[kind];
+    if (kind === "traceroute") return 75_000;
     return 15_000;
 }
 
@@ -34,7 +47,7 @@ function ensureDiagnosticPanel(): HTMLElement {
     if (panel) return panel;
     panel = document.createElement("aside");
     panel.id = "active-diagnostic-panel";
-    const advancedTabs = window.TRACEPULSE_ENTERPRISE_DIAGNOSTICS ? `<button data-kind="latency_breakdown">Latency</button><button data-kind="mtr">MTR &amp; MTU</button>` : "";
+    const advancedTabs = diagnosticExtension?.tabs.map((tab) => `<button data-kind="${tab.kind}">${tab.label}</button>`).join("") || "";
     panel.innerHTML = `<header><strong>Active Diagnostics</strong><button type="button" aria-label="Close" onclick="closeActiveDiagnostic()">×</button></header><nav class="diag-tabs"><button data-kind="ping">Ping</button><button data-kind="traceroute">Traceroute</button><button data-kind="port">Port Check</button>${advancedTabs}</nav><div class="diag-target" id="active-diagnostic-target"></div><div id="active-diagnostic-output"></div><footer><button type="button" onclick="copyActiveDiagnostic()">Copy</button></footer>`;
     const style = document.createElement("style");
     style.textContent = "#active-diagnostic-panel{position:fixed;z-index:1000;top:0;right:0;width:380px;max-width:100vw;height:100vh;background:#07111f;color:#dbeafe;box-shadow:-8px 0 24px #0008;transform:translateX(100%);transition:transform .2s ease;display:flex;flex-direction:column;font-family:monospace}#active-diagnostic-panel.open{transform:translateX(0)}#active-diagnostic-panel header,#active-diagnostic-panel footer{padding:1rem;border-bottom:1px solid #334155;display:flex;justify-content:space-between}.diag-tabs{display:flex;border-bottom:1px solid #334155}.diag-tabs button{flex:1;padding:.55rem .25rem;background:#0f172a;border:0;border-right:1px solid #334155;color:#94a3b8;font-size:.7rem;cursor:pointer}.diag-tabs button.active{background:#0ea5e9;color:#fff}#active-diagnostic-target{padding:.75rem 1rem;color:#38bdf8}#active-diagnostic-output{flex:1;overflow:auto;padding:1rem;color:#a7f3d0}.diag-progress-line{margin-bottom:.45rem}.diag-error-line{margin-bottom:.6rem;padding:.65rem;border-left:3px solid #ef4444;background:#3f1212;color:#fca5a5;white-space:pre-wrap}.diag-result-card{margin:.5rem 0;padding:.75rem;border:1px solid #334155;border-radius:4px;background:#0f1b2d}.diag-error-card{border-color:#ef4444}.diag-result-card h3{margin:0 0 .65rem;color:#7dd3fc;font-size:.9rem}.diag-result-row{display:flex;justify-content:space-between;gap:1rem;padding:.25rem 0;border-top:1px solid #1e293b;font-family:system-ui,sans-serif;font-size:.78rem}.diag-result-label{text-transform:capitalize;color:#94a3b8}.diag-result-row strong{color:#f8fafc;text-align:right}#active-diagnostic-output.connecting{display:flex;align-items:center;gap:.65rem;color:#94a3b8}#active-diagnostic-output.connecting::before{content:\"\";width:1rem;height:1rem;border:2px solid #475569;border-top-color:#38bdf8;border-radius:50%;animation:diagnostic-spin .8s linear infinite}@keyframes diagnostic-spin{to{transform:rotate(360deg)}}#active-diagnostic-panel footer{border-top:1px solid #334155;border-bottom:0}#active-diagnostic-panel footer button{width:100%;padding:.6rem;background:#0ea5e9;border:0;color:#fff}#diagnostic-copy-toast{position:fixed;z-index:1200;right:1.25rem;bottom:1.25rem;padding:.65rem 1rem;border:1px solid #475569;border-radius:4px;background:#0f172a;color:#f8fafc;box-shadow:0 4px 14px #0008;opacity:0;transform:translateY(8px);transition:opacity .15s ease,transform .15s ease;pointer-events:none}#diagnostic-copy-toast.visible{opacity:1;transform:translateY(0)}";
@@ -43,10 +56,11 @@ function ensureDiagnosticPanel(): HTMLElement {
     style.textContent += ".diag-result-verdict.failed strong{color:#f87171}.diag-result-verdict.partial strong{color:#fbbf24}.diag-result-card{max-width:100%;overflow-wrap:anywhere}";
     panel.querySelectorAll<HTMLButtonElement>(".diag-tabs button").forEach((button) => button.addEventListener("click", () => {
         const kind = button.dataset.kind || "ping";
-        if (kind === "port" || kind === "latency_breakdown") {
-            openActiveDiagnosticWithPortPrompt(currentDiagnosticTarget, kind, currentDiagnosticPort ?? 80);
+        const tab = diagnosticExtension?.tabs.find((entry) => entry.kind === kind);
+        if (kind === "port" || tab?.portPrompt) {
+            openActiveDiagnosticWithPortPrompt(currentDiagnosticTarget, kind, currentDiagnosticPort ?? tab?.initialPort ?? 80);
         } else {
-            openActiveDiagnostic(currentDiagnosticTarget, kind as "ping" | "traceroute" | "mtr", currentDiagnosticPort);
+            openActiveDiagnostic(currentDiagnosticTarget, kind, currentDiagnosticPort);
         }
     }));
     document.head.appendChild(style);
@@ -54,11 +68,12 @@ function ensureDiagnosticPanel(): HTMLElement {
     return panel;
 }
 
-export function openActiveDiagnosticWithPortPrompt(target: string, kind: "port" | "latency_breakdown", initialPort = 80): void {
+export function openActiveDiagnosticWithPortPrompt(target: string, kind: string, initialPort = 80): void {
     const overlay = document.createElement("div");
     overlay.className = "diag-port-dialog-backdrop";
     overlay.style.cssText = "position:fixed;inset:0;z-index:1300;display:grid;place-items:center;background:rgba(0,0,0,.55);";
-    overlay.innerHTML = `<form class="diag-port-dialog"><h3>${kind === "port" ? "Port Check" : "Latency Breakdown"}</h3><label>Port<input type="number" name="port" min="1" max="65535" value="${initialPort}" required></label><div><button type="button" data-cancel>Cancel</button><button type="submit">Run</button></div></form>`;
+    const title = kind === "port" ? "Port Check" : diagnosticExtension?.tabs.find((tab) => tab.kind === kind)?.promptTitle || kind;
+    overlay.innerHTML = `<form class="diag-port-dialog"><h3>${title}</h3><label>Port<input type="number" name="port" min="1" max="65535" value="${initialPort}" required></label><div><button type="button" data-cancel>Cancel</button><button type="submit">Run</button></div></form>`;
     const dialog = overlay.querySelector("form") as HTMLFormElement;
     dialog.style.cssText = "width:min(320px,calc(100vw - 2rem));padding:1rem;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#f8fafc;box-shadow:0 8px 24px #000;";
     document.body.appendChild(overlay);
@@ -98,7 +113,7 @@ function renderDiagnosticOutput(output: HTMLElement): void {
         const card = document.createElement("section");
         card.className = result.type.endsWith("result") ? "diag-result-card" : "diag-result-card diag-error-card";
         const title = document.createElement("h3");
-        const titles: Record<string, string> = { ping_result: "Ping Result", traceroute_result: "Traceroute Result", port_result: "Port Check Result", latency_breakdown_result: "Latency Breakdown Result", path_mtu_result: "Path MTU Result" };
+        const titles: Record<string, string> = { ping_result: "Ping Result", traceroute_result: "Traceroute Result", port_result: "Port Check Result", ...diagnosticExtension?.resultTitles };
         title.textContent = titles[result.type] || result.type;
         card.appendChild(title);
         for (const [key, value] of Object.entries(result.data)) {
@@ -106,12 +121,12 @@ function renderDiagnosticOutput(output: HTMLElement): void {
             const row = document.createElement("div");
             const verdict = key === "verdict" || key === "status";
             const outcome = String(value).toUpperCase();
-            row.className = key === "message" ? "diag-result-row diag-result-message" : verdict ? `diag-result-row diag-result-verdict${outcome === "PARTIAL" ? " partial" : ["OPEN", "REACHABLE", "RESPONSES RECEIVED", "HEALTHY"].includes(outcome) ? "" : " failed"}` : "diag-result-row";
+            row.className = key === "message" ? "diag-result-row diag-result-message" : verdict ? `diag-result-row diag-result-verdict${outcome === "PARTIAL" ? " partial" : ["OPEN", "REACHABLE", "DESTINATION REACHED", "RESPONSES RECEIVED", "HEALTHY"].includes(outcome) ? "" : " failed"}` : "diag-result-row";
             const label = document.createElement("span");
             label.className = "diag-result-label";
             label.textContent = key.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
             const valueElement = document.createElement("strong");
-            valueElement.textContent = typeof value === "number" ? `${Number(value).toFixed(2)}${key.endsWith("_ms") ? " ms" : ""}` : String(value);
+            valueElement.textContent = diagnosticExtension?.formatValue?.(result.type, key, value) ?? (typeof value === "number" ? `${value.toFixed(2)}${key.endsWith("_ms") ? " ms" : ""}` : typeof value === "boolean" ? (value ? "Yes" : "No") : String(value));
             row.append(label, valueElement);
             card.appendChild(row);
         }
@@ -119,7 +134,7 @@ function renderDiagnosticOutput(output: HTMLElement): void {
     }
 }
 
-export function openActiveDiagnostic(target: string, kind: "ping" | "traceroute" | "port" | "latency_breakdown" | "mtr" | "path_mtu", port?: number): void {
+export function openActiveDiagnostic(target: string, kind: string, port?: number): void {
     const panel = ensureDiagnosticPanel();
     const output = document.getElementById("active-diagnostic-output");
     const targetLabel = document.getElementById("active-diagnostic-target");
@@ -132,7 +147,7 @@ export function openActiveDiagnostic(target: string, kind: "ping" | "traceroute"
         output.textContent = "Connecting...";
         output.classList.add("connecting");
     }
-    const usesPort = kind === "port" || kind === "latency_breakdown";
+    const usesPort = kind === "port" || diagnosticExtension?.tabs.some((tab) => tab.kind === kind && tab.portPrompt);
     if (targetLabel) targetLabel.textContent = `${kind.toUpperCase()} ${target}${usesPort && port ? `:${port}` : ""}`;
     panel.querySelectorAll<HTMLButtonElement>(".diag-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.kind === kind || (kind === "traceroute" && button.dataset.kind === "ping")));
     panel.classList.add("open");
@@ -146,12 +161,12 @@ export function openActiveDiagnostic(target: string, kind: "ping" | "traceroute"
             output.classList.remove("connecting");
             output.textContent = "";
         }
-        socket.send(JSON.stringify({ kind, target, port, count: kind === "mtr" ? 10 : 5 }));
+        socket.send(JSON.stringify({ kind, target, port, count: diagnosticExtension?.counts[kind] ?? (kind === "traceroute" ? 30 : 5) }));
         if (diagnosticTimeoutTimer !== undefined) window.clearTimeout(diagnosticTimeoutTimer);
         diagnosticTimeoutTimer = window.setTimeout(() => {
             if (output) {
                 output.classList.remove("connecting");
-                output.textContent = `Failed - no response after 10 seconds\nTarget: ${target}${usesPort ? `:${port ?? "?"}` : ""}\nLast phase: ${diagnosticLastPhase}`;
+                output.textContent = `Failed - no response after ${diagnosticTimeoutMs(kind) / 1000} seconds\nTarget: ${target}${usesPort ? `:${port ?? "?"}` : ""}\nLast phase: ${diagnosticLastPhase}`;
                 socket.close();
             }
         }, diagnosticTimeoutMs(kind));
@@ -167,7 +182,7 @@ export function openActiveDiagnostic(target: string, kind: "ping" | "traceroute"
         if (message.error) diagnosticLines.push(`Failed - ${message.error}`);
         if (output && (message.line || message.message_type || message.error)) {
             output.classList.remove("connecting");
-            if ((message.done || message.message_type || message.error) && diagnosticTimeoutTimer !== undefined) window.clearTimeout(diagnosticTimeoutTimer);
+            if ((message.done || message.error) && diagnosticTimeoutTimer !== undefined) window.clearTimeout(diagnosticTimeoutTimer);
             renderDiagnosticOutput(output);
             scrollDiagnosticOutputToBottom(output);
         }
@@ -175,7 +190,7 @@ export function openActiveDiagnostic(target: string, kind: "ping" | "traceroute"
     socket.onerror = () => {
         if (diagnosticSocket !== socket) return;
         if (diagnosticTimeoutTimer !== undefined) window.clearTimeout(diagnosticTimeoutTimer);
-        diagnosticLines.push("Failed - Enterprise license or diagnostic connection unavailable.");
+        diagnosticLines.push("Failed - diagnostic connection unavailable.");
         if (output) {
             output.classList.remove("connecting");
             renderDiagnosticOutput(output);
@@ -200,7 +215,7 @@ export function closeActiveDiagnostic(): void {
 }
 
 export async function copyActiveDiagnostic(): Promise<void> {
-    const report = `# TracePulse Enterprise Diagnostic Report\n\n${diagnosticLines.map((line) => `- ${line}`).join("\n")}\n\n${diagnosticResults.map((result) => `${result.type}\n${JSON.stringify(result.data, null, 2)}`).join("\n\n")}`;
+    const report = `# ${diagnosticExtension?.reportTitle ?? "TracePulse Diagnostic Report"}\n\n${diagnosticLines.map((line) => `- ${line}`).join("\n")}\n\n${diagnosticResults.map((result) => `${result.type}\n${JSON.stringify(result.data, null, 2)}`).join("\n\n")}`;
     try {
         await navigator.clipboard.writeText(report);
         showDiagnosticToast("Copied");
@@ -269,3 +284,4 @@ window.openActiveDiagnostic = openActiveDiagnostic;
 window.openActiveDiagnosticWithPortPrompt = openActiveDiagnosticWithPortPrompt;
 window.closeActiveDiagnostic = closeActiveDiagnostic;
 window.copyActiveDiagnostic = copyActiveDiagnostic;
+window.registerDiagnosticExtension = registerDiagnosticExtension;

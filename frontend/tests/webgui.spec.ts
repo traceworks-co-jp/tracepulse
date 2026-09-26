@@ -63,6 +63,36 @@ test("completed basic diagnostics show result cards", async ({ page }) => {
     await expect(page.locator(".diag-result-verdict.failed")).toContainText("UNREACHABLE");
 });
 
+test("registered diagnostics show progress and result cards", async ({ page }) => {
+    const requestedCounts: number[] = [];
+    await page.routeWebSocket("**/ws/diagnostics", (socket) => {
+        socket.onMessage((raw) => {
+            const request = JSON.parse(String(raw)) as { kind: string; count: number };
+            expect(request.kind).toBe("custom_probe");
+            requestedCounts.push(request.count);
+            socket.send(JSON.stringify({ line: "Probe completed", done: false }));
+            socket.send(JSON.stringify({ message_type: "custom_result", data: { target: "127.0.0.1", value: 12.5 }, done: true }));
+        });
+    });
+    await page.goto("/");
+    await page.addScriptTag({ path: "frontend/dist/diagnostics.js" });
+    await page.evaluate(() => {
+        (window as any).registerDiagnosticExtension({
+            tabs: [{ kind: "custom_probe", label: "Custom Probe" }],
+            resultTitles: { custom_result: "Custom Result" },
+            timeouts: { custom_probe: 30_000 },
+            counts: { custom_probe: 3 },
+            formatValue: (_type: string, key: string, value: unknown) => key === "value" ? `${value}%` : undefined,
+        });
+        (window as any).openActiveDiagnostic("127.0.0.1", "custom_probe");
+    });
+    await expect(page.locator(".diag-tabs button[data-kind='custom_probe']")).toBeVisible();
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Custom Result");
+    await expect(page.locator(".diag-result-card")).toContainText("12.5%");
+    await expect(page.locator("#active-diagnostic-output pre")).toContainText("Probe completed");
+    expect(requestedCounts).toEqual([3]);
+});
+
 test("Ping streams replies from the diagnostics server", async ({ page }) => {
     await page.goto("/");
     await page.addScriptTag({ url: "/static/js/diagnostics.js" });
@@ -74,14 +104,27 @@ test("Ping streams replies from the diagnostics server", async ({ page }) => {
 });
 
 test("Port Check and Traceroute return result cards from the server", async ({ page }) => {
+    const tracerouteRequests: Array<{ count: number }> = [];
+    page.on("websocket", (socket) => {
+        socket.on("framesent", (frame) => {
+            const request = JSON.parse(String(frame.payload)) as { kind: string; count: number };
+            if (request.kind === "traceroute") tracerouteRequests.push(request);
+        });
+    });
     await page.goto("/");
     await page.addScriptTag({ url: "/static/js/diagnostics.js" });
     await page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "port", 8080));
     await expect(page.locator(".diag-result-card h3")).toHaveText("Port Check Result");
     await expect(page.locator(".diag-result-verdict")).toContainText("OPEN");
     await page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "traceroute"));
-    await expect(page.locator("#active-diagnostic-output")).toContainText("HOP 5:");
+    await expect(page.locator("#active-diagnostic-output")).toContainText("HOP 1:");
     await expect(page.locator(".diag-result-card h3")).toHaveText("Traceroute Result");
+    await expect(page.locator(".diag-result-card")).toContainText("DESTINATION REACHED");
+    await expect(page.locator(".diag-result-verdict.failed")).toHaveCount(0);
+    await expect(page.locator(".diag-result-card")).toContainText("Hops Probed1");
+    await expect(page.locator("#active-diagnostic-output")).not.toContainText("HOP 2:");
+    expect(tracerouteRequests).toHaveLength(1);
+    expect(tracerouteRequests[0].count).toBe(30);
 });
 
 test("discovery loads TypeScript discovery and topology bundles", async ({ page }) => {

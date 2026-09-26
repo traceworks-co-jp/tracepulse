@@ -47,7 +47,6 @@ declare global {
         sortBy?: (column: string) => void;
         unregisterDevice?: (ip: string, name: string) => void;
         INIT: SettingsFormValues;
-        TRACEPULSE_ENTERPRISE_DIAGNOSTICS?: boolean;
         populateForm?: (values: SettingsFormValues) => void;
         resetDefaults?: () => void;
         saveSettings?: () => void;
@@ -56,8 +55,16 @@ declare global {
         testNotification?: (channel: string) => void;
         saveOidOverrides?: () => void;
         startDiagnostics?: (event: SubmitEvent) => boolean;
-        openActiveDiagnostic?: (target: string, kind: "ping" | "traceroute" | "port" | "latency_breakdown" | "mtr" | "path_mtu", port?: number) => void;
-        openActiveDiagnosticWithPortPrompt?: (target: string, kind: "port" | "latency_breakdown", port?: number) => void;
+        openActiveDiagnostic?: (target: string, kind: string, port?: number) => void;
+        openActiveDiagnosticWithPortPrompt?: (target: string, kind: string, port?: number) => void;
+        registerDiagnosticExtension?: (extension: {
+            tabs: Array<{ kind: string; label: string; portPrompt?: boolean; initialPort?: number; promptTitle?: string }>;
+            resultTitles: Record<string, string>;
+            timeouts: Record<string, number>;
+            counts: Record<string, number>;
+            reportTitle?: string;
+            formatValue?: (type: string, key: string, value: unknown) => string | undefined;
+        }) => void;
         closeActiveDiagnostic?: () => void;
         copyActiveDiagnostic?: () => Promise<void>;
         DISCOVERY_EXISTING?: Set<string>;
