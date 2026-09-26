@@ -4393,7 +4393,9 @@ mod tests {
             crate::diagnostics::handle(connection).unwrap();
         });
         let mut stream = TcpStream::connect(address).unwrap();
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(8))).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(8)))
+            .unwrap();
         stream.write_all(b"GET /ws/diagnostics HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").unwrap();
         let mut header = Vec::new();
         while !header.ends_with(b"\r\n\r\n") {
@@ -4406,17 +4408,44 @@ mod tests {
         let mask = [1_u8, 2, 3, 4];
         let mut frame = vec![0x81, 0x80 | payload.len() as u8];
         frame.extend_from_slice(&mask);
-        frame.extend(payload.iter().enumerate().map(|(index, byte)| byte ^ mask[index % 4]));
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
         stream.write_all(&frame).unwrap();
         for sequence in 1..=5 {
             let mut frame_header = [0; 2];
             stream.read_exact(&mut frame_header).unwrap();
             assert_eq!(frame_header[0], 0x81);
-            let mut result = vec![0; frame_header[1] as usize];
+            let length = match frame_header[1] & 0x7f {
+                126 => {
+                    let mut bytes = [0; 2];
+                    stream.read_exact(&mut bytes).unwrap();
+                    u16::from_be_bytes(bytes) as usize
+                }
+                length => length as usize,
+            };
+            let mut result = vec![0; length];
             stream.read_exact(&mut result).unwrap();
             let message: serde_json::Value = serde_json::from_slice(&result).unwrap();
-            assert!(message["line"].as_str().unwrap().starts_with(&format!("PING {sequence}:")));
+            assert!(
+                message["line"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(&format!("PING {sequence}:"))
+            );
             assert_eq!(message["done"], sequence == 5);
+            if sequence == 5 {
+                assert_eq!(message["message_type"], "ping_result");
+                assert_eq!(message["data"]["sent"], 5);
+                assert_eq!(
+                    message["data"]["received"].as_u64().unwrap()
+                        + message["data"]["lost"].as_u64().unwrap(),
+                    5
+                );
+            }
         }
         server.join().unwrap();
     }

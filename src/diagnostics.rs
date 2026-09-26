@@ -140,12 +140,18 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
             let port = request.port.ok_or_else(|| "port is required".to_string())?;
             let address = SocketAddr::new(target, port);
             let result = TcpStream::connect_timeout(&address, Duration::from_secs(3));
-            let line = match result {
+            let line = match &result {
                 Ok(_) => format!("PORT {port}: Success - OPEN"),
                 Err(error) => format!("PORT {port}: Failed - {error}"),
             };
             connection.send(
-                &serde_json::json!({"event":"diagnostic","line":line,"done":true}).to_string(),
+                &serde_json::json!({"event":"diagnostic","line":line,"done":true,
+                "message_type":"port_result","data":{
+                    "target":address.to_string(),
+                    "status":if result.is_ok() { "OPEN" } else { "UNREACHABLE" },
+                    "message":line
+                }})
+                .to_string(),
             )
         }
         BasicKind::Ping | BasicKind::Traceroute => {
@@ -154,9 +160,39 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
+                let mut responses = 0_u8;
+                let mut rtt_total_ms = 0.0_f64;
+                let mut min_rtt_ms = f64::INFINITY;
+                let mut max_rtt_ms = 0.0_f64;
                 for sequence in 1..=count {
-                    let line = if matches!(request.kind, BasicKind::Ping) { probe(target, sequence, None).await } else { probe(target, sequence, Some(sequence)).await };
-                    connection.send(&serde_json::json!({"event":"diagnostic","line":line,"done":sequence == count}).to_string())?;
+                    let (line, rtt_ms) = if matches!(request.kind, BasicKind::Ping) { probe(target, sequence, None).await } else { probe(target, sequence, Some(sequence)).await };
+                    if let Some(rtt_ms) = rtt_ms {
+                        responses += 1;
+                        rtt_total_ms += rtt_ms;
+                        min_rtt_ms = min_rtt_ms.min(rtt_ms);
+                        max_rtt_ms = max_rtt_ms.max(rtt_ms);
+                    }
+                    let result = if matches!(request.kind, BasicKind::Ping) {
+                        serde_json::json!({"message_type":"ping_result","data":{
+                            "target":target.to_string(),"sent":count,"received":responses,
+                            "lost":count - responses,"packet_loss_percent":format!("{:.0}%", 100.0 * f64::from(count - responses) / f64::from(count)),
+                            "min_rtt_ms":if responses > 0 { Some(min_rtt_ms) } else { None },
+                            "average_rtt_ms":if responses > 0 { Some(rtt_total_ms / f64::from(responses)) } else { None },
+                            "max_rtt_ms":if responses > 0 { Some(max_rtt_ms) } else { None },
+                            "verdict":if responses == count { "REACHABLE" } else if responses > 0 { "PARTIAL" } else { "NO RESPONSE" }
+                        }})
+                    } else {
+                        serde_json::json!({"message_type":"traceroute_result","data":{
+                            "target":target.to_string(),"hops_probed":count,"responding_hops":responses,
+                            "verdict":if responses > 0 { "RESPONSES RECEIVED" } else { "NO RESPONSE" }
+                        }})
+                    };
+                    let mut message = serde_json::json!({"event":"diagnostic","line":line,"done":sequence == count});
+                    if sequence == count {
+                        message["message_type"] = result["message_type"].clone();
+                        message["data"] = result["data"].clone();
+                    }
+                    connection.send(&message.to_string())?;
                     if sequence != count { tokio::time::sleep(Duration::from_secs(1)).await; }
                 }
                 Ok::<(), String>(())
@@ -165,7 +201,7 @@ fn handle_request(connection: &mut Connection) -> Result<(), String> {
     }
 }
 
-async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> String {
+async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>) {
     #[cfg(windows)]
     {
         return windows_probe(target, sequence, ttl);
@@ -179,9 +215,12 @@ async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> String {
             builder = builder.ttl(u32::from(ttl));
         }
         let Ok(client) = Client::new(&builder.build()) else {
-            return format!(
-                "{} {sequence}: Failed - ICMP socket unavailable",
-                if ttl.is_some() { "HOP" } else { "PING" }
+            return (
+                format!(
+                    "{} {sequence}: Failed - ICMP socket unavailable",
+                    if ttl.is_some() { "HOP" } else { "PING" }
+                ),
+                None,
             );
         };
         let mut pinger = client.pinger(target, PingIdentifier(0x5450)).await;
@@ -190,37 +229,49 @@ async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> String {
             .ping(PingSequence(sequence as u16), &[sequence; 8])
             .await
         {
-            Ok((IcmpPacket::V4(_), elapsed)) | Ok((IcmpPacket::V6(_), elapsed)) => format!(
-                "{} {sequence}: Success - responder unavailable ({:.2}ms)",
-                if ttl.is_some() { "HOP" } else { "PING" },
-                elapsed.as_secs_f64() * 1000.0
+            Ok((IcmpPacket::V4(_), elapsed)) | Ok((IcmpPacket::V6(_), elapsed)) => (
+                format!(
+                    "{} {sequence}: Success - responder unavailable ({:.2}ms)",
+                    if ttl.is_some() { "HOP" } else { "PING" },
+                    elapsed.as_secs_f64() * 1000.0
+                ),
+                Some(elapsed.as_secs_f64() * 1000.0),
             ),
-            Err(error) => format!(
-                "{} {sequence}: Failed - {error} ({:.2}ms)",
-                if ttl.is_some() { "HOP" } else { "PING" },
-                started.elapsed().as_secs_f64() * 1000.0
+            Err(error) => (
+                format!(
+                    "{} {sequence}: Failed - {error} ({:.2}ms)",
+                    if ttl.is_some() { "HOP" } else { "PING" },
+                    started.elapsed().as_secs_f64() * 1000.0
+                ),
+                None,
             ),
         }
     }
 }
 
 #[cfg(windows)]
-fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> String {
+fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>) {
     use std::net::Ipv4Addr;
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         ICMP_ECHO_REPLY, IP_OPTION_INFORMATION, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho2,
     };
     let IpAddr::V4(address) = target else {
-        return format!(
-            "{} {sequence}: Failed - IPv6 responder lookup unavailable",
-            if ttl.is_some() { "HOP" } else { "PING" }
+        return (
+            format!(
+                "{} {sequence}: Failed - IPv6 responder lookup unavailable",
+                if ttl.is_some() { "HOP" } else { "PING" }
+            ),
+            None,
         );
     };
     let handle = unsafe { IcmpCreateFile() };
     if handle == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-        return format!(
-            "{} {sequence}: Failed - ICMP socket unavailable",
-            if ttl.is_some() { "HOP" } else { "PING" }
+        return (
+            format!(
+                "{} {sequence}: Failed - ICMP socket unavailable",
+                if ttl.is_some() { "HOP" } else { "PING" }
+            ),
+            None,
         );
     }
     let options = IP_OPTION_INFORMATION {
@@ -256,16 +307,22 @@ fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> String {
         IcmpCloseHandle(handle);
     }
     if result == 0 {
-        return format!(
-            "{} {sequence}: Failed - timeout",
-            if ttl.is_some() { "HOP" } else { "PING" }
+        return (
+            format!(
+                "{} {sequence}: Failed - timeout",
+                if ttl.is_some() { "HOP" } else { "PING" }
+            ),
+            None,
         );
     }
     let echo = unsafe { &(*reply.as_ptr()).echo };
     let responder = Ipv4Addr::from(u32::from_be(echo.Address));
-    format!(
-        "{} {sequence}: Success - {responder} ({:.2}ms)",
-        if ttl.is_some() { "HOP" } else { "PING" },
-        echo.RoundTripTime
+    (
+        format!(
+            "{} {sequence}: Success - {responder} ({:.2}ms)",
+            if ttl.is_some() { "HOP" } else { "PING" },
+            echo.RoundTripTime
+        ),
+        Some(f64::from(echo.RoundTripTime)),
     )
 }

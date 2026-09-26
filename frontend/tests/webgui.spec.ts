@@ -34,12 +34,54 @@ test("restarting Ping keeps the latest diagnostic result", async ({ page }) => {
     await expect(page.locator("#active-diagnostic-output")).not.toContainText("diagnostic connection closed before a response");
 });
 
+test("completed basic diagnostics show result cards", async ({ page }) => {
+    await page.routeWebSocket("**/ws/diagnostics", (socket) => {
+        socket.onMessage((raw) => {
+            const request = JSON.parse(String(raw)) as { kind: string };
+            const results: Record<string, { line: string; message_type: string; data: Record<string, unknown> }> = {
+                ping: { line: "PING 1: Failed - timeout", message_type: "ping_result", data: { target: "127.0.0.1", sent: 5, received: 0, lost: 5, packet_loss_percent: "100%", average_rtt_ms: null, verdict: "NO RESPONSE" } },
+                traceroute: { line: "HOP 1: Success - 127.0.0.1 (1ms)", message_type: "traceroute_result", data: { target: "127.0.0.1", hops_probed: 5, responding_hops: 1, verdict: "RESPONSES RECEIVED" } },
+                port: { line: "PORT 80: Failed - refused", message_type: "port_result", data: { target: "127.0.0.1:80", status: "UNREACHABLE", message: "Connection refused" } },
+            };
+            socket.send(JSON.stringify({ ...results[request.kind], done: true }));
+        });
+    });
+    await page.goto("/");
+    await page.addScriptTag({ url: "/static/js/diagnostics.js" });
+    const run = (kind: string, port?: number) => page.evaluate(({ kind, port }) => (window as any).openActiveDiagnostic("127.0.0.1", kind, port), { kind, port });
+
+    await run("ping");
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Ping Result");
+    await expect(page.locator(".diag-result-card")).toContainText("100%");
+    await expect(page.locator(".diag-result-verdict.failed")).toContainText("NO RESPONSE");
+    await expect(page.locator(".diag-result-card")).not.toContainText("null");
+    await run("traceroute");
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Traceroute Result");
+    await expect(page.locator(".diag-result-card")).toContainText("Responding Hops");
+    await run("port", 80);
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Port Check Result");
+    await expect(page.locator(".diag-result-verdict.failed")).toContainText("UNREACHABLE");
+});
+
 test("Ping streams replies from the diagnostics server", async ({ page }) => {
     await page.goto("/");
     await page.addScriptTag({ url: "/static/js/diagnostics.js" });
     await page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "ping"));
     await expect(page.locator("#active-diagnostic-output")).toContainText("PING 1:");
     await expect(page.locator("#active-diagnostic-output")).toContainText("PING 5:");
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Ping Result");
+    await expect(page.locator(".diag-result-card")).toContainText("Packet Loss Percent");
+});
+
+test("Port Check and Traceroute return result cards from the server", async ({ page }) => {
+    await page.goto("/");
+    await page.addScriptTag({ url: "/static/js/diagnostics.js" });
+    await page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "port", 8080));
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Port Check Result");
+    await expect(page.locator(".diag-result-verdict")).toContainText("OPEN");
+    await page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "traceroute"));
+    await expect(page.locator("#active-diagnostic-output")).toContainText("HOP 5:");
+    await expect(page.locator(".diag-result-card h3")).toHaveText("Traceroute Result");
 });
 
 test("discovery loads TypeScript discovery and topology bundles", async ({ page }) => {
