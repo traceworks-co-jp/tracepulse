@@ -111,6 +111,15 @@ pub trait WebExtensionProvider: Send + Sync {
         String::new()
     }
 
+    fn handle_websocket_upgrade(
+        &self,
+        _path: &str,
+        _headers: &HashMap<String, String>,
+        _stream: TcpStream,
+    ) -> Result<(), String> {
+        Err("websocket endpoint is not available".to_string())
+    }
+
     fn observe_interface_sample(
         &self,
         _device: &DeviceConfig,
@@ -215,8 +224,18 @@ impl WebServer {
     }
 
     pub fn start(&self) -> Result<(), AppError> {
+        self.start_with_shutdown(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    pub fn start_with_shutdown(
+        &self,
+        shutdown: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), AppError> {
         let addr = format!("{}:{}", self.host, self.port);
         let listener = TcpListener::bind(&addr).map_err(|err| AppError::Io(err.to_string()))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|err| AppError::Io(err.to_string()))?;
 
         println!("Web dashboard started on http://{}/", addr);
         open_browser(&format!("http://{}/", addr));
@@ -245,9 +264,13 @@ impl WebServer {
             crate::flow::FlowCollector::start(Arc::clone(&self.repository), flow_config);
         }
 
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
+        while !shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _peer)) => {
+                    if let Err(error) = stream.set_nonblocking(false) {
+                        eprintln!("failed to configure client socket: {error}");
+                        continue;
+                    }
                     let _ = stream.set_nodelay(true);
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
                     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(10)));
@@ -271,8 +294,15 @@ impl WebServer {
                         );
                     });
                 }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(_) if shutdown.load(std::sync::atomic::Ordering::Acquire) => {
+                    break;
+                }
                 Err(err) => {
                     eprintln!("accept failed: {err}");
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
@@ -302,6 +332,7 @@ struct Request {
     method: String,
     path: String,
     body: String,
+    headers: HashMap<String, String>,
 }
 
 fn parse_request(stream: &TcpStream) -> Result<Request, AppError> {
@@ -314,6 +345,7 @@ fn parse_request(stream: &TcpStream) -> Result<Request, AppError> {
     let path = parts.next().unwrap_or("/").to_string();
 
     let mut content_length: usize = 0;
+    let mut headers = HashMap::new();
     loop {
         let mut header = String::new();
         reader.read_line(&mut header)?;
@@ -323,6 +355,9 @@ fn parse_request(stream: &TcpStream) -> Result<Request, AppError> {
         }
         if let Some(val) = header.to_lowercase().strip_prefix("content-length:") {
             content_length = val.trim().parse().unwrap_or(0);
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
 
@@ -335,6 +370,7 @@ fn parse_request(stream: &TcpStream) -> Result<Request, AppError> {
         method,
         path,
         body: String::from_utf8_lossy(&body).into_owned(),
+        headers,
     })
 }
 
@@ -420,6 +456,31 @@ fn handle_connection(
         .map(|(_, value)| value)
         .unwrap_or("");
 
+    if req.method == "GET"
+        && req
+            .headers
+            .get("upgrade")
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+    {
+        if let Some(extension) = web_extension.as_deref() {
+            return extension
+                .handle_websocket_upgrade(clean_path, &req.headers, stream)
+                .map_err(AppError::Io);
+        }
+        if clean_path == "/ws/diagnostics" {
+            let key = req
+                .headers
+                .get("sec-websocket-key")
+                .ok_or_else(|| AppError::Io("Sec-WebSocket-Key is required".to_string()))?;
+            let connection =
+                crate::diagnostics::Connection::accept(stream, key).map_err(AppError::Io)?;
+            return crate::diagnostics::handle(connection).map_err(|error| {
+                eprintln!("diagnostic websocket failed: {error}");
+                AppError::Io(error)
+            });
+        }
+    }
+
     if let Some(extension) = web_extension.as_deref()
         && let Some(response) = extension.handle_request(&req.method, clean_path, query, &req.body)
     {
@@ -489,7 +550,10 @@ fn handle_connection(
     // Route: GET /device/<ip>
     if req.method == "GET" && req.path.starts_with("/device/") {
         let ip = req.path.trim_start_matches("/device/").to_string();
-        return respond_html(stream, page_device_detail(&ip, &repo));
+        return respond_html(
+            stream,
+            page_device_detail(&ip, &repo, web_extension.is_some()),
+        );
     }
 
     if req.method == "GET" && req.path.starts_with("/diagnostics") {
@@ -2537,6 +2601,11 @@ fn page_dashboard(
     {
         html.push_str(&markup);
     }
+    html.push_str(
+        "<section id='device-attention' class='dashboard-attention' aria-live='polite'></section>",
+    );
+    html.push_str("<div class='dashboard-table-scroll' role='region' aria-labelledby='dashboard-table-title' tabindex='0'>");
+    html.push_str("<h2 id='dashboard-table-title' class='sr-only' data-i18n='registered_devices'>Registered Devices</h2>");
     html.push_str("<table id='dash-table'><thead><tr>");
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");
     html.push_str("<th id='th-name' onclick='sortBy(\"name\")' data-i18n='hostname'>Name <span class='sort-icon' id='sort-name'></span></th>");
@@ -2544,7 +2613,7 @@ fn page_dashboard(
     html.push_str("<th id='th-community' onclick='sortBy(\"community\")' data-i18n='community'>Community <span class='sort-icon' id='sort-community'></span></th>");
     html.push_str("<th id='th-last_seen' onclick='sortBy(\"last_seen\")' data-i18n='time'>Last Seen <span class='sort-icon' id='sort-last_seen'></span></th>");
     html.push_str("<th data-i18n='actions'>Actions</th>");
-    html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table>");
+    html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table></div>");
     html.push_str("<section class='detail-section' style='margin-top:1.25rem'>");
     html.push_str("<h2 data-i18n='recent_alerts_title'>Recent Alerts</h2>");
     html.push_str("<table id='alert-table'><thead><tr><th data-i18n='time'>Time</th><th data-i18n='hostname'>Device</th><th data-i18n='type'>Type</th><th data-i18n='severity'>Severity</th><th data-i18n='details'>Details</th></tr></thead><tbody>");
@@ -2640,7 +2709,11 @@ fn page_settings(
     html
 }
 
-fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
+fn page_device_detail(
+    ip: &str,
+    repo: &Arc<Mutex<Repository>>,
+    enterprise_diagnostics: bool,
+) -> String {
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
     html.push_str("<html lang='en'><head>");
@@ -2653,6 +2726,9 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
     ));
     html.push_str(COMMON_CSS);
     html.push_str(DEVICE_DETAIL_CSS);
+    if enterprise_diagnostics {
+        html.push_str("<style>#active-diagnostic-panel{position:fixed;z-index:1000;top:0;right:0;width:380px;max-width:100vw;height:100vh;background:#07111f;color:#dbeafe;box-shadow:-8px 0 24px #0008;transform:translateX(100%);transition:transform .2s ease;display:flex;flex-direction:column;font-family:monospace}#active-diagnostic-panel.open{transform:translateX(0)}#active-diagnostic-panel header,#active-diagnostic-panel footer{padding:1rem;border-bottom:1px solid #334155;display:flex;justify-content:space-between;gap:.5rem}#active-diagnostic-panel header button{background:none;border:0;color:#cbd5e1;font-size:1.3rem}#active-diagnostic-target{padding:.75rem 1rem;color:#38bdf8}#active-diagnostic-output{flex:1;overflow:auto;padding:1rem;white-space:pre-wrap;color:#a7f3d0}#active-diagnostic-panel footer{border-top:1px solid #334155;border-bottom:0}#active-diagnostic-panel footer button{width:100%;padding:.6rem;background:#0ea5e9;border:0;color:#fff;cursor:pointer}</style>");
+    }
     html.push_str("</head><body data-title-key='device_title_prefix'>");
     html.push_str(NAV_HTML);
 
@@ -2678,6 +2754,15 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
          <span id='dev-status' class='status-unknown'>unknown</span>\
          <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Device data auto-refresh: 30s</span>\
          </div>");
+    let marker = if enterprise_diagnostics {
+        "<button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'ping')\">Ping</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'traceroute')\">Traceroute</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)\">Port Check</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'latency_breakdown',443)\">Latency Breakdown</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'mtr')\">MTR &amp; MTU</button>"
+    } else {
+        "<button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'ping')\">Ping</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'traceroute')\">Traceroute</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)\">Port Check</button>"
+    };
+    html = html.replace(
+        "<span id='dev-status' class='status-unknown'>unknown</span>",
+        &format!("<span id='dev-status' class='status-unknown'>unknown</span>{marker}"),
+    );
 
     // セクション: インターフェース一覧
     html.push_str("<section class='detail-section'>");
@@ -2760,10 +2845,13 @@ fn page_device_detail(ip: &str, repo: &Arc<Mutex<Repository>>) -> String {
 
     html.push_str("</main>");
     html.push_str(&format!(
-        "<script>\nvar DEVICE_IP = '{}';\n",
-        escape_json(ip)
+        "<script>\nvar DEVICE_IP = '{}';\nwindow.TRACEPULSE_ENTERPRISE_DIAGNOSTICS = {};\n",
+        escape_json(ip),
+        enterprise_diagnostics
     ));
-    html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/device-detail.js'></script></body></html>");
+    html.push_str("</script><script src='/static/js/i18n.js'></script>");
+    html.push_str("<script src='/static/js/diagnostics.js'></script>");
+    html.push_str("<script src='/static/js/device-detail.js'></script></body></html>");
     html
 }
 
@@ -3441,7 +3529,7 @@ const SETTINGS_ACTIONS_HTML: &str = "<div class='actions'>
     <span class='toast toast-err' id='toast-err'></span>
 </div>";
 
-const NOTIFICATIONS_HTML: &str = "<section class='settings-section'><h2 data-i18n='notifications'>Alert Notifications (Slack / Teams)</h2><div class='field-row'><div class='field-group'><label><input type='checkbox' id='slack_enabled'> <span data-i18n='slack_enabled'>Enable Slack notifications</span></label><input type='text' id='slack_url' placeholder='https://hooks.slack.com/services/...'><input type='text' id='slack_url_env' placeholder='TRACEPULSE_SLACK_WEBHOOK_URL'></div><div class='field-group'><label><input type='checkbox' id='teams_enabled'> <span data-i18n='teams_enabled'>Enable Teams notifications</span></label><input type='text' id='teams_url' placeholder='https://outlook.office.com/webhook/...'><input type='text' id='teams_url_env' placeholder='TRACEPULSE_TEAMS_WEBHOOK_URL'></div></div><div class='field-row'><div class='field-group'><label data-i18n='flap_window'>Flap Guard Window (seconds)</label><input type='number' id='flap_window' min='0' max='3600'></div><div class='field-group'><label data-i18n='retry_max_attempts'>Retry Attempts</label><input type='number' id='retry_attempts' min='1' max='10'></div></div><div class='actions'><button class='btn btn-primary' onclick='saveNotifications()' data-i18n='save_notifications'>Save Notification Settings</button><button class='btn' onclick=\"testNotification('all')\" data-i18n='send_test_all'>Test enabled channels</button><span class='toast toast-ok' id='ntoast-ok'></span><span class='toast toast-err' id='ntoast-err'></span></div></section>";
+const NOTIFICATIONS_HTML: &str = r#"<section class='settings-section'><h2>Alerting &amp; Destinations</h2><div class='field-row destination-grid'><div class='field-group destination-card'><h3>Syslog</h3><label><input type='checkbox' id='syslog_enabled'> Enable Syslog</label><input type='text' id='syslog_host' placeholder='SIEM host or IP'><input type='number' id='syslog_port' min='1' max='65535' placeholder='514'><select id='syslog_transport'><option value='udp'>UDP</option><option value='tcp'>TCP</option><option value='tls'>TLS</option></select><select id='syslog_format'><option value='cef'>CEF</option><option value='rfc5424'>RFC 5424</option><option value='rfc3164'>RFC 3164</option></select><input type='text' id='syslog_app_name' placeholder='App name'><button class='btn' onclick=\"testNotification('syslog')\">Send Test Payload</button></div><div class='field-group destination-card'><h3>Generic Webhook</h3><label><input type='checkbox' id='webhook_enabled'> Enable Webhook</label><input type='url' id='webhook_url' placeholder='https://example.invalid/hook'><input type='text' id='webhook_url_env' placeholder='TRACEPULSE_WEBHOOK_URL'><button class='btn' onclick=\"testNotification('webhook')\">Send Test Payload</button></div><div class='field-group destination-card'><h3>SMTP</h3><label><input type='checkbox' id='smtp_enabled'> Enable SMTP</label><input type='text' id='smtp_host' placeholder='SMTP host'><input type='number' id='smtp_port' min='1' max='65535' placeholder='587'><input type='email' id='smtp_from' placeholder='From address'><input type='text' id='smtp_to' placeholder='Recipients, comma separated'><input type='text' id='smtp_username' placeholder='Username'><input type='text' id='smtp_password_env' placeholder='Password environment variable'><label><input type='checkbox' id='smtp_starttls' checked> STARTTLS</label><button class='btn' onclick=\"testNotification('smtp')\">Send Test Payload</button></div></div><div class='field-row'><div class='field-group'><label>Flap Guard Window (seconds)</label><input type='number' id='flap_window' min='0' max='3600'></div><div class='field-group'><label>Retry Attempts</label><input type='number' id='retry_attempts' min='1' max='10'></div><div class='field-group'><label><input type='checkbox' id='send_resolved' checked> Send [RESOLVED] recovery notifications</label></div></div><div class='actions'><button class='btn btn-primary' onclick='saveNotifications()'>Save Alerting Settings</button><button class='btn' onclick=\"testNotification('all')\">Test Enabled Destinations</button><span class='toast toast-ok' id='ntoast-ok'></span><span class='toast toast-err' id='ntoast-err'></span></div></section>"#;
 
 const DIAGNOSTICS_CSS: &str = "<style>
   .diag-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
@@ -3603,6 +3691,23 @@ const THEME_BUNDLE_JS: &str = include_str!("../../frontend/dist/theme.js");
 const I18N_BUNDLE_JS: &str = include_str!("../../frontend/dist/i18n.js");
 
 const DASHBOARD_CSS: &str = "<style>
+    .dashboard-table-scroll { max-height:min(60vh, 560px); overflow:auto; border:1px solid #334155; border-radius:.5rem; background:#1e293b; }
+    html[data-theme='light'] .dashboard-table-scroll { border-color:#cbd5e1; background:#fff; }
+    .dashboard-table-scroll #dash-table { min-width:760px; border:0; border-radius:0; }
+    .dashboard-table-scroll #dash-table thead th { position:sticky; top:0; z-index:2; }
+    .dashboard-attention { display:none; margin:0 0 1rem; padding:.85rem 1rem; border:1px solid #7f1d1d; border-left:4px solid #ef4444; border-radius:.5rem; background:rgba(127,29,29,.18); }
+    .dashboard-attention.has-items { display:block; }
+    .dashboard-attention h2 { margin:0 0 .6rem; color:#fecaca; font-size:.95rem; }
+    html[data-theme='light'] .dashboard-attention { background:#fef2f2; border-color:#fca5a5; }
+    html[data-theme='light'] .dashboard-attention h2 { color:#991b1b; }
+    .attention-list { display:flex; flex-wrap:wrap; gap:.5rem; margin:0; padding:0; list-style:none; }
+    .attention-item { display:inline-flex; align-items:center; gap:.45rem; padding:.35rem .6rem; border:1px solid rgba(248,113,113,.35); border-radius:.35rem; background:rgba(15,23,42,.4); font-size:.82rem; }
+    html[data-theme='light'] .attention-item { background:#fff; border-color:#fecaca; }
+    .attention-item a { color:#fca5a5; font-weight:600; text-decoration:none; }
+    html[data-theme='light'] .attention-item a { color:#b91c1c; }
+    .attention-reason { color:#fecaca; }
+    html[data-theme='light'] .attention-reason { color:#991b1b; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   #dash-table th { cursor:pointer; user-select:none; white-space:nowrap; }
   #dash-table th:hover { color:#e2e8f0; }
   #dash-table th.sort-asc, #dash-table th.sort-desc { color:#38bdf8; }
@@ -4271,7 +4376,50 @@ mod tests {
     use crate::db::sqlite::initialize_database;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn websocket_upgrade_preserves_first_diagnostic_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let request = super::parse_request(&stream).unwrap();
+            assert_eq!(request.path, "/ws/diagnostics");
+            let key = request.headers.get("sec-websocket-key").unwrap();
+            let connection = crate::diagnostics::Connection::accept(stream, key).unwrap();
+            crate::diagnostics::handle(connection).unwrap();
+        });
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(8))).unwrap();
+        stream.write_all(b"GET /ws/diagnostics HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        assert!(header.starts_with(b"HTTP/1.1 101"));
+        let payload = br#"{"kind":"ping","target":"127.0.0.1","count":5}"#;
+        let mask = [1_u8, 2, 3, 4];
+        let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+        frame.extend_from_slice(&mask);
+        frame.extend(payload.iter().enumerate().map(|(index, byte)| byte ^ mask[index % 4]));
+        stream.write_all(&frame).unwrap();
+        for sequence in 1..=5 {
+            let mut frame_header = [0; 2];
+            stream.read_exact(&mut frame_header).unwrap();
+            assert_eq!(frame_header[0], 0x81);
+            let mut result = vec![0; frame_header[1] as usize];
+            stream.read_exact(&mut result).unwrap();
+            let message: serde_json::Value = serde_json::from_slice(&result).unwrap();
+            assert!(message["line"].as_str().unwrap().starts_with(&format!("PING {sequence}:")));
+            assert_eq!(message["done"], sequence == 5);
+        }
+        server.join().unwrap();
+    }
 
     #[test]
     fn flow_analytics_api_exposes_extended_contract() {
@@ -4352,7 +4500,12 @@ mod tests {
                 updated_at: None,
             })
             .expect("device should save");
-        let html = page_device_detail("192.0.2.1", &Arc::new(Mutex::new(repository)));
+        let html = page_device_detail("192.0.2.1", &Arc::new(Mutex::new(repository)), false);
+        assert!(html.contains("openActiveDiagnostic(DEVICE_IP,'ping')"));
+        assert!(html.contains("openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)"));
+        assert!(html.contains("/static/js/diagnostics.js"));
+        assert!(!html.contains("latency_breakdown"));
+        assert!(!html.contains("MTR &amp; MTU"));
 
         assert!(html.contains("id='traffic-protocols-section' style='display:none'"));
         let _ = std::fs::remove_file(path);

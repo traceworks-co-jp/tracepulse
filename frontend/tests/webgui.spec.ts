@@ -15,6 +15,33 @@ test("dashboard loads compiled frontend assets without console errors", async ({
     expect(consoleErrors).toEqual([]);
 });
 
+test("restarting Ping keeps the latest diagnostic result", async ({ page }) => {
+    let requests = 0;
+    await page.routeWebSocket("**/ws/diagnostics", (socket) => {
+        socket.onMessage(() => {
+            requests++;
+            socket.send(JSON.stringify({ line: `PING ${requests}: Success - reply in 1ms`, done: true }));
+        });
+    });
+    await page.goto("/");
+    await page.addScriptTag({ url: "/static/js/diagnostics.js" });
+    const ping = () => page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "ping"));
+
+    await ping();
+    await expect(page.locator("#active-diagnostic-output")).toContainText("PING 1:");
+    await ping();
+    await expect(page.locator("#active-diagnostic-output")).toContainText("PING 2:");
+    await expect(page.locator("#active-diagnostic-output")).not.toContainText("diagnostic connection closed before a response");
+});
+
+test("Ping streams replies from the diagnostics server", async ({ page }) => {
+    await page.goto("/");
+    await page.addScriptTag({ url: "/static/js/diagnostics.js" });
+    await page.evaluate(() => (window as any).openActiveDiagnostic("127.0.0.1", "ping"));
+    await expect(page.locator("#active-diagnostic-output")).toContainText("PING 1:");
+    await expect(page.locator("#active-diagnostic-output")).toContainText("PING 5:");
+});
+
 test("discovery loads TypeScript discovery and topology bundles", async ({ page }) => {
     const consoleErrors: string[] = [];
     page.on("console", (message) => {

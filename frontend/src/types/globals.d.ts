@@ -47,6 +47,7 @@ declare global {
         sortBy?: (column: string) => void;
         unregisterDevice?: (ip: string, name: string) => void;
         INIT: SettingsFormValues;
+        TRACEPULSE_ENTERPRISE_DIAGNOSTICS?: boolean;
         populateForm?: (values: SettingsFormValues) => void;
         resetDefaults?: () => void;
         saveSettings?: () => void;
@@ -55,6 +56,10 @@ declare global {
         testNotification?: (channel: string) => void;
         saveOidOverrides?: () => void;
         startDiagnostics?: (event: SubmitEvent) => boolean;
+        openActiveDiagnostic?: (target: string, kind: "ping" | "traceroute" | "port" | "latency_breakdown" | "mtr" | "path_mtu", port?: number) => void;
+        openActiveDiagnosticWithPortPrompt?: (target: string, kind: "port" | "latency_breakdown", port?: number) => void;
+        closeActiveDiagnostic?: () => void;
+        copyActiveDiagnostic?: () => Promise<void>;
         DISCOVERY_EXISTING?: Set<string>;
         startTopologyDiscovery?: (seedIp: string, community: string) => Promise<void>;
         addManual?: () => Promise<void>;

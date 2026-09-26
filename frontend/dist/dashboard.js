@@ -110,6 +110,24 @@ var TracePulseDashboard = (() => {
   function currentDevices() {
     return window.DEVICES || [];
   }
+  function renderAttention(devices = currentDevices()) {
+    const element = document.getElementById("device-attention");
+    if (!element) return;
+    const attention = devices.filter((device) => device.error_spike || device.status === "offline" || device.status === "critical" || device.status === "warning");
+    element.classList.toggle("has-items", attention.length > 0);
+    if (attention.length === 0) {
+      element.innerHTML = "";
+      return;
+    }
+    const items = attention.map((device) => {
+      const reasons = [];
+      if (device.error_spike) reasons.push(t("error_spikes"));
+      if (device.status === "offline" || device.status === "critical") reasons.push(t("offline"));
+      else if (device.status === "warning") reasons.push(t("warning"));
+      return `<li class='attention-item'><a href='/device/${encodeURIComponent(device.ip)}'>${esc(device.name || device.ip)}</a><span class='attention-reason'>${esc(reasons.join(" / "))}</span></li>`;
+    }).join("");
+    element.innerHTML = `<h2>${t("attention_devices")}</h2><ul class='attention-list'>${items}</ul>`;
+  }
   function renderTable() {
     const tbody = document.getElementById("dash-tbody");
     if (!tbody) return;
@@ -202,6 +220,7 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
       window.DEVICES = devices;
       renderTable();
       renderSummary(devices);
+      renderAttention(devices);
       updateLastRefreshed();
     }).catch((error) => console.warn("refresh failed", error));
   }
@@ -211,6 +230,7 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
   window.sortBy = sortBy;
   window.unregisterDevice = unregisterDevice;
   renderTable();
+  renderAttention();
   updateSortIndicators();
   updateLastRefreshed();
   window.setInterval(refresh, 3e4);

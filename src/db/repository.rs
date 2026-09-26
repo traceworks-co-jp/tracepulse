@@ -1542,12 +1542,18 @@ fn application_name(protocol: String, destination_port: u16) -> String {
     format!("{name} ({protocol}/{destination_port})")
 }
 
-/// SNMP Counter32 は 2^32 を超えるとラップアラウンドするため、減少時はラップを考慮して差分を算出する。
+/// SNMP Counter32 のラップとカウンタリセットを区別して差分を算出する。
+///
+/// 現在値が小さくなっただけではラップとは限らない。機器再起動や
+/// インターフェース再初期化でもカウンタは小さくなるため、前回値が
+/// ラップ直前の領域にある場合だけ wrap-around として扱う。
 pub(crate) fn counter32_delta(previous: u64, current: u64) -> u64 {
     if current >= previous {
         current - previous
-    } else {
+    } else if previous >= u32::MAX as u64 - 1_000_000 {
         (u32::MAX as u64 + 1 - previous) + current
+    } else {
+        0
     }
 }
 
@@ -1570,4 +1576,20 @@ fn parse_interface_spike_details(details: &str) -> Option<(String, i32, u64, u64
         in_discards_str.parse().ok()?,
         out_discards_str.parse().ok()?,
     ))
+}
+
+#[cfg(test)]
+mod counter_tests {
+    use super::counter32_delta;
+
+    #[test]
+    fn counter_reset_does_not_become_a_near_u32_max_delta() {
+        assert_eq!(counter32_delta(2_000, 22), 0);
+    }
+
+    #[test]
+    fn counter32_wrap_is_preserved_near_the_upper_boundary() {
+        let previous = u32::MAX as u64 - 10;
+        assert_eq!(counter32_delta(previous, 25), 36);
+    }
 }
