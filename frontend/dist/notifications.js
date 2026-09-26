@@ -78,8 +78,8 @@ var TracePulseNotifications = (() => {
       syslog: { enabled: field("syslog_enabled").checked, host: field("syslog_host").value.trim(), port: parseInt(field("syslog_port").value, 10), transport: field("syslog_transport").value, format: field("syslog_format").value, app_name: field("syslog_app_name").value.trim() },
       smtp: { enabled: field("smtp_enabled").checked, host: field("smtp_host").value.trim(), port: parseInt(field("smtp_port").value, 10), from: field("smtp_from").value.trim(), to: field("smtp_to").value.split(",").map((value) => value.trim()).filter(Boolean), username: field("smtp_username").value.trim() || void 0, password_env: field("smtp_password_env").value.trim() || void 0, starttls: field("smtp_starttls").checked },
       flap_guard: { window_seconds: parseInt(field("flap_window").value, 10) },
-      retry: { max_attempts: parseInt(field("retry_attempts").value, 10) }
-      , send_resolved: field("send_resolved").checked
+      retry: { max_attempts: parseInt(field("retry_attempts").value, 10) },
+      send_resolved: field("send_resolved").checked
     };
   }
   function saveNotifications() {
