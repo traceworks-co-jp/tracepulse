@@ -10,6 +10,14 @@ For a new feature or a large specification, architectural, or behavioral change,
 
 For usage questions and environment-specific support, please use [GitHub Discussions](https://github.com/traceworks-co-jp/trace-pulse/discussions).
 
+## Scope and Non-Goals of TracePulse Core
+
+TracePulse Core covers self-hosted SNMP monitoring of multiple devices, CIDR discovery, local alert recording and display, and interactive TUI and Web UI diagnostics. Contributions to these capabilities, including vendor templates, are welcome within the Community edition's documented limits.
+
+Outbound alert delivery (including Slack, Teams, and email), multi-user RBAC, SIEM integrations, and Enterprise-only analytics are outside Core's scope. These capabilities are considered separately for TracePulse Enterprise; their mention here does not mean they are currently available. See the [Community Edition and Enterprise Features](README.md#community-edition-and-enterprise-features) section for the implementation boundary and edition limits.
+
+Discuss new features or changes that could cross this boundary in a GitHub Issue or Discussion before submitting a Pull Request.
+
 ## Local Development Setup
 
 ### Prerequisites

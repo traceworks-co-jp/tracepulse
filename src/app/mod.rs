@@ -77,21 +77,8 @@ impl AppRunner {
 
     pub fn run_web(self) -> Result<(), AppError> {
         println!("TracePulse WebGUI mode started");
-        if let Some(provider) = self.notifications.clone() {
-            let mut receiver = self.subscribe_alerts();
-            std::thread::spawn(move || {
-                while let Ok(event) = receiver.blocking_recv() {
-                    if let Err(error) = provider.dispatch(&event) {
-                        eprintln!("notification delivery failed: {error}");
-                    }
-                }
-            });
-        }
         let repository = Repository::new(self.connection);
-        let mut server = WebServer::new("127.0.0.1", 8080, self.config, repository);
-        if let Some(provider) = self.notifications {
-            server = server.with_notification_provider(provider);
-        }
+        let server = WebServer::new("127.0.0.1", 8080, self.config, repository);
         server.start()?;
         Ok(())
     }

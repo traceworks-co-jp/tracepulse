@@ -15,6 +15,14 @@ test("dashboard loads compiled frontend assets without console errors", async ({
     expect(consoleErrors).toEqual([]);
 });
 
+test("Community settings do not expose notification destinations", async ({ page, request }) => {
+    await page.goto("/settings");
+    await expect(page.locator(".destination-grid")).toHaveCount(0);
+    await expect(page.locator("script[src='/static/js/notifications.js']")).toHaveCount(0);
+    expect((await request.get("/static/js/notifications.js")).status()).toBe(404);
+    expect((await request.get("/api/notifications")).status()).toBe(404);
+});
+
 test("restarting Ping keeps the latest diagnostic result", async ({ page }) => {
     let requests = 0;
     await page.routeWebSocket("**/ws/diagnostics", (socket) => {

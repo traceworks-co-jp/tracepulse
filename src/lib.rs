@@ -31,10 +31,7 @@ pub fn run() -> Result<(), AppError> {
     let db_path = exe_dir().join("data.db");
     let conn = crate::db::sqlite::initialize_database(&db_path)?;
 
-    let notifications = std::sync::Arc::new(
-        crate::notifications::CommunityNotificationSettings::new(config_path),
-    );
-    let runner = AppRunner::new(config, conn).with_notification_provider(notifications);
+    let runner = AppRunner::new(config, conn);
     match mode {
         AppMode::Cli => runner.run_cli(),
         AppMode::Web => runner.run_web(),

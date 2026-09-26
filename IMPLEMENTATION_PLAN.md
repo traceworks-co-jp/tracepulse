@@ -20,7 +20,7 @@ TracePulse は、SNMP v2c を利用してネットワーク機器の状態を監
 対象外（Phase 2）:
 - 温度、電源、バッテリー等のベンダー固有環境情報
 - SPAN / パケット深掘り解析
-- Slack / Teams Webhook 通知
+- 外部通知配送（Enterprise 版）
 
 ---
 
@@ -366,7 +366,7 @@ history_days = 7
 
 - CSV 一括登録
 - 長期ログ保管の拡張
-- Slack / Teams 通知
+- 外部通知配送（Enterprise 版）
 - SPAN ベースの深掘り解析
 
 ---

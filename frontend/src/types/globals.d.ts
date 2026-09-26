@@ -51,8 +51,6 @@ declare global {
         resetDefaults?: () => void;
         saveSettings?: () => void;
         updateBar?: () => void;
-        saveNotifications?: () => Promise<boolean>;
-        testNotification?: (channel: string) => void;
         saveOidOverrides?: () => void;
         startDiagnostics?: (event: SubmitEvent) => boolean;
         openActiveDiagnostic?: (target: string, kind: string, port?: number) => void;

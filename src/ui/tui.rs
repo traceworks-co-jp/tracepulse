@@ -458,8 +458,15 @@ fn tui_text(language: &str, key: &str) -> &'static str {
     }
 }
 
-fn tui_help_text() -> String {
-    "Ready. [↑/↓/j/k] Move | [Tab] Devices/Interfaces | [Enter] Details\n[p] Protocol | [c] Clear | [1/2/3] Window | [s] Sort | [Space] Pause\n[/] Filter | [r] Poll | [d] Discovery | [n] Notify | [q] Quit".to_string()
+fn tui_help_text(notifications_available: bool) -> String {
+    let notify = if notifications_available {
+        " | [n] Notify"
+    } else {
+        ""
+    };
+    format!(
+        "Ready. [↑/↓/j/k] Move | [Tab] Devices/Interfaces | [Enter] Details\n[p] Protocol | [c] Clear | [1/2/3] Window | [s] Sort | [Space] Pause\n[/] Filter | [r] Poll | [d] Discovery{notify} | [q] Quit"
+    )
 }
 
 fn guess_local_cidr() -> String {
@@ -773,7 +780,7 @@ impl TuiRenderer {
         let tui_language = self.runner.config.display.language.as_str();
         let mut tui_paused = false;
         let mut interface_idx: usize = 0;
-        let mut status_msg = tui_help_text();
+        let mut status_msg = tui_help_text(self.runner.notification_provider().is_some());
         let flow_repository = self.runner.flow_repository();
 
         loop {
@@ -1616,9 +1623,6 @@ impl TuiRenderer {
                 && let Event::Key(key) = event::read().map_err(|e| AppError::Io(e.to_string()))?
                 && key.kind == KeyEventKind::Press
             {
-                if status_msg.starts_with("Alert notifications are available") {
-                    status_msg = tui_help_text();
-                }
                 if key.code == KeyCode::Char(' ') && !matches!(mode, TuiMode::FilterInput(_)) {
                     tui_paused = !tui_paused;
                     continue;
@@ -1698,8 +1702,8 @@ impl TuiRenderer {
                                 error_msg: None,
                             });
                         }
-                        KeyCode::Char('n') => match self.runner.notification_provider() {
-                            Some(provider) => {
+                        KeyCode::Char('n') => {
+                            if let Some(provider) = self.runner.notification_provider() {
                                 mode = TuiMode::Notifications(NotificationStatusState {
                                     status: provider.status(),
                                     selected: 0,
@@ -1708,12 +1712,7 @@ impl TuiRenderer {
                                     message_is_error: false,
                                 });
                             }
-                            None => {
-                                status_msg = String::from(
-                                    "Alert notifications are available in the Enterprise edition.",
-                                );
-                            }
-                        },
+                        }
                         KeyCode::Up | KeyCode::Char('k') => match pane {
                             Pane::Devices => {
                                 if selected_device_idx > 0 {
@@ -2093,6 +2092,12 @@ impl TuiRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_shortcut_requires_provider() {
+        assert!(!tui_help_text(false).contains("[n] Notify"));
+        assert!(tui_help_text(true).contains("[n] Notify"));
+    }
 
     #[test]
     fn test_offline_device_forces_interface_status_down() {

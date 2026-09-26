@@ -4,7 +4,6 @@ use crate::db::models::InterfacePortDelta;
 use crate::db::repository::{Repository, counter32_delta};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
-use crate::notifications::NotificationSettingsProvider;
 use crate::snmp::SnmpClient;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -69,7 +68,6 @@ impl ScanJob {
 }
 
 type JobStore = Arc<Mutex<HashMap<String, ScanJob>>>;
-type NotificationProvider = Option<Arc<dyn NotificationSettingsProvider>>;
 
 pub struct WebExtensionResponse {
     pub status: String,
@@ -147,7 +145,6 @@ pub struct WebServer {
     jobs: JobStore,
     limits: WebLimits,
     alerts: AlertBroadcaster,
-    notifications: NotificationProvider,
     web_extension: Option<Arc<dyn WebExtensionProvider>>,
     flow_repository: Option<Arc<dyn crate::flow::FlowRepository>>,
 }
@@ -204,7 +201,6 @@ impl WebServer {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             limits,
             alerts,
-            notifications: None,
             web_extension: None,
             flow_repository: None,
         }
@@ -215,14 +211,6 @@ impl WebServer {
         repository: Arc<dyn crate::flow::FlowRepository>,
     ) -> Self {
         self.flow_repository = Some(repository);
-        self
-    }
-
-    pub fn with_notification_provider(
-        mut self,
-        provider: Arc<dyn NotificationSettingsProvider>,
-    ) -> Self {
-        self.notifications = Some(provider);
         self
     }
 
@@ -287,7 +275,6 @@ impl WebServer {
                     let cfg = Arc::clone(&self.config);
                     let cfg_path = self.config_path.clone();
                     let limits = self.limits;
-                    let notifications = self.notifications.clone();
                     let web_extension = self.web_extension.clone();
                     std::thread::spawn(move || {
                         let _ = handle_connection(
@@ -297,7 +284,6 @@ impl WebServer {
                             cfg,
                             cfg_path,
                             limits,
-                            notifications,
                             web_extension,
                         );
                     });
@@ -453,7 +439,6 @@ fn handle_connection(
     cfg: Arc<Mutex<AppConfig>>,
     cfg_path: std::path::PathBuf,
     limits: WebLimits,
-    notifications: NotificationProvider,
     web_extension: Option<Arc<dyn WebExtensionProvider>>,
 ) -> Result<(), AppError> {
     let req = parse_request(&stream)?;
@@ -503,9 +488,6 @@ fn handle_connection(
     }
     if req.method == "GET" && clean_path == "/static/js/settings.js" {
         return respond_js(stream, SETTINGS_BUNDLE_JS);
-    }
-    if req.method == "GET" && clean_path == "/static/js/notifications.js" {
-        return respond_js(stream, NOTIFICATIONS_BUNDLE_JS);
     }
     if req.method == "GET" && clean_path == "/static/js/diagnostics.js" {
         return respond_js(stream, DIAGNOSTICS_BUNDLE_JS);
@@ -584,28 +566,10 @@ fn handle_connection(
             stream,
             page_diagnostics("/diagnostics", &cfg, web_extension.as_deref()),
         ),
-        ("GET", "/settings") => respond_html(
-            stream,
-            page_settings(&cfg, notifications.is_some(), web_extension.as_deref()),
-        ),
+        ("GET", "/settings") => respond_html(stream, page_settings(&cfg, web_extension.as_deref())),
         ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
         ("GET", "/api/devices") => respond_json(stream, "200 OK", api_devices(&repo, &cfg)),
         ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
-        ("GET", "/api/notifications") => respond_json(
-            stream,
-            "200 OK",
-            api_get_notifications(notifications.as_deref()),
-        ),
-        ("POST", "/api/notifications") => respond_json(
-            stream,
-            "200 OK",
-            api_post_notifications(&req.body, notifications.as_deref()),
-        ),
-        ("POST", "/api/notifications/test") => respond_json(
-            stream,
-            "200 OK",
-            api_test_notification(&req.body, notifications.as_deref()),
-        ),
         ("POST", "/api/settings") => respond_json(
             stream,
             "200 OK",
@@ -1404,39 +1368,6 @@ fn api_post_settings(
     r#"{"ok":true}"#.to_string()
 }
 
-fn api_get_notifications(provider: Option<&dyn NotificationSettingsProvider>) -> String {
-    provider
-        .map(NotificationSettingsProvider::load_json)
-        .unwrap_or_else(|| r#"{"error":"notification settings unavailable"}"#.to_string())
-}
-
-fn api_post_notifications(
-    body: &str,
-    provider: Option<&dyn NotificationSettingsProvider>,
-) -> String {
-    let Some(provider) = provider else {
-        return r#"{"error":"notification settings unavailable"}"#.to_string();
-    };
-    match provider.save_json(body) {
-        Ok(()) => r#"{"ok":true}"#.to_string(),
-        Err(error) => format!(r#"{{"error":"{}"}}"#, escape_json(&error)),
-    }
-}
-
-fn api_test_notification(
-    body: &str,
-    provider: Option<&dyn NotificationSettingsProvider>,
-) -> String {
-    let Some(provider) = provider else {
-        return r#"{"error":"notification settings unavailable"}"#.to_string();
-    };
-    let channel = extract_json_str(body, "channel").unwrap_or_else(|| "all".to_string());
-    match provider.send_test(&channel) {
-        Ok(message) => format!(r#"{{"ok":true,"message":"{}"}}"#, escape_json(&message)),
-        Err(error) => format!(r#"{{"error":"{}"}}"#, escape_json(&error)),
-    }
-}
-
 fn api_post_oid_overrides(
     body: &str,
     cfg: &Arc<Mutex<AppConfig>>,
@@ -1656,7 +1587,7 @@ fn run_scan_job(
     use crate::snmp::SnmpClient;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const CONCURRENCY: usize = 256;
+    const CONCURRENCY: usize = 64;
 
     let hosts = match enumerate_discovery_hosts(&cidr, limits) {
         Ok(h) => h,
@@ -1692,7 +1623,11 @@ fn run_scan_job(
             let client = SnmpClient::new(&community2);
             for ip in chunk {
                 let mut device = DeviceConfig::new(ip.to_string(), &community2);
-                if let Ok(sys_name) = client.probe_device(&device) {
+                let probe = client.probe_device(&device).or_else(|_| {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    client.probe_device_once(&device, std::time::Duration::from_secs(2))
+                });
+                if let Ok(sys_name) = probe {
                     device.name = sys_name;
                     device.status = "online".to_string();
                     if let Ok(mut store) = jobs2.lock()
@@ -2662,7 +2597,6 @@ fn page_dashboard(
 
 fn page_settings(
     cfg: &Arc<Mutex<AppConfig>>,
-    notifications_enabled: bool,
     extension: Option<&dyn WebExtensionProvider>,
 ) -> String {
     let mut html = String::new();
@@ -2681,9 +2615,6 @@ fn page_settings(
             .strip_suffix("</main>")
             .unwrap_or(SETTINGS_HTML),
     );
-    if notifications_enabled {
-        html.push_str(NOTIFICATIONS_HTML);
-    }
     if let Some(extension) = extension {
         html.push_str(&extension.settings_html());
     }
@@ -2707,9 +2638,6 @@ fn page_settings(
         html.push_str("var INIT = {interval:30,community:'public',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
     }
     html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/settings.js'></script>");
-    if notifications_enabled {
-        html.push_str("<script src='/static/js/notifications.js'></script>");
-    }
     if let Some(extension) = extension {
         html.push_str(&extension.settings_scripts());
     }
@@ -3537,8 +3465,6 @@ const SETTINGS_ACTIONS_HTML: &str = "<div class='actions'>
     <span class='toast toast-err' id='toast-err'></span>
 </div>";
 
-const NOTIFICATIONS_HTML: &str = r#"<section class='settings-section'><h2>Alerting &amp; Destinations</h2><div class='field-row destination-grid'><div class='field-group destination-card'><h3>Syslog</h3><label><input type='checkbox' id='syslog_enabled'> Enable Syslog</label><input type='text' id='syslog_host' placeholder='SIEM host or IP'><input type='number' id='syslog_port' min='1' max='65535' placeholder='514'><select id='syslog_transport'><option value='udp'>UDP</option><option value='tcp'>TCP</option><option value='tls'>TLS</option></select><select id='syslog_format'><option value='cef'>CEF</option><option value='rfc5424'>RFC 5424</option><option value='rfc3164'>RFC 3164</option></select><input type='text' id='syslog_app_name' placeholder='App name'><button class='btn' onclick=\"testNotification('syslog')\">Send Test Payload</button></div><div class='field-group destination-card'><h3>Generic Webhook</h3><label><input type='checkbox' id='webhook_enabled'> Enable Webhook</label><input type='url' id='webhook_url' placeholder='https://example.invalid/hook'><input type='text' id='webhook_url_env' placeholder='TRACEPULSE_WEBHOOK_URL'><button class='btn' onclick=\"testNotification('webhook')\">Send Test Payload</button></div><div class='field-group destination-card'><h3>SMTP</h3><label><input type='checkbox' id='smtp_enabled'> Enable SMTP</label><input type='text' id='smtp_host' placeholder='SMTP host'><input type='number' id='smtp_port' min='1' max='65535' placeholder='587'><input type='email' id='smtp_from' placeholder='From address'><input type='text' id='smtp_to' placeholder='Recipients, comma separated'><input type='text' id='smtp_username' placeholder='Username'><input type='text' id='smtp_password_env' placeholder='Password environment variable'><label><input type='checkbox' id='smtp_starttls' checked> STARTTLS</label><button class='btn' onclick=\"testNotification('smtp')\">Send Test Payload</button></div></div><div class='field-row'><div class='field-group'><label>Flap Guard Window (seconds)</label><input type='number' id='flap_window' min='0' max='3600'></div><div class='field-group'><label>Retry Attempts</label><input type='number' id='retry_attempts' min='1' max='10'></div><div class='field-group'><label><input type='checkbox' id='send_resolved' checked> Send [RESOLVED] recovery notifications</label></div></div><div class='actions'><button class='btn btn-primary' onclick='saveNotifications()'>Save Alerting Settings</button><button class='btn' onclick=\"testNotification('all')\">Test Enabled Destinations</button><span class='toast toast-ok' id='ntoast-ok'></span><span class='toast toast-err' id='ntoast-err'></span></div></section>"#;
-
 const DIAGNOSTICS_CSS: &str = "<style>
   .diag-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
   .diag-card { background:#0f172a; border:1px solid #334155; border-radius:.5rem; padding:1rem; }
@@ -3691,7 +3617,6 @@ const DEVICE_DETAIL_CSS: &str = "<style>
 const DEVICE_DETAIL_BUNDLE_JS: &str = include_str!("../../frontend/dist/device-detail.js");
 const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js");
 const SETTINGS_BUNDLE_JS: &str = include_str!("../../frontend/dist/settings.js");
-const NOTIFICATIONS_BUNDLE_JS: &str = include_str!("../../frontend/dist/notifications.js");
 const DIAGNOSTICS_BUNDLE_JS: &str = include_str!("../../frontend/dist/diagnostics.js");
 const DISCOVERY_BUNDLE_JS: &str = include_str!("../../frontend/dist/discovery.js");
 const TOPOLOGY_BUNDLE_JS: &str = include_str!("../../frontend/dist/topology.js");
@@ -4514,6 +4439,14 @@ mod tests {
         assert!(!community.contains("Flow Explorer"));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn community_settings_exclude_notification_destinations() {
+        let config = Arc::new(Mutex::new(AppConfig::default()));
+        let html = super::page_settings(&config, None);
+        assert!(!html.contains("destination-grid"));
+        assert!(!html.contains("notifications.js"));
     }
 
     #[test]
