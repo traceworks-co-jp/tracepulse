@@ -159,26 +159,31 @@ After launching, open `http://localhost:8080` in your web browser.
 
 ### TUI Mode Keyboard Shortcuts
 
-In TUI mode, all operations can be performed using keyboard shortcuts:
+In TUI mode, all operations can be performed using keyboard shortcuts and mouse tab selection:
 
 | Key | Function |
 | :---: | :--- |
-| **`Tab`** | **Switch Pane Focus**: Toggle focus between Device List (Top) and Interface List (Middle). |
-| **`↑` / `↓`** or **`k` / `j`** | **Navigate / Scroll**: Move selection up/down. Auto-scrolls for devices with many ports. |
-| **`Enter`** | **Context detail**: Open the Interface Error Breakdown in the Interface pane, or the Flow Inspector for the selected Top Talker in Protocol View. |
+| **`1` - `5`** | **Switch Tab**: Select Dashboard, Devices, Interfaces, Traffic, or Alerts. |
+| **`←` / `→`** or **`[`** / **`]`** | **Switch Tab**: Move to the previous or next top-level tab. |
+| **Mouse click** | **Switch Tab**: Click a tab in the top bar. |
+| **`↑` / `↓`** or **`k` / `j`** | **Navigate / Scroll**: Move selection in the current tab's list. |
+| **`Enter`** | **Context detail**: Open the selected device's interfaces, Interface Error Breakdown, Flow Inspector, or alert details. |
+| **`PgUp` / `PgDn`** | **Select Device**: Change the device shown on the Interfaces tab. |
 | **`r`** | **Manual Poll**: Perform immediate SNMP polling for all devices with progress bar overlay. |
 | **`d`** | **Network Discovery Modal**: Open CIDR discovery dialog for automated device scanning & registration. |
-| **`p`** | **Toggle Protocol View**: Switch the middle pane to Protocol & Traffic View. When entered from Interfaces, the selected interface is applied as the flow filter. |
-| **`c`** | **Clear filter**: Return Protocol View to All Interfaces, or clear the incremental text filter. |
-| **`1` / `2` / `3`** | **Time window**: Select 60 seconds, 5 minutes, or 1 hour in Protocol View. |
-| **`s`** | **Sort Top Talkers**: Cycle Bps, PPS, and Bytes order in Protocol View. |
+| **`p`** | **Toggle Traffic**: Switch between Interfaces and Traffic. When entered from Interfaces, the selected interface is applied as the flow filter. |
+| **`c`** | **Clear filter**: Clear the interface/traffic filter and incremental text filter. |
+| **`w`** | **Time window**: Cycle 60 seconds, 5 minutes, and 1 hour on Traffic. |
+| **`s`** | **Sort Top Talkers**: Cycle Bps, PPS, and Bytes order on Traffic. |
 | **`Space`** | **Pause / Resume**: Freeze or resume TUI rendering while keyboard input remains available. |
-| **`/`** | **Incremental filter**: Search IP, port, protocol, hostname, or interface text across visible lists and Top Talkers. Press `Esc` or `c` to clear. |
-| **`q`** / **`Esc`** | **Quit / Cancel**: Safely exit TUI or close the active modal dialog. |
+| **`/`** | **Incremental filter**: Search the current tab's device, interface, alert, or Top Talker list. Press `c` to clear. |
+| **`q`** / **`Esc`** | **Quit / Cancel**: `q` exits TUI; `Esc` closes an active dialog or filter input. |
 
-#### Protocol & Traffic View
+Each tab has its own main area: Dashboard summarizes health and attention items; Devices, Interfaces, Traffic, and Alerts devote the available body to their respective lists or analytics. The Interfaces tab uses the selected device, which can be changed with `PgUp` / `PgDn`.
 
-The Protocol View is a compact, terminal-width-friendly view containing:
+#### Traffic View
+
+The Traffic tab is a compact, terminal-width-friendly view containing:
 
 - Protocol share and top applications.
 - Top Talkers with Source/Destination, Protocol, Bytes, Bps, PPS, TCP flags, and In/Out interface names.
