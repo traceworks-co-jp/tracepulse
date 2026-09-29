@@ -7,6 +7,7 @@ use crate::notifications::NotificationSettingsProvider;
 use crate::ui::TuiRenderer;
 use crate::web::server::WebServer;
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -16,6 +17,7 @@ pub struct AppRunner {
     alerts: AlertBroadcaster,
     notifications: Option<Arc<dyn NotificationSettingsProvider>>,
     flow_repository: Option<Arc<dyn crate::flow::FlowRepository>>,
+    database_path: PathBuf,
 }
 
 impl AppRunner {
@@ -34,6 +36,7 @@ impl AppRunner {
             alerts,
             notifications: None,
             flow_repository: None,
+            database_path: crate::exe_dir().join("data.db"),
         }
     }
 
@@ -59,6 +62,15 @@ impl AppRunner {
 
     pub fn flow_repository(&self) -> Option<Arc<dyn crate::flow::FlowRepository>> {
         self.flow_repository.clone()
+    }
+
+    pub fn with_database_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.database_path = path.into();
+        self
+    }
+
+    pub fn database_path(&self) -> &Path {
+        &self.database_path
     }
 
     /// 外部モジュールがアラートイベントを購読するためのレシーバーを返す。

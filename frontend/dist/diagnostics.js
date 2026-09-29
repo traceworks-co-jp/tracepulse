@@ -273,7 +273,7 @@ ${JSON.stringify(result.data, null, 2)}`).join("\n\n")}`;
       memory_oid_override: document.getElementById("memory-oid-override")?.value || "",
       hardware_oid_overrides: collectHardwareOids()
     };
-    fetch("/api/diagnostics/oids", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
+    fetch("/api/diagnostics/oids", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
       const element = document.getElementById("oid-save-result");
       if (!element) return;
       if (data.ok) {

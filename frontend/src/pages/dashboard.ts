@@ -143,7 +143,7 @@ export function unregisterDevice(encodedIp: string, encodedName: string): void {
     if (!window.confirm(`${t("unregister_confirm")}\n\n${ip}${name ? ` (${name})` : ""}`)) return;
     deletingIps.add(ip);
     renderTable();
-    fetch(`/api/device/${encodeURIComponent(ip)}`, { method: "DELETE" })
+    fetch(`/api/device/${encodeURIComponent(ip)}`, { method: "DELETE", headers: { "X-CSRF-Token": window.tracepulseCsrf || "" } })
         .then(async (response) => ({ ok: response.ok, status: response.status, body: await response.json() }))
         .then((result) => {
             if (!result.ok || result.body?.error) throw new Error(result.body?.error || `HTTP ${result.status}`);

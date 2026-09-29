@@ -258,7 +258,7 @@ export function saveOidOverrides(): void {
         memory_oid_override: (document.getElementById("memory-oid-override") as HTMLInputElement)?.value || "",
         hardware_oid_overrides: collectHardwareOids(),
     };
-    fetch("/api/diagnostics/oids", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+    fetch("/api/diagnostics/oids", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) })
         .then((response) => response.json())
         .then((data: { ok?: boolean; error?: string }) => {
             const element = document.getElementById("oid-save-result");

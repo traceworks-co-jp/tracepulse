@@ -94,7 +94,7 @@ export async function startScan(): Promise<void> {
     setProgress(0, 0, 0);
     el<HTMLElement>("scan-progress").style.display = "block";
     try {
-        const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
+        const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
         const data = await response.json() as { error?: string; job_id?: string; total?: number };
         if (data.error || !data.job_id) { finishScanError(data.error || "Failed to start scan"); return; }
         currentJobId = data.job_id;
@@ -186,7 +186,7 @@ export async function registerSelected(): Promise<void> {
     if (!selected.length) { window.alert(t("select_at_least_one_device")); return; }
     const button = el<HTMLButtonElement>("register-btn"); button.disabled = true; button.textContent = t("registering");
     try {
-        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(selected) });
+        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(selected) });
         const data = await response.json() as RegisterResult;
         const result = el<HTMLElement>("register-result");
         result.className = data.error || data.registered.length === 0 ? "reg-error" : "reg-success";
@@ -207,7 +207,7 @@ export async function addManual(): Promise<void> {
     const result = el<HTMLElement>("manual-result");
     if (!ip) { result.textContent = "! IP address is required."; return; }
     try {
-        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ ip, name, community }]) });
+        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community }]) });
         const data = await response.json() as RegisterResult;
         result.textContent = data.error || data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`;
         if (data.registered.length) { existingIps().add(ip); el<HTMLInputElement>("manual-ip").value = ""; el<HTMLInputElement>("manual-name").value = ""; }

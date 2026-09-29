@@ -582,10 +582,10 @@ fn start_notification_test(
 fn start_poll_task(
     runner_config: crate::config::AppConfig,
     broadcaster: crate::alert::broadcaster::AlertBroadcaster,
+    database_path: &std::path::Path,
 ) -> Result<PollTask, AppError> {
     let repository = Repository::new(
-        rusqlite::Connection::open(crate::exe_dir().join("data.db"))
-            .map_err(|e| AppError::Database(e.to_string()))?,
+        rusqlite::Connection::open(database_path).map_err(|e| AppError::Database(e.to_string()))?,
     );
     let db_devices = repository.list_devices()?;
     let total = db_devices.len();
@@ -717,7 +717,7 @@ impl TuiRenderer {
     ) -> Result<(), AppError> {
         if self.runner.flow_repository().is_none() {
             let repository = Repository::new(
-                rusqlite::Connection::open(crate::exe_dir().join("data.db"))
+                rusqlite::Connection::open(self.runner.database_path())
                     .expect("SQLite flow repository should open"),
             );
             let repository = Arc::new(Mutex::new(repository));
@@ -727,7 +727,7 @@ impl TuiRenderer {
             );
         }
         let repository = Repository::new(
-            rusqlite::Connection::open(crate::exe_dir().join("data.db"))
+            rusqlite::Connection::open(self.runner.database_path())
                 .map_err(|e| AppError::Database(e.to_string()))?,
         );
 
@@ -735,7 +735,7 @@ impl TuiRenderer {
         {
             let polling_config = Arc::new(Mutex::new(self.runner.config.clone()));
             let polling_repository = Arc::new(Mutex::new(Repository::new(
-                rusqlite::Connection::open(crate::exe_dir().join("data.db"))
+                rusqlite::Connection::open(self.runner.database_path())
                     .map_err(|e| AppError::Database(e.to_string()))?,
             )));
             let polling_alerts = self.runner.alert_broadcaster();
@@ -795,7 +795,11 @@ impl TuiRenderer {
                 }
 
                 // 登録直後にプログレスバー付きで初回ポーリングタスクを開始
-                match start_poll_task(self.runner.config.clone(), self.runner.alert_broadcaster()) {
+                match start_poll_task(
+                    self.runner.config.clone(),
+                    self.runner.alert_broadcaster(),
+                    self.runner.database_path(),
+                ) {
                     Ok(poll_task) => {
                         mode = TuiMode::Polling(poll_task);
                     }
@@ -1849,6 +1853,7 @@ impl TuiRenderer {
                             match start_poll_task(
                                 self.runner.config.clone(),
                                 self.runner.alert_broadcaster(),
+                                self.runner.database_path(),
                             ) {
                                 Ok(poll_task) => {
                                     mode = TuiMode::Polling(poll_task);

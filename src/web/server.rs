@@ -76,6 +76,11 @@ pub struct WebExtensionResponse {
     pub no_cache: bool,
 }
 
+pub struct WebExtensionReply {
+    pub response: WebExtensionResponse,
+    pub headers: Vec<(String, String)>,
+}
+
 pub trait WebExtensionProvider: Send + Sync {
     fn handle_request(
         &self,
@@ -84,6 +89,49 @@ pub trait WebExtensionProvider: Send + Sync {
         query: &str,
         body: &str,
     ) -> Option<WebExtensionResponse>;
+
+    fn handle_request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        query: &str,
+        body: &str,
+        _headers: &HashMap<String, String>,
+    ) -> Option<WebExtensionReply> {
+        self.handle_request(method, path, query, body)
+            .map(|response| WebExtensionReply {
+                response,
+                headers: Vec::new(),
+            })
+    }
+
+    fn authorize_request(
+        &self,
+        _method: &str,
+        _path: &str,
+        _headers: &HashMap<String, String>,
+        _body: &str,
+    ) -> Result<(), WebExtensionResponse> {
+        Ok(())
+    }
+
+    fn redact_secrets(&self, _headers: &HashMap<String, String>) -> bool {
+        false
+    }
+
+    fn passive_only(&self, _headers: &HashMap<String, String>) -> bool {
+        false
+    }
+
+    fn record_mutation(
+        &self,
+        _method: &str,
+        _path: &str,
+        _headers: &HashMap<String, String>,
+        _body: &str,
+        _result: &str,
+    ) {
+    }
 
     fn dashboard_html(&self) -> Option<String> {
         None
@@ -101,8 +149,24 @@ pub trait WebExtensionProvider: Send + Sync {
         String::new()
     }
 
+    fn settings_navigation_html(&self) -> String {
+        String::new()
+    }
+
+    fn account_menu_html(&self) -> String {
+        String::new()
+    }
+
     fn settings_html(&self) -> String {
         String::new()
+    }
+
+    fn operator_settings_html(&self) -> String {
+        String::new()
+    }
+
+    fn show_core_settings(&self, _headers: &HashMap<String, String>) -> bool {
+        true
     }
 
     fn settings_scripts(&self) -> String {
@@ -211,6 +275,11 @@ impl WebServer {
         repository: Arc<dyn crate::flow::FlowRepository>,
     ) -> Self {
         self.flow_repository = Some(repository);
+        self
+    }
+
+    pub fn with_config_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.config_path = path.into();
         self
     }
 
@@ -355,6 +424,9 @@ fn parse_request(stream: &TcpStream) -> Result<Request, AppError> {
         }
     }
 
+    if content_length > 64 * 1024 {
+        return Err(AppError::Io("request body exceeds 64 KiB".to_string()));
+    }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body)?;
@@ -375,7 +447,7 @@ fn respond(
     body: String,
 ) -> Result<(), AppError> {
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -399,6 +471,50 @@ fn respond_json(stream: TcpStream, status: &str, body: String) -> Result<(), App
     respond(stream, status, "application/json; charset=utf-8", body)
 }
 
+fn strip_community(body: String) -> String {
+    fn visit(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields.remove("community");
+                fields.remove("default_community");
+                for child in fields.values_mut() {
+                    visit(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    visit(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return body;
+    };
+    visit(&mut value);
+    value.to_string()
+}
+
+fn respond_mutation(
+    stream: TcpStream,
+    extension: Option<&dyn WebExtensionProvider>,
+    request: &Request,
+    status: &str,
+    body: String,
+) -> Result<(), AppError> {
+    if let Some(extension) = extension {
+        extension.record_mutation(
+            &request.method,
+            request.path.split('?').next().unwrap_or(&request.path),
+            &request.headers,
+            &request.body,
+            &body,
+        );
+    }
+    respond_json(stream, status, body)
+}
+
 fn respond_html(stream: TcpStream, body: String) -> Result<(), AppError> {
     respond(stream, "200 OK", "text/html; charset=utf-8", body)
 }
@@ -407,21 +523,38 @@ fn respond_js(stream: TcpStream, body: &str) -> Result<(), AppError> {
     respond_app_js(stream, body)
 }
 
-fn respond_extension(
+fn respond_extension(stream: TcpStream, response: WebExtensionResponse) -> Result<(), AppError> {
+    respond_extension_reply(
+        stream,
+        WebExtensionReply {
+            response,
+            headers: Vec::new(),
+        },
+    )
+}
+
+fn respond_extension_reply(
     mut stream: TcpStream,
-    response: WebExtensionResponse,
+    reply: WebExtensionReply,
 ) -> Result<(), AppError> {
+    let WebExtensionReply { response, headers } = reply;
     let cache_control = if response.no_cache {
-        "Cache-Control: no-cache, must-revalidate"
+        "Cache-Control: no-store"
     } else {
         "Cache-Control: public, max-age=86400"
     };
+    let extra_headers = headers
+        .into_iter()
+        .filter(|(name, value)| !name.contains(['\r', '\n', ':']) && !value.contains(['\r', '\n']))
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
     let wire = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}\r\n{}X-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{}",
         response.status,
         response.content_type,
         response.body.len(),
         cache_control,
+        extra_headers,
         response.body
     );
     stream.write_all(wire.as_bytes())?;
@@ -448,6 +581,19 @@ fn handle_connection(
         .split_once('?')
         .map(|(_, value)| value)
         .unwrap_or("");
+    let redact = web_extension
+        .as_deref()
+        .is_some_and(|extension| extension.redact_secrets(&req.headers));
+    let passive = web_extension
+        .as_deref()
+        .is_some_and(|extension| extension.passive_only(&req.headers));
+
+    if let Some(extension) = web_extension.as_deref()
+        && let Err(response) =
+            extension.authorize_request(&req.method, clean_path, &req.headers, &req.body)
+    {
+        return respond_extension(stream, response);
+    }
 
     if req.method == "GET"
         && req
@@ -475,9 +621,15 @@ fn handle_connection(
     }
 
     if let Some(extension) = web_extension.as_deref()
-        && let Some(response) = extension.handle_request(&req.method, clean_path, query, &req.body)
+        && let Some(response) = extension.handle_request_with_headers(
+            &req.method,
+            clean_path,
+            query,
+            &req.body,
+            &req.headers,
+        )
     {
-        return respond_extension(stream, response);
+        return respond_extension_reply(stream, response);
     }
 
     if req.method == "GET" && clean_path == "/static/js/device-detail.js" {
@@ -512,13 +664,15 @@ fn handle_connection(
             .trim_start_matches("/api/discovery/scan/")
             .to_string();
         let body = api_scan_status(&job_id, &jobs);
+        let body = if redact { strip_community(body) } else { body };
         return respond_json(stream, "200 OK", body);
     }
 
     // Route: GET /api/device/<ip>  (IP に . を含むためパスマッチで処理)
     if req.method == "GET" && req.path.starts_with("/api/device/") {
         let ip = req.path.trim_start_matches("/api/device/").to_string();
-        let body = api_device_detail(&ip, &repo, &cfg);
+        let body = api_device_detail(&ip, &repo, &cfg, !passive);
+        let body = if redact { strip_community(body) } else { body };
         return respond_json(stream, "200 OK", body);
     }
 
@@ -534,7 +688,7 @@ fn handle_connection(
     if req.method == "DELETE" && req.path.starts_with("/api/device/") {
         let ip = req.path.trim_start_matches("/api/device/").to_string();
         let (status, body) = api_delete_device(&ip, &repo);
-        return respond_json(stream, &status, body);
+        return respond_mutation(stream, web_extension.as_deref(), &req, &status, body);
     }
 
     // Route: GET /device/<ip>
@@ -556,7 +710,7 @@ fn handle_connection(
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") | ("GET", "/dashboard") => respond_html(
             stream,
-            page_dashboard(&repo, &cfg, web_extension.as_deref()),
+            page_dashboard(&repo, &cfg, web_extension.as_deref(), redact),
         ),
         ("GET", "/discovery") => respond_html(
             stream,
@@ -566,31 +720,72 @@ fn handle_connection(
             stream,
             page_diagnostics("/diagnostics", &cfg, web_extension.as_deref()),
         ),
-        ("GET", "/settings") => respond_html(stream, page_settings(&cfg, web_extension.as_deref())),
-        ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
-        ("GET", "/api/devices") => respond_json(stream, "200 OK", api_devices(&repo, &cfg)),
-        ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
-        ("POST", "/api/settings") => respond_json(
+        ("GET", "/settings") => respond_html(
             stream,
+            page_settings(
+                &cfg,
+                web_extension.as_deref(),
+                web_extension
+                    .as_deref()
+                    .is_none_or(|extension| extension.show_core_settings(&req.headers)),
+            ),
+        ),
+        ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
+        ("GET", "/api/devices") => respond_json(
+            stream,
+            "200 OK",
+            if redact {
+                strip_community(api_devices(&repo, &cfg))
+            } else {
+                api_devices(&repo, &cfg)
+            },
+        ),
+        ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
+        ("GET", "/api/alert-thresholds") => {
+            respond_json(stream, "200 OK", api_alert_thresholds(&cfg))
+        }
+        ("POST", "/api/alert-thresholds") => respond_mutation(
+            stream,
+            web_extension.as_deref(),
+            &req,
+            "200 OK",
+            api_post_alert_thresholds(&req.body, &cfg, &cfg_path),
+        ),
+        ("POST", "/api/settings") => respond_mutation(
+            stream,
+            web_extension.as_deref(),
+            &req,
             "200 OK",
             api_post_settings(&req.body, &cfg, &cfg_path),
         ),
-        ("POST", "/api/diagnostics/oids") => respond_json(
+        ("POST", "/api/diagnostics/oids") => respond_mutation(
             stream,
+            web_extension.as_deref(),
+            &req,
             "200 OK",
             api_post_oid_overrides(&req.body, &cfg, &cfg_path),
         ),
-        ("POST", "/api/discovery/scan") => {
-            respond_json(stream, "200 OK", api_scan_start(&req.body, jobs, limits))
-        }
-        ("POST", "/api/discovery/topology") => respond_json(
+        ("POST", "/api/discovery/scan") => respond_mutation(
             stream,
+            web_extension.as_deref(),
+            &req,
+            "200 OK",
+            api_scan_start(&req.body, jobs, limits),
+        ),
+        ("POST", "/api/discovery/topology") => respond_mutation(
+            stream,
+            web_extension.as_deref(),
+            &req,
             "200 OK",
             api_discovery_topology(&req.body, &cfg, &repo, limits),
         ),
-        ("POST", "/api/discovery/register") => {
-            respond_json(stream, "200 OK", api_register(&req.body, &repo, limits))
-        }
+        ("POST", "/api/discovery/register") => respond_mutation(
+            stream,
+            web_extension.as_deref(),
+            &req,
+            "200 OK",
+            api_register(&req.body, &repo, limits),
+        ),
         _ => respond_json(
             stream,
             "404 Not Found",
@@ -1020,6 +1215,7 @@ fn api_device_detail(
     ip: &str,
     repo: &Arc<Mutex<Repository>>,
     _cfg: &Arc<Mutex<AppConfig>>,
+    active_probes: bool,
 ) -> String {
     let Ok(r) = repo.lock() else {
         return r#"{"error":"lock failed"}"#.to_string();
@@ -1038,17 +1234,21 @@ fn api_device_detail(
     let interface_spikes = r
         .get_recent_interface_spikes(device_id, 30)
         .unwrap_or_default();
-    let hardware_sensors = SnmpClient::new(device.community.clone())
-        .query_hardware_sensors(&DeviceConfig {
-            id: device.id,
-            name: device.name.clone(),
-            ip: device.ip.clone(),
-            community: device.community.clone(),
-            device_type: device.device_type.clone(),
-            status: device.status.clone(),
-            last_seen_at: device.last_seen_at.clone(),
-        })
-        .unwrap_or_default();
+    let hardware_sensors = if active_probes {
+        SnmpClient::new(device.community.clone())
+            .query_hardware_sensors(&DeviceConfig {
+                id: device.id,
+                name: device.name.clone(),
+                ip: device.ip.clone(),
+                community: device.community.clone(),
+                device_type: device.device_type.clone(),
+                status: device.status.clone(),
+                last_seen_at: device.last_seen_at.clone(),
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     // 最新インターフェーススナップショット
     let latest_ifaces = r.get_latest_interfaces(device_id).unwrap_or_default();
@@ -1366,6 +1566,82 @@ fn api_post_settings(
     }
 
     r#"{"ok":true}"#.to_string()
+}
+
+fn api_alert_thresholds(cfg: &Arc<Mutex<AppConfig>>) -> String {
+    let Ok(config) = cfg.lock() else {
+        return r#"{"error":"lock failed"}"#.into();
+    };
+    serde_json::json!({
+        "error_rate_threshold": config.alert.error_rate_threshold,
+        "spike_threshold": config.alert.spike_threshold,
+        "health_warning_threshold": config.alert.health_warning_threshold,
+        "health_critical_threshold": config.alert.health_critical_threshold,
+    })
+    .to_string()
+}
+
+fn api_post_alert_thresholds(
+    body: &str,
+    cfg: &Arc<Mutex<AppConfig>>,
+    path: &std::path::Path,
+) -> String {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(body)
+    else {
+        return r#"{"error":"invalid JSON"}"#.into();
+    };
+    if fields.is_empty()
+        || fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "error_rate_threshold"
+                    | "spike_threshold"
+                    | "health_warning_threshold"
+                    | "health_critical_threshold"
+            )
+        })
+    {
+        return r#"{"error":"unsupported field"}"#.into();
+    }
+    let Ok(mut guard) = cfg.lock() else {
+        return r#"{"error":"lock failed"}"#.into();
+    };
+    let mut updated = guard.clone();
+    for (key, value) in fields {
+        match key.as_str() {
+            "error_rate_threshold" => match value.as_f64() {
+                Some(number) if (0.0..=1.0).contains(&number) => {
+                    updated.alert.error_rate_threshold = number
+                }
+                _ => return r#"{"error":"invalid error rate"}"#.into(),
+            },
+            "spike_threshold" => match value.as_u64() {
+                Some(number) if number >= 1 => updated.alert.spike_threshold = number,
+                _ => return r#"{"error":"invalid spike threshold"}"#.into(),
+            },
+            "health_warning_threshold" => match value.as_u64() {
+                Some(number) if number <= 100 => {
+                    updated.alert.health_warning_threshold = number as u32
+                }
+                _ => return r#"{"error":"invalid warning threshold"}"#.into(),
+            },
+            "health_critical_threshold" => match value.as_u64() {
+                Some(number) if number <= 100 => {
+                    updated.alert.health_critical_threshold = number as u32
+                }
+                _ => return r#"{"error":"invalid critical threshold"}"#.into(),
+            },
+            _ => unreachable!(),
+        }
+    }
+    if updated.alert.health_warning_threshold <= updated.alert.health_critical_threshold {
+        return r#"{"error":"warning threshold must exceed critical"}"#.into();
+    }
+    if let Err(error) = persist_config(&updated, path) {
+        return serde_json::json!({"error":error}).to_string();
+    }
+    *guard = updated;
+    r#"{"ok":true}"#.into()
 }
 
 fn api_post_oid_overrides(
@@ -2478,6 +2754,7 @@ fn page_dashboard(
     repo: &Arc<Mutex<Repository>>,
     cfg: &Arc<Mutex<AppConfig>>,
     extension: Option<&dyn WebExtensionProvider>,
+    redact: bool,
 ) -> String {
     let spike_threshold = cfg.lock().map(|c| c.alert.spike_threshold).unwrap_or(10);
     let (devices, spikes_count, devices_json, recent_alerts) = {
@@ -2495,7 +2772,7 @@ fn page_dashboard(
                     escape_json(&d.ip),
                     escape_json(&d.name),
                     escape_json(&d.status),
-                    escape_json(&d.community),
+                    if redact { String::new() } else { escape_json(&d.community) },
                     escape_json(d.last_seen_at.as_deref().unwrap_or("")),
                     spike,
                 )
@@ -2598,6 +2875,7 @@ fn page_dashboard(
 fn page_settings(
     cfg: &Arc<Mutex<AppConfig>>,
     extension: Option<&dyn WebExtensionProvider>,
+    show_core_settings: bool,
 ) -> String {
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
@@ -2610,20 +2888,30 @@ fn page_settings(
     html.push_str(SETTINGS_CSS);
     html.push_str("</head><body data-title-key='settings_title'>");
     html.push_str(&navigation_html(extension));
-    html.push_str(
-        SETTINGS_HTML
-            .strip_suffix("</main>")
-            .unwrap_or(SETTINGS_HTML),
-    );
+    if show_core_settings {
+        html.push_str(
+            SETTINGS_HTML
+                .strip_suffix("</main>")
+                .unwrap_or(SETTINGS_HTML),
+        );
+    } else {
+        html.push_str("<main><h1 data-i18n='settings_title'>Settings</h1>");
+    }
     if let Some(extension) = extension {
         html.push_str(&extension.settings_html());
+        if !show_core_settings {
+            html.push_str(&extension.operator_settings_html());
+        }
     }
-    html.push_str(SETTINGS_ACTIONS_HTML);
+    if show_core_settings {
+        html.push_str(SETTINGS_ACTIONS_HTML);
+    }
     html.push_str("</main>");
-    html.push_str("<script>\n");
-    // 現在値をサーバー側でレンダリングして初期値として埋め込む
-    if let Ok(c) = cfg.lock() {
-        html.push_str(&format!(
+    if show_core_settings {
+        html.push_str("<script>\n");
+        // 現在値をサーバー側でレンダリングして初期値として埋め込む
+        if let Ok(c) = cfg.lock() {
+            html.push_str(&format!(
             "var INIT = {{interval:{},community:'{}',error_rate:{},spike:{},warn:{},crit:{},days:{},timezone:'{}'}};\n",
             c.polling.interval_seconds,
             escape_json(&c.snmp.default_community),
@@ -2634,10 +2922,13 @@ fn page_settings(
             c.retention.history_days,
             escape_json(&c.display.timezone),
         ));
+        } else {
+            html.push_str("var INIT = {interval:30,community:'public',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
+        }
+        html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/settings.js'></script>");
     } else {
-        html.push_str("var INIT = {interval:30,community:'public',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
+        html.push_str("<script src='/static/js/i18n.js'></script>");
     }
-    html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/settings.js'></script>");
     if let Some(extension) = extension {
         html.push_str(&extension.settings_scripts());
     }
@@ -2663,7 +2954,7 @@ fn page_device_detail(
     html.push_str(COMMON_CSS);
     html.push_str(DEVICE_DETAIL_CSS);
     html.push_str("</head><body data-title-key='device_title_prefix'>");
-    html.push_str(NAV_HTML);
+    html.push_str(&navigation_html(extension));
 
     // 404 check
     let exists = repo
@@ -3213,7 +3504,7 @@ const COMMON_CSS: &str = "<style>
   html[data-theme='light'] { color-scheme: light; }
   body { font-family: system-ui, sans-serif; background: #0f172a; color: #f1f5f9; min-height: 100vh; }
   html[data-theme='light'] body { background: #f8fafc; color: #0f172a; }
-  nav { background: #1e293b; border-bottom: 1px solid #334155; padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1.5rem; }
+    nav { background: #1e293b; border-bottom: 1px solid #334155; padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
   html[data-theme='light'] nav { background: #ffffff; border-bottom-color: #cbd5e1; }
   nav .brand { font-weight: 700; font-size: 1.1rem; color: #38bdf8; text-decoration: none; }
   html[data-theme='light'] nav .brand { color: #0284c7; }
@@ -3229,6 +3520,16 @@ const COMMON_CSS: &str = "<style>
   nav .lang-select, nav .theme-select { background:#0f172a; color:#f1f5f9; border:1px solid #334155; border-radius:.375rem; padding:.35rem .5rem; font-size:.85rem; }
   html[data-theme='light'] nav .lang-select, html[data-theme='light'] nav .theme-select { background:#fff; color:#0f172a; border-color:#cbd5e1; }
   nav .lang-select:focus, nav .theme-select:focus { outline:none; border-color:#3b82f6; }
+    nav .account-menu { position:relative; flex:none; }
+    nav .account-trigger { display:grid; place-items:center; width:2.25rem; height:2.25rem; border:1px solid #475569; border-radius:50%; background:#0f172a; color:#e2e8f0; cursor:pointer; }
+    nav .account-trigger:hover, nav .account-trigger:focus-visible { border-color:#38bdf8; outline:none; }
+    nav .account-panel { position:absolute; top:calc(100% + .5rem); right:0; z-index:100; min-width:11rem; padding:.35rem; border:1px solid #475569; border-radius:4px; background:#1e293b; box-shadow:0 8px 24px rgba(0,0,0,.3); }
+    nav .account-panel[hidden] { display:none; }
+    nav .account-panel a, nav .account-panel button { display:block; width:100%; padding:.55rem .7rem; border:0; border-radius:4px; background:transparent; color:#e2e8f0; text-align:left; font:inherit; font-size:.9rem; cursor:pointer; }
+    nav .account-panel a:hover, nav .account-panel button:hover, nav .account-panel a:focus-visible, nav .account-panel button:focus-visible { background:#334155; }
+    html[data-theme='light'] nav .account-trigger, html[data-theme='light'] nav .account-panel { background:#fff; color:#0f172a; border-color:#cbd5e1; }
+    html[data-theme='light'] nav .account-panel a, html[data-theme='light'] nav .account-panel button { color:#0f172a; }
+    html[data-theme='light'] nav .account-panel a:hover, html[data-theme='light'] nav .account-panel button:hover { background:#e2e8f0; }
   main { max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem; }
   h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #e2e8f0; }
   html[data-theme='light'] h1 { color:#0f172a; }
@@ -3308,6 +3609,44 @@ const COMMON_CSS: &str = "<style>
   html[data-theme='light'] .counter-delta.warn { color:#b45309; }
   html[data-theme='light'] .counter-delta.crit { color:#b91c1c; }
   html[data-theme='light'] .counter-delta.duplex { color:#6d28d9; }
+    :root { --tp-page:#0b1220; --tp-surface:#152337; --tp-raised:#1a2b40; --tp-border:#2b4057; --tp-text:#eef5fb; --tp-muted:#a6b4c6; --tp-accent:#38c5b2; --tp-accent-ink:#09211f; }
+    html[data-theme='light'] { --tp-page:#f3f7fa; --tp-surface:#ffffff; --tp-raised:#f7fafc; --tp-border:#d5e0e8; --tp-text:#152337; --tp-muted:#5d7084; --tp-accent:#148f83; --tp-accent-ink:#ffffff; }
+    body { background:radial-gradient(ellipse at 50% 0%,rgba(24,52,71,.42),transparent 54%),var(--tp-page); color:var(--tp-text); font-family:'Segoe UI',system-ui,sans-serif; line-height:1.5; }
+    html[data-theme='light'] body { background:radial-gradient(ellipse at 50% 0%,#e4f4f2,transparent 58%),var(--tp-page); color:var(--tp-text); }
+    body nav { background:rgba(21,35,55,.96); border-bottom-color:var(--tp-border); padding:.8rem clamp(1rem,3vw,2rem); gap:1rem 1.4rem; }
+    html[data-theme='light'] body nav { background:rgba(255,255,255,.96); border-bottom-color:var(--tp-border); }
+    body nav :is(.lang-select,.theme-select) { border-color:#40556d; border-radius:5px; background:#0c1727; color:var(--tp-text); }
+    html[data-theme='light'] body nav :is(.lang-select,.theme-select) { border-color:#cbd8e2; background:#fff; color:var(--tp-text); }
+    body nav .brand, html[data-theme='light'] body nav .brand { color:var(--tp-accent); }
+    body main { max-width:1200px; margin:1.75rem auto 3rem; padding:0 clamp(1rem,3vw,2rem); }
+    body main h1 { margin:0 0 1.25rem; color:var(--tp-text); font-size:1.7rem; line-height:1.25; font-weight:650; }
+    body main h2, body main h3 { color:var(--tp-text); }
+    body main :is(.card,.settings-section,.detail-section,.diag-card,.manual-box,#scan-progress,.dashboard-table-scroll,.enterprise-analytics-panel,.enterprise-analytics-grid article,.destination-card,.fx-filter-bar,.fx-zone-card,.fx-timeline,.fx-detail-scroll,.fx-axis-chart) { border-color:var(--tp-border); border-radius:8px; }
+    body main .card { background:var(--tp-surface); }
+    body main :is(.settings-section,.detail-section,.diag-card,.manual-box,#scan-progress,.dashboard-table-scroll,.enterprise-analytics-panel,.enterprise-analytics-grid article,.destination-card,.fx-filter-bar,.fx-zone-card,.fx-timeline,.fx-detail-scroll,.fx-axis-chart) { background-color:var(--tp-surface); color:var(--tp-text); }
+    body main .discovery-workflow { background:var(--tp-surface); border-color:var(--tp-border); }
+    body main .settings-section h2, body main .detail-section h2, body main .diag-card h3, body main .enterprise-card-heading h2 { color:var(--tp-accent); }
+    body main .enterprise-analytics-panel { --ea-surface:rgba(21,35,55,.72); --ea-card:#152337; --ea-border:#2b4057; --ea-heading:#eef5fb; --ea-text:#d0dce8; --ea-muted:#a6b4c6; --ea-track:#0c1727; }
+    html[data-theme='light'] body main .enterprise-analytics-panel { --ea-surface:rgba(255,255,255,.82); --ea-card:#fff; --ea-border:#d5e0e8; --ea-heading:#152337; --ea-text:#34495e; --ea-muted:#5d7084; --ea-track:#eaf0f4; }
+    body main :is(input:not([type='checkbox']):not([type='radio']):not([type='hidden']),select,textarea) { border-color:#40556d; border-radius:5px; background:#0c1727; color:var(--tp-text); font:inherit; }
+    html[data-theme='light'] body main :is(input:not([type='checkbox']):not([type='radio']):not([type='hidden']),select,textarea) { border-color:#cbd8e2; background:#fff; color:var(--tp-text); }
+    body main :is(input:not([type='checkbox']):not([type='radio']):not([type='hidden']),select,textarea):focus { border-color:var(--tp-accent); outline:none; box-shadow:0 0 0 3px rgba(56,197,178,.16); }
+    body main .btn:not(.btn-row-danger):not(.btn-secondary), body main .btn-primary { border:1px solid transparent; border-radius:5px; background:var(--tp-accent); color:var(--tp-accent-ink); transition:background .15s ease,transform .15s ease; }
+    body main .btn:not(.btn-row-danger):not(.btn-secondary):hover:not(:disabled), body main .btn-primary:hover:not(:disabled) { background:#59d8c7; }
+    body main .btn:not(.btn-row-danger):not(.btn-secondary):active:not(:disabled), body main .btn-primary:active:not(:disabled) { transform:translateY(1px); }
+    body main .btn-secondary { border-color:var(--tp-border); background:var(--tp-raised); color:var(--tp-text); }
+    body main .btn-register { background:#2ca98e; color:#071e1b; }
+    body main .actions { flex-wrap:wrap; }
+    body main table { border-color:var(--tp-border); background:var(--tp-surface); }
+    body main th { background:#0c1727; color:var(--tp-muted); border-bottom-color:var(--tp-border); }
+    html[data-theme='light'] body main th { background:#edf3f6; color:#42576b; border-bottom-color:var(--tp-border); }
+    body main td { color:var(--tp-text); }
+    body main tr:not(:last-child) td { border-bottom-color:var(--tp-border); }
+    body main tr:hover td { background:rgba(56,197,178,.06); }
+    html[data-theme='light'] body main tr:hover td { background:#eff8f7; }
+    body main a { color:var(--tp-accent); }
+    body main :is(.field-hint,.host-hint,.diag-note,.enterprise-muted,.fx-hint,.fx-summary) { color:var(--tp-muted); }
+    @media(max-width:760px) { body main { margin:1.25rem auto 2rem; } body main h1 { font-size:1.45rem; } body main .field-row, body main .hardware-oid-fields, body main .diag-grid { grid-template-columns:1fr; } body main .actions { align-items:stretch; } }
 </style>";
 
 fn navigation_html(extension: Option<&dyn WebExtensionProvider>) -> String {
@@ -3321,8 +3660,29 @@ fn navigation_html(extension: Option<&dyn WebExtensionProvider>) -> String {
             ),
             1,
         );
+        navigation = navigation.replacen(
+            "<a href='/settings' data-i18n='nav_settings'>Settings</a>",
+            &format!(
+                "{}<a href='/settings' data-i18n='nav_settings'>Settings</a>",
+                extension.settings_navigation_html()
+            ),
+            1,
+        );
+        navigation = navigation.replacen(
+            "</nav>",
+            &format!("{}</nav>", extension.account_menu_html()),
+            1,
+        );
     }
     navigation
+}
+
+pub fn shared_page_styles() -> &'static str {
+    COMMON_CSS
+}
+
+pub fn shared_navigation_html(extension: &dyn WebExtensionProvider) -> String {
+    navigation_html(Some(extension))
 }
 
 const NAV_HTML: &str = "<nav>
@@ -4297,11 +4657,11 @@ impl PollResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebLimits, WebTopologyEdge,
+        CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebLimits, WebServer, WebTopologyEdge,
         WebTopologyInterface, WebTopologyReport, annotate_edge_health, api_flow_analytics,
         api_live_flow_analytics, classify_interface_diagnostic, effective_interface_link_status,
         evaluate_port_health, merge_duplicate_edges, page_dashboard, page_device_detail,
-        page_discovery, parse_cdp_edges, persist_config,
+        page_discovery, parse_cdp_edges, persist_config, strip_community,
     };
     use crate::config::AppConfig;
     use crate::db::models::{Device, FlowRecord, InterfacePortDelta, InterfaceSample};
@@ -4309,6 +4669,97 @@ mod tests {
     use crate::db::sqlite::initialize_database;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn enterprise_can_override_core_settings_path() {
+        let connection = initialize_database(std::path::Path::new(":memory:")).unwrap();
+        let path = std::path::PathBuf::from("enterprise-settings.toml");
+        let server = WebServer::new(
+            "127.0.0.1",
+            0,
+            AppConfig::default(),
+            Repository::new(connection),
+        )
+        .with_config_path(path.clone());
+        assert_eq!(server.config_path, path);
+    }
+
+    #[test]
+    fn redacts_community_values_recursively() {
+        let body = r#"{"devices":[{"ip":"192.0.2.1","community":"private"}],"snmp":{"default_community":"private"},"ok":true}"#;
+        let redacted = strip_community(body.to_string());
+        let value: serde_json::Value = serde_json::from_str(&redacted).unwrap();
+        assert!(value["devices"][0].get("community").is_none());
+        assert!(value["snmp"].get("default_community").is_none());
+        assert_eq!(value["devices"][0]["ip"], "192.0.2.1");
+    }
+
+    #[test]
+    fn extension_guard_rejects_core_api_before_dispatch() {
+        use super::{WebExtensionProvider, WebExtensionResponse, WebServer, handle_connection};
+        use std::collections::HashMap;
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Arc;
+
+        struct Deny;
+        impl WebExtensionProvider for Deny {
+            fn handle_request(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Option<WebExtensionResponse> {
+                None
+            }
+            fn authorize_request(
+                &self,
+                _: &str,
+                _: &str,
+                _: &HashMap<String, String>,
+                _: &str,
+            ) -> Result<(), WebExtensionResponse> {
+                Err(WebExtensionResponse {
+                    status: "401 Unauthorized".into(),
+                    content_type: "application/json".into(),
+                    body: "{}".into(),
+                    no_cache: true,
+                })
+            }
+        }
+        let connection = initialize_database(std::path::Path::new(":memory:")).unwrap();
+        let server = WebServer::with_limits(
+            "127.0.0.1",
+            0,
+            AppConfig::default(),
+            Repository::new(connection),
+            WebLimits::community(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(
+                stream,
+                Arc::clone(&server.repository),
+                Arc::clone(&server.jobs),
+                Arc::clone(&server.config),
+                server.config_path.clone(),
+                server.limits,
+                Some(Arc::new(Deny)),
+            )
+            .unwrap();
+        });
+        let mut client = TcpStream::connect(endpoint).unwrap();
+        client
+            .write_all(b"GET /api/summary HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        worker.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
@@ -4431,12 +4882,14 @@ mod tests {
         let repository = Arc::new(Mutex::new(repository));
         let config = Arc::new(Mutex::new(AppConfig::default()));
 
-        let community = page_dashboard(&repository, &config, None);
+        let community = page_dashboard(&repository, &config, None, false);
         assert!(!community.contains("Sankey Flow"));
         assert!(!community.contains("GeoIP / ASN"));
         assert!(!community.contains("BGP / QoS"));
         assert!(!community.contains("Threat Badges"));
         assert!(!community.contains("Flow Explorer"));
+        assert!(community.contains("--tp-accent:#38c5b2"));
+        assert!(community.contains("body main .card { background:var(--tp-surface); }"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -4444,9 +4897,77 @@ mod tests {
     #[test]
     fn community_settings_exclude_notification_destinations() {
         let config = Arc::new(Mutex::new(AppConfig::default()));
-        let html = super::page_settings(&config, None);
+        let html = super::page_settings(&config, None, true);
         assert!(!html.contains("destination-grid"));
         assert!(!html.contains("notifications.js"));
+    }
+
+    #[test]
+    fn account_menu_is_after_language_controls() {
+        struct AccountMenu;
+        impl super::WebExtensionProvider for AccountMenu {
+            fn handle_request(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Option<super::WebExtensionResponse> {
+                None
+            }
+
+            fn account_menu_html(&self) -> String {
+                "<button id='account-trigger'>Account</button>".into()
+            }
+
+            fn settings_navigation_html(&self) -> String {
+                "<a href='/users'>User Management</a>".into()
+            }
+        }
+        let navigation = super::navigation_html(Some(&AccountMenu));
+        assert!(
+            navigation.find("User Management").unwrap()
+                < navigation.find("href='/settings'").unwrap()
+        );
+        assert!(
+            navigation.find("href='/diagnostics'").unwrap()
+                < navigation.find("User Management").unwrap()
+        );
+        assert!(
+            navigation.find("lang-select").unwrap() < navigation.find("account-trigger").unwrap()
+        );
+        assert!(navigation.find("account-trigger").unwrap() < navigation.find("</nav>").unwrap());
+    }
+
+    #[test]
+    fn restricted_settings_hide_core_credentials_and_actions() {
+        struct OperatorSettings;
+        impl super::WebExtensionProvider for OperatorSettings {
+            fn handle_request(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+            ) -> Option<super::WebExtensionResponse> {
+                None
+            }
+
+            fn settings_html(&self) -> String {
+                "<section id='operator-settings'>Notifications and alert rules</section>".into()
+            }
+
+            fn operator_settings_html(&self) -> String {
+                "<section id='operator-alert-rules'>Alert thresholds</section>".into()
+            }
+        }
+        let config = Arc::new(Mutex::new(AppConfig::default()));
+        let html = super::page_settings(&config, Some(&OperatorSettings), false);
+        assert!(html.contains("operator-settings"));
+        assert!(html.contains("operator-alert-rules"));
+        assert!(!html.contains("var INIT"));
+        assert!(!html.contains("settings.js"));
+        assert!(!html.contains("saveSettings()"));
     }
 
     #[test]
@@ -4684,6 +5205,9 @@ mod tests {
         assert!(html.contains("/static/js/discovery.js"));
         assert!(html.contains("/static/js/topology.js"));
         assert!(html.contains("id='seed-ip'"));
+        assert!(html.contains(
+            "body main .discovery-workflow { background:var(--tp-surface); border-color:var(--tp-border); }"
+        ));
     }
 
     #[test]

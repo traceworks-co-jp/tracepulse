@@ -310,7 +310,7 @@ var TracePulseTopology = (() => {
     section.style.display = "block";
     setPlaceholder("topology_running", { ip: seedIp });
     try {
-      const response = await fetch("/api/discovery/topology", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `seed_ip=${encodeURIComponent(seedIp)}&community=${encodeURIComponent(community)}` });
+      const response = await fetch("/api/discovery/topology", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: `seed_ip=${encodeURIComponent(seedIp)}&community=${encodeURIComponent(community)}` });
       const data = await response.json();
       if (data.error) {
         setPlaceholder(null, {}, data.error);

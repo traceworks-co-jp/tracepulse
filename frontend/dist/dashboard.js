@@ -200,7 +200,7 @@ var TracePulseDashboard = (() => {
 ${ip}${name ? ` (${name})` : ""}`)) return;
     deletingIps.add(ip);
     renderTable();
-    fetch(`/api/device/${encodeURIComponent(ip)}`, { method: "DELETE" }).then(async (response) => ({ ok: response.ok, status: response.status, body: await response.json() })).then((result) => {
+    fetch(`/api/device/${encodeURIComponent(ip)}`, { method: "DELETE", headers: { "X-CSRF-Token": window.tracepulseCsrf || "" } }).then(async (response) => ({ ok: response.ok, status: response.status, body: await response.json() })).then((result) => {
       if (!result.ok || result.body?.error) throw new Error(result.body?.error || `HTTP ${result.status}`);
       deletingIps.delete(ip);
       refresh();

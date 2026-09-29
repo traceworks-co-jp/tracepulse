@@ -82,7 +82,7 @@ var TracePulseSettings = (() => {
       health_critical_threshold: parseInt(element("crit_t").value, 10),
       history_days: parseInt(element("days").value, 10)
     };
-    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
+    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
       if (data.ok) {
         try {
           localStorage.setItem("tracepulse-timezone", timezone);

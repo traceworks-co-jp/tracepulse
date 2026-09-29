@@ -118,7 +118,7 @@ var TracePulseDiscovery = (() => {
     setProgress(0, 0, 0);
     el("scan-progress").style.display = "block";
     try {
-      const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
+      const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
       const data = await response.json();
       if (data.error || !data.job_id) {
         finishScanError(data.error || "Failed to start scan");
@@ -252,7 +252,7 @@ var TracePulseDiscovery = (() => {
     button.disabled = true;
     button.textContent = t("registering");
     try {
-      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(selected) });
+      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(selected) });
       const data = await response.json();
       const result = el("register-result");
       result.className = data.error || data.registered.length === 0 ? "reg-error" : "reg-success";
@@ -284,7 +284,7 @@ var TracePulseDiscovery = (() => {
       return;
     }
     try {
-      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ ip, name, community }]) });
+      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community }]) });
       const data = await response.json();
       result.textContent = data.error || data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`;
       if (data.registered.length) {
