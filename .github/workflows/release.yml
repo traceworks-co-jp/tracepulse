@@ -3,20 +3,22 @@ name: Release binaries
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    environment: production
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
+          - os: [self-hosted, Windows, X64]
             target: x86_64-pc-windows-msvc
             archive: tracepulse-windows-x86_64.zip
             binary: tracepulse.exe
@@ -42,6 +44,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -59,6 +64,73 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
+
+      # --- Windows コード署名処理 ---
+      - name: Setup .NET (for AzureSignTool)
+        if: runner.os == 'Windows'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install AzureSignTool
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: dotnet tool install --global AzureSignTool --version 6.0.0
+
+      - name: Azure Login (OIDC)
+        if: runner.os == 'Windows'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Get Key Vault Access Token
+        if: runner.os == 'Windows'
+        id: get_token
+        shell: pwsh
+        run: |
+          $token = az account get-access-token --resource "https://vault.azure.net" --query accessToken -o tsv
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
+            throw "Failed to obtain a Key Vault access token."
+          }
+          Write-Output "::add-mask::$token"
+          Add-Content -Path $env:GITHUB_ENV -Value "KEYVAULT_TOKEN=$token"
+
+      - name: Sign Executable with AzureSignTool
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          AZURE_KEYVAULT_NAME: ${{ secrets.AZURE_KEYVAULT_NAME }}
+          AZURE_CERT_NAME: ${{ secrets.AZURE_CERT_NAME }}
+        run: |
+          AzureSignTool sign `
+            -kvu "https://$($env:AZURE_KEYVAULT_NAME).vault.azure.net" `
+            -kvc "$env:AZURE_CERT_NAME" `
+            -kva "$env:KEYVAULT_TOKEN" `
+            -fd sha256 `
+            -tr "http://timestamp.digicert.com" `
+            -td sha256 `
+            "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Executable signing failed."
+          }
+
+      - name: Verify Signature
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/bin/*/x64/signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            throw "signtool.exe was not found in the Windows SDK."
+          }
+          & $signtool.FullName verify /v /pa "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Executable signature verification failed."
+          }
+      # --- ここまでコード署名 ---
 
       - name: Package Windows binary
         if: runner.os == 'Windows'
@@ -85,6 +157,14 @@ jobs:
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+      - name: Upload signed executable
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-windows-executable
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
           if-no-files-found: error
 
   publish:
