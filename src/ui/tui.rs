@@ -32,6 +32,18 @@ use crate::snmp::client::SnmpClient;
 
 pub struct TuiRenderer {
     runner: AppRunner,
+    extension: Option<Box<dyn TuiExtension>>,
+}
+
+pub trait TuiExtension: Send {
+    fn tab_labels(&self) -> &[&'static str];
+    fn tick(&mut self);
+    fn render_tab(&mut self, index: usize, frame: &mut ratatui::Frame<'_>, area: Rect);
+    fn captures_key(&self, _index: usize, _code: KeyCode) -> bool {
+        false
+    }
+    fn handle_key(&mut self, index: usize, code: KeyCode) -> bool;
+    fn status(&self, index: usize) -> String;
 }
 
 /// フォーカス中のペイン（Tab キーで切替）
@@ -49,10 +61,12 @@ enum TuiTab {
     Interfaces,
     Traffic,
     Alerts,
+    Extension(usize),
 }
 
 impl TuiTab {
     const LABELS: [&'static str; 5] = ["Dashboard", "Devices", "Interfaces", "Traffic", "Alerts"];
+    const COMPACT_LABELS: [&'static str; 5] = ["Dash", "Devices", "Ifaces", "Traffic", "Alerts"];
     const ALL: [Self; 5] = [
         Self::Dashboard,
         Self::Devices,
@@ -62,42 +76,62 @@ impl TuiTab {
     ];
 
     fn index(self) -> usize {
-        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+        match self {
+            Self::Dashboard => 0,
+            Self::Devices => 1,
+            Self::Interfaces => 2,
+            Self::Traffic => 3,
+            Self::Alerts => 4,
+            Self::Extension(index) => Self::ALL.len() + index,
+        }
     }
 
-    fn from_key(code: KeyCode) -> Option<Self> {
-        match code {
-            KeyCode::Char('1') => Some(Self::Dashboard),
-            KeyCode::Char('2') => Some(Self::Devices),
-            KeyCode::Char('3') => Some(Self::Interfaces),
-            KeyCode::Char('4') => Some(Self::Traffic),
-            KeyCode::Char('5') => Some(Self::Alerts),
+    fn from_index(index: usize) -> Option<Self> {
+        Self::ALL
+            .get(index)
+            .copied()
+            .or_else(|| (index < 9).then_some(Self::Extension(index - Self::ALL.len())))
+    }
+
+    fn extension_index(self) -> Option<usize> {
+        match self {
+            Self::Extension(index) => Some(index),
             _ => None,
         }
     }
 
-    fn from_mouse(column: u16, row: u16, area: Rect) -> Option<Self> {
+    fn from_key(code: KeyCode, tab_count: usize) -> Option<Self> {
+        let KeyCode::Char(digit @ '1'..='9') = code else {
+            return None;
+        };
+        let index = digit as usize - '1' as usize;
+        (index < tab_count)
+            .then(|| Self::from_index(index))
+            .flatten()
+    }
+
+    fn from_mouse(column: u16, row: u16, area: Rect, labels: &[&str]) -> Option<Self> {
         if area.height < 3 || row != area.y.saturating_add(1) {
             return None;
         }
         let right = area.right().saturating_sub(1);
         let mut start = area.x.saturating_add(1);
-        for (index, label) in Self::LABELS.iter().enumerate() {
+        for (index, label) in labels.iter().enumerate() {
             let end = start.saturating_add(label.len() as u16 + 2).min(right);
             if column >= start && column < end {
-                return Some(Self::ALL[index]);
+                return Self::from_index(index);
             }
             start = end.saturating_add(1);
         }
         None
     }
 
-    fn next(self) -> Self {
-        Self::ALL[(self.index() + 1) % Self::ALL.len()]
+    fn next(self, tab_count: usize) -> Self {
+        Self::from_index((self.index() + 1) % tab_count).unwrap_or(Self::Dashboard)
     }
 
-    fn previous(self) -> Self {
-        Self::ALL[(self.index() + Self::ALL.len() - 1) % Self::ALL.len()]
+    fn previous(self, tab_count: usize) -> Self {
+        Self::from_index((self.index() + tab_count - 1) % tab_count).unwrap_or(Self::Dashboard)
     }
 }
 
@@ -498,7 +532,7 @@ fn change_tui_tab(
     active_tab: &mut TuiTab,
     next: TuiTab,
     filter_query: &mut String,
-    filters: &mut [String; 5],
+    filters: &mut [String],
 ) {
     filters[active_tab.index()] = std::mem::take(filter_query);
     *active_tab = next;
@@ -531,14 +565,19 @@ fn tui_text(language: &str, key: &str) -> &'static str {
     }
 }
 
-fn tui_help_text(notifications_available: bool) -> String {
+fn tui_help_text(notifications_available: bool, tab_count: usize) -> String {
     let notify = if notifications_available {
         " | [n] Notify"
     } else {
         ""
     };
+    let tab_keys = if tab_count > TuiTab::ALL.len() {
+        "1-9"
+    } else {
+        "1-5"
+    };
     format!(
-        "Ready. [1-5 / ←/→ / [/]] Tabs | [↑/↓/j/k] Move | [Enter] Details\n[PgUp/PgDn] Device on Interfaces | [p] Traffic | [w] Window | [s] Sort\n[/] Filter | [c] Clear | [r] Poll | [d] Discovery{notify} | [Space] Pause | [q] Quit"
+        "Ready. [{tab_keys} / ←/→ / [/]] Tabs | [↑/↓/j/k] Move | [Enter] Details\n[PgUp/PgDn] Device on Interfaces | [p] Traffic | [w] Window | [s] Sort\n[/] Filter | [c] Clear | [r] Poll | [d] Discovery{notify} | [Space] Pause | [q] Quit"
     )
 }
 
@@ -761,10 +800,18 @@ fn start_poll_task(
 
 impl TuiRenderer {
     pub fn new(runner: AppRunner) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            extension: None,
+        }
     }
 
-    pub fn run(self) -> Result<(), AppError> {
+    pub fn with_extension(mut self, extension: Option<Box<dyn TuiExtension>>) -> Self {
+        self.extension = extension;
+        self
+    }
+
+    pub fn run(mut self) -> Result<(), AppError> {
         // ターミナルの Raw モード有効化と Alternate Screen への切り替え
         enable_raw_mode().map_err(|e| AppError::Io(e.to_string()))?;
         let mut stdout = io::stdout();
@@ -790,7 +837,7 @@ impl TuiRenderer {
     }
 
     fn run_app<B: ratatui::backend::Backend>(
-        &self,
+        &mut self,
         terminal: &mut Terminal<B>,
     ) -> Result<(), AppError> {
         if self.runner.flow_repository().is_none() {
@@ -857,12 +904,22 @@ impl TuiRenderer {
         let mut protocol_window = 60_i64;
         let mut protocol_sort = ProtocolSort::Bps;
         let mut filter_query = String::new();
-        let mut tab_filters = std::array::from_fn(|_| String::new());
+        let mut tab_labels = if self.extension.is_some() {
+            TuiTab::COMPACT_LABELS.to_vec()
+        } else {
+            TuiTab::LABELS.to_vec()
+        };
+        if let Some(extension) = &self.extension {
+            tab_labels.extend_from_slice(extension.tab_labels());
+        }
+        let tab_count = tab_labels.len();
+        let mut tab_filters = vec![String::new(); tab_count];
         let mut protocol_talker_idx = 0_usize;
         let tui_language = self.runner.config.display.language.as_str();
         let mut tui_paused = false;
         let mut interface_idx: usize = 0;
-        let mut status_msg = tui_help_text(self.runner.notification_provider().is_some());
+        let mut status_msg =
+            tui_help_text(self.runner.notification_provider().is_some(), tab_count);
         let flow_repository = self.runner.flow_repository();
 
         loop {
@@ -978,7 +1035,12 @@ impl TuiRenderer {
                 }
             }
 
+            if let Some(extension) = &mut self.extension {
+                extension.tick();
+            }
+
             if !tui_paused {
+                let extension = &mut self.extension;
                 terminal
                 .draw(|f| {
                     let footer_height = 3;
@@ -999,7 +1061,7 @@ impl TuiRenderer {
 
                     tab_area = chunks[0];
                     f.render_widget(
-                        Tabs::new(TuiTab::LABELS)
+                        Tabs::new(tab_labels.iter().copied())
                             .select(active_tab.index())
                             .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
                             .block(Block::default().borders(Borders::ALL).title(" TracePulse ")),
@@ -1450,8 +1512,23 @@ impl TuiRenderer {
                         }
                     }
 
+                    if let Some(index) = active_tab.extension_index() {
+                        f.render_widget(Clear, body_area);
+                        if let Some(extension) = extension.as_mut() {
+                            extension.render_tab(index, f, body_area);
+                        }
+                    }
+
                     // 4. フッター / ステータスバー
-                    let footer = Paragraph::new(status_msg.clone())
+                    let footer_text = active_tab
+                        .extension_index()
+                        .and_then(|index| {
+                            extension
+                                .as_ref()
+                                .map(|extension| extension.status(index))
+                        })
+                        .unwrap_or_else(|| status_msg.clone());
+                    let footer = Paragraph::new(footer_text)
                         .wrap(Wrap { trim: true })
                         .style(Style::default().bg(Color::DarkGray).fg(Color::White));
                     f.render_widget(footer, chunks[4]);
@@ -1876,7 +1953,9 @@ impl TuiRenderer {
                             && mouse.column >= tab_area.x
                             && mouse.column < tab_area.x.saturating_add(tab_area.width) =>
                     {
-                        if let Some(tab) = TuiTab::from_mouse(mouse.column, mouse.row, tab_area) {
+                        if let Some(tab) =
+                            TuiTab::from_mouse(mouse.column, mouse.row, tab_area, &tab_labels)
+                        {
                             change_tui_tab(
                                 &mut active_tab,
                                 tab,
@@ -1886,24 +1965,65 @@ impl TuiRenderer {
                         }
                     }
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if key.code == KeyCode::Char(' ')
+                        if active_tab.extension_index().is_none()
+                            && key.code == KeyCode::Char(' ')
                             && !matches!(mode, TuiMode::FilterInput(_))
                         {
                             tui_paused = !tui_paused;
                             continue;
                         }
-                        if key.code == KeyCode::Char('/')
+                        if active_tab.extension_index().is_none()
+                            && key.code == KeyCode::Char('/')
                             && !matches!(mode, TuiMode::FilterInput(_))
                         {
                             tui_paused = false;
                             mode = TuiMode::FilterInput(filter_query.clone());
                             continue;
                         }
+                        if matches!(mode, TuiMode::Normal)
+                            && let Some(index) = active_tab.extension_index()
+                        {
+                            let captures_key = self
+                                .extension
+                                .as_ref()
+                                .is_some_and(|extension| extension.captures_key(index, key.code));
+                            let next_tab = if captures_key {
+                                None
+                            } else {
+                                match key.code {
+                                    KeyCode::Left | KeyCode::Char('[') => {
+                                        Some(active_tab.previous(tab_count))
+                                    }
+                                    KeyCode::Right | KeyCode::Char(']') => {
+                                        Some(active_tab.next(tab_count))
+                                    }
+                                    code => TuiTab::from_key(code, tab_count),
+                                }
+                            };
+                            if let Some(next_tab) = next_tab {
+                                change_tui_tab(
+                                    &mut active_tab,
+                                    next_tab,
+                                    &mut filter_query,
+                                    &mut tab_filters,
+                                );
+                                continue;
+                            }
+                            if self
+                                .extension
+                                .as_mut()
+                                .is_some_and(|extension| extension.handle_key(index, key.code))
+                            {
+                                break;
+                            }
+                            continue;
+                        }
                         match mode {
                             TuiMode::Normal => match key.code {
                                 KeyCode::Char('q') => break,
-                                code if TuiTab::from_key(code).is_some() => {
-                                    let next = TuiTab::from_key(code).unwrap_or(active_tab);
+                                code if TuiTab::from_key(code, tab_count).is_some() => {
+                                    let next =
+                                        TuiTab::from_key(code, tab_count).unwrap_or(active_tab);
                                     change_tui_tab(
                                         &mut active_tab,
                                         next,
@@ -1912,7 +2032,7 @@ impl TuiRenderer {
                                     );
                                 }
                                 KeyCode::Left | KeyCode::Char('[') => {
-                                    let next = active_tab.previous();
+                                    let next = active_tab.previous(tab_count);
                                     change_tui_tab(
                                         &mut active_tab,
                                         next,
@@ -1921,7 +2041,7 @@ impl TuiRenderer {
                                     );
                                 }
                                 KeyCode::Right | KeyCode::Char(']') => {
-                                    let next = active_tab.next();
+                                    let next = active_tab.next(tab_count);
                                     change_tui_tab(
                                         &mut active_tab,
                                         next,
@@ -2148,6 +2268,7 @@ impl TuiRenderer {
                                             }
                                         }
                                         TuiTab::Dashboard => {}
+                                        TuiTab::Extension(_) => {}
                                     }
                                 }
                                 KeyCode::Enter if active_tab == TuiTab::Alerts => {
@@ -2544,25 +2665,51 @@ mod tests {
 
     #[test]
     fn tui_tabs_wrap_and_map_numeric_keys() {
-        assert_eq!(TuiTab::Dashboard.previous(), TuiTab::Alerts);
-        assert_eq!(TuiTab::Alerts.next(), TuiTab::Dashboard);
+        assert_eq!(TuiTab::Dashboard.previous(5), TuiTab::Alerts);
+        assert_eq!(TuiTab::Alerts.next(5), TuiTab::Dashboard);
         assert_eq!(
-            TuiTab::from_key(KeyCode::Char('1')),
+            TuiTab::from_key(KeyCode::Char('1'), 5),
             Some(TuiTab::Dashboard)
         );
-        assert_eq!(TuiTab::from_key(KeyCode::Char('5')), Some(TuiTab::Alerts));
-        assert_eq!(TuiTab::from_key(KeyCode::Char('0')), None);
+        assert_eq!(
+            TuiTab::from_key(KeyCode::Char('5'), 5),
+            Some(TuiTab::Alerts)
+        );
+        assert_eq!(
+            TuiTab::from_key(KeyCode::Char('9'), 9),
+            Some(TuiTab::Extension(3))
+        );
+        assert_eq!(TuiTab::from_key(KeyCode::Char('9'), 5), None);
+        assert_eq!(TuiTab::from_key(KeyCode::Char('0'), 9), None);
 
         let area = Rect::new(0, 0, 50, 3);
-        assert_eq!(TuiTab::from_mouse(4, 1, area), Some(TuiTab::Dashboard));
-        assert_eq!(TuiTab::from_mouse(12, 1, area), None);
-        assert_eq!(TuiTab::from_mouse(13, 1, area), Some(TuiTab::Devices));
-        assert_eq!(TuiTab::from_mouse(30, 1, area), Some(TuiTab::Interfaces));
-        assert_eq!(TuiTab::from_mouse(39, 1, area), Some(TuiTab::Traffic));
-        assert_eq!(TuiTab::from_mouse(47, 1, area), Some(TuiTab::Alerts));
-        assert_eq!(TuiTab::from_mouse(47, 0, area), None);
-        assert_eq!(TuiTab::from_mouse(49, 1, area), None);
-        assert_eq!(TuiTab::from_mouse(47, 1, Rect::new(0, 0, 40, 3)), None);
+        assert_eq!(
+            TuiTab::from_mouse(4, 1, area, &TuiTab::LABELS),
+            Some(TuiTab::Dashboard)
+        );
+        assert_eq!(TuiTab::from_mouse(12, 1, area, &TuiTab::LABELS), None);
+        assert_eq!(
+            TuiTab::from_mouse(13, 1, area, &TuiTab::LABELS),
+            Some(TuiTab::Devices)
+        );
+        assert_eq!(
+            TuiTab::from_mouse(30, 1, area, &TuiTab::LABELS),
+            Some(TuiTab::Interfaces)
+        );
+        assert_eq!(
+            TuiTab::from_mouse(39, 1, area, &TuiTab::LABELS),
+            Some(TuiTab::Traffic)
+        );
+        assert_eq!(
+            TuiTab::from_mouse(47, 1, area, &TuiTab::LABELS),
+            Some(TuiTab::Alerts)
+        );
+        assert_eq!(TuiTab::from_mouse(47, 0, area, &TuiTab::LABELS), None);
+        assert_eq!(TuiTab::from_mouse(49, 1, area, &TuiTab::LABELS), None);
+        assert_eq!(
+            TuiTab::from_mouse(47, 1, Rect::new(0, 0, 40, 3), &TuiTab::LABELS),
+            None
+        );
     }
 
     #[test]
@@ -2579,7 +2726,7 @@ mod tests {
     fn tab_switch_restores_each_tabs_filter() {
         let mut active = TuiTab::Devices;
         let mut query = "router".to_string();
-        let mut filters = std::array::from_fn(|_| String::new());
+        let mut filters = vec![String::new(); 9];
         change_tui_tab(&mut active, TuiTab::Interfaces, &mut query, &mut filters);
         assert_eq!(query, "");
         query = "uplink".to_string();
@@ -2591,8 +2738,9 @@ mod tests {
 
     #[test]
     fn notify_shortcut_requires_provider() {
-        assert!(!tui_help_text(false).contains("[n] Notify"));
-        assert!(tui_help_text(true).contains("[n] Notify"));
+        assert!(!tui_help_text(false, 5).contains("[n] Notify"));
+        assert!(tui_help_text(true, 5).contains("[n] Notify"));
+        assert!(tui_help_text(false, 9).contains("[1-9"));
     }
 
     #[test]

@@ -1,3 +1,3 @@
 pub mod tui;
 
-pub use tui::TuiRenderer;
+pub use tui::{TuiExtension, TuiRenderer};

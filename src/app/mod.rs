@@ -4,7 +4,7 @@ use crate::config::AppConfig;
 use crate::db::repository::Repository;
 use crate::error::AppError;
 use crate::notifications::NotificationSettingsProvider;
-use crate::ui::TuiRenderer;
+use crate::ui::{TuiExtension, TuiRenderer};
 use crate::web::server::WebServer;
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ pub struct AppRunner {
     alerts: AlertBroadcaster,
     notifications: Option<Arc<dyn NotificationSettingsProvider>>,
     flow_repository: Option<Arc<dyn crate::flow::FlowRepository>>,
+    tui_extension: Option<Box<dyn TuiExtension>>,
     database_path: PathBuf,
 }
 
@@ -36,6 +37,7 @@ impl AppRunner {
             alerts,
             notifications: None,
             flow_repository: None,
+            tui_extension: None,
             database_path: crate::exe_dir().join("data.db"),
         }
     }
@@ -57,6 +59,11 @@ impl AppRunner {
         repository: Arc<dyn crate::flow::FlowRepository>,
     ) -> Self {
         self.flow_repository = Some(repository);
+        self
+    }
+
+    pub fn with_tui_extension(mut self, extension: Box<dyn TuiExtension>) -> Self {
+        self.tui_extension = Some(extension);
         self
     }
 
@@ -82,8 +89,9 @@ impl AppRunner {
         self.alerts.clone()
     }
 
-    pub fn run_cli(self) -> Result<(), AppError> {
-        let renderer = TuiRenderer::new(self);
+    pub fn run_cli(mut self) -> Result<(), AppError> {
+        let extension = self.tui_extension.take();
+        let renderer = TuiRenderer::new(self).with_extension(extension);
         renderer.run()
     }
 
