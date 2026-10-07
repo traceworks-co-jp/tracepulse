@@ -1,6 +1,15 @@
 use super::{
     AlertConfig, AppConfig, DisplayConfig, FlowConfig, PollingConfig, RetentionConfig, SnmpConfig,
+    WebConfig,
 };
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            port: super::defaults::default_web_port(),
+        }
+    }
+}
 
 impl Default for PollingConfig {
     fn default() -> Self {
@@ -24,6 +33,10 @@ impl Default for SnmpConfig {
 impl Default for AlertConfig {
     fn default() -> Self {
         Self {
+            cpu: Default::default(),
+            memory: Default::default(),
+            bandwidth: Default::default(),
+            error_rate: super::defaults::default_error_rate_thresholds(),
             error_rate_threshold: super::defaults::default_error_rate_threshold(),
             spike_threshold: super::defaults::default_spike_threshold(),
             health_warning_threshold: super::defaults::default_warning_threshold(),
@@ -53,6 +66,7 @@ impl Default for DisplayConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            web: WebConfig::default(),
             polling: PollingConfig::default(),
             snmp: SnmpConfig::default(),
             alert: AlertConfig::default(),

@@ -1,3 +1,9 @@
+import { initializeOnboarding } from "../shared/onboarding";
+
+const metrics = ["cpu", "memory", "bandwidth", "error_rate"] as const;
+type Metric = typeof metrics[number];
+interface MetricThresholds { warning: number; critical: number; }
+
 interface SettingsFormValues {
     interval: number;
     community: string;
@@ -7,6 +13,7 @@ interface SettingsFormValues {
     warn: number;
     crit: number;
     days: number;
+    thresholds?: Record<Metric, MetricThresholds>;
 }
 
 function element<T extends HTMLElement>(id: string): T {
@@ -22,7 +29,11 @@ export function populateForm(values: SettingsFormValues): void {
     element<HTMLInputElement>("community").value = values.community;
     element<HTMLSelectElement>("timezone").value = values.timezone || "utc";
     try { localStorage.setItem("tracepulse-timezone", element<HTMLSelectElement>("timezone").value); } catch { /* ignore */ }
-    element<HTMLInputElement>("error_rate").value = String(values.error_rate);
+    for (const metric of metrics) {
+        const thresholds = values.thresholds?.[metric] || (metric === "error_rate" ? { warning: 5, critical: 10 } : { warning: 80, critical: 90 });
+        element<HTMLInputElement>(`${metric}_warning`).value = String(thresholds.warning);
+        element<HTMLInputElement>(`${metric}_critical`).value = String(thresholds.critical);
+    }
     element<HTMLInputElement>("spike").value = String(values.spike);
     element<HTMLInputElement>("warn_t").value = String(values.warn);
     element<HTMLInputElement>("crit_t").value = String(values.crit);
@@ -31,12 +42,19 @@ export function populateForm(values: SettingsFormValues): void {
 }
 
 export function updateBar(): void {
-    const warning = parseInt(element<HTMLInputElement>("warn_t").value, 10) || 80;
-    const critical = parseInt(element<HTMLInputElement>("crit_t").value, 10) || 60;
+    const warning = element<HTMLInputElement>("warn_t").valueAsNumber;
+    const critical = element<HTMLInputElement>("crit_t").valueAsNumber;
+    const valid = Number.isInteger(warning) && Number.isInteger(critical)
+        && warning > critical && warning <= 100 && critical >= 0;
+    element<HTMLElement>("bar-label").hidden = !valid;
+    if (!valid) return;
     const bar = element<HTMLElement>("tbar");
     bar.style.setProperty("--warn", `${warning}%`);
     bar.style.setProperty("--crit", `${critical}%`);
-    element<HTMLElement>("bar-label").textContent = `crit < ${critical} <= warn < ${warning} <= online`;
+    const ranges = { warning, critical, upper: warning - 1 };
+    for (const status of ["healthy", "warning", "critical"]) {
+        element<HTMLElement>(`legend-${status}`).textContent = window.tf?.(`score_legend_${status}`, ranges) || t(`score_legend_${status}`);
+    }
 }
 
 function showToast(ok: boolean, message?: string): void {
@@ -56,11 +74,24 @@ function showToast(ok: boolean, message?: string): void {
 
 export function saveSettings(): void {
     const timezone = element<HTMLSelectElement>("timezone").value;
+    const thresholds = {} as Record<Metric, MetricThresholds>;
+    for (const metric of metrics) {
+        const warningInput = element<HTMLInputElement>(`${metric}_warning`);
+        const criticalInput = element<HTMLInputElement>(`${metric}_critical`);
+        const warning = warningInput.valueAsNumber;
+        const critical = criticalInput.valueAsNumber;
+        if (!warningInput.checkValidity() || !criticalInput.checkValidity() || !Number.isFinite(warning) || !Number.isFinite(critical) || warning >= critical) {
+            showToast(false, t("metric_threshold_invalid"));
+            warningInput.focus();
+            return;
+        }
+        thresholds[metric] = { warning, critical };
+    }
     const payload = {
         interval_seconds: parseInt(element<HTMLInputElement>("interval").value, 10),
         default_community: element<HTMLInputElement>("community").value,
         timezone,
-        error_rate_threshold: parseFloat(element<HTMLInputElement>("error_rate").value),
+        ...thresholds,
         spike_threshold: parseInt(element<HTMLInputElement>("spike").value, 10),
         health_warning_threshold: parseInt(element<HTMLInputElement>("warn_t").value, 10),
         health_critical_threshold: parseInt(element<HTMLInputElement>("crit_t").value, 10),
@@ -86,3 +117,5 @@ window.resetDefaults = resetDefaults;
 window.saveSettings = saveSettings;
 window.updateBar = updateBar;
 populateForm(window.INIT);
+window.addEventListener("tracepulse-language-change", updateBar);
+document.addEventListener("DOMContentLoaded", () => initializeOnboarding());

@@ -108,6 +108,8 @@ declare global {
 
     interface DashboardDevice {
         ip: string;
+        health_score?: number | null;
+        health_status?: string | null;
         name?: string;
         status?: string;
         community?: string;

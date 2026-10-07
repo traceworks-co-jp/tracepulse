@@ -1,5 +1,6 @@
 import { esc as escapeHtml } from "../shared/escape";
 import { fmtTime, formatTracePulseClock } from "../shared/format";
+import { initializeOnboarding } from "../shared/onboarding";
 
 interface DashboardDevice {
     ip: string;
@@ -9,9 +10,11 @@ interface DashboardDevice {
     last_seen?: string;
     last_seen_at?: string;
     error_spike?: boolean;
+    health_score?: number | null;
+    health_status?: string | null;
 }
 
-const columns = ["ip", "name", "status", "community", "last_seen"] as const;
+const columns = ["ip", "name", "status", "health_score", "community", "last_seen"] as const;
 let sortColumn: (typeof columns)[number] = "ip";
 let sortAscending = true;
 const deletingIps = new Set<string>();
@@ -34,6 +37,7 @@ function statusOrder(status?: string): number {
 function compareValue(a: DashboardDevice, b: DashboardDevice, column: (typeof columns)[number]): number {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
     if (column === "status") return statusOrder(a.status) - statusOrder(b.status);
+    if (column === "health_score") return (a.health_score ?? -1) - (b.health_score ?? -1);
     const left = String(a[column] || "").toLowerCase();
     const right = String(b[column] || "").toLowerCase();
     return left < right ? -1 : left > right ? 1 : 0;
@@ -55,7 +59,8 @@ function renderAttention(devices: DashboardDevice[] = currentDevices()): void {
     const items = attention.map((device) => {
         const reasons: string[] = [];
         if (device.error_spike) reasons.push(t("error_spikes"));
-        if (device.status === "offline" || device.status === "critical") reasons.push(t("offline"));
+        if (device.status === "offline") reasons.push(t("offline"));
+        else if (device.status === "critical") reasons.push("Critical");
         else if (device.status === "warning") reasons.push(t("warning"));
         return `<li class='attention-item'><a href='/device/${encodeURIComponent(device.ip)}'>${escapeHtml(device.name || device.ip)}</a><span class='attention-reason'>${escapeHtml(reasons.join(" / "))}</span></li>`;
     }).join("");
@@ -73,7 +78,7 @@ export function renderTable(): void {
     });
 
     if (sorted.length === 0) {
-        tbody.innerHTML = `<tr><td colspan=6 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan=7 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
         return;
     }
 
@@ -88,7 +93,9 @@ export function renderTable(): void {
         const encodedName = encodeURIComponent(device.name || device.ip);
         const actionButton = `<button class='btn-row-danger' data-ip='${encodedIp}' data-name='${encodedName}' onclick='unregisterDevice(this.dataset.ip,this.dataset.name)' ${deleting ? "disabled" : ""}>${actionLabel}</button>`;
         const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
-        return `<tr${rowClass}><td><a href='/device/${encodeURIComponent(device.ip)}' style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(device.name || "")}${spikeBadge}</td><td><span class=${statusClass}>${escapeHtml(device.status)}</span></td><td>${escapeHtml(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
+        const healthClass = classMap[device.health_status || ""] || "status-unknown";
+        const health = typeof device.health_score === "number" ? `<span class='${healthClass}'>${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label='${escapeHtml(t("health_score"))}' style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
+        return `<tr${rowClass}><td><a href='/device/${encodeURIComponent(device.ip)}' style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(device.name || "")}${spikeBadge}</td><td><span class=${statusClass}>${escapeHtml(device.status)}</span></td><td>${health}</td><td>${escapeHtml(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
     }).join("");
 }
 
@@ -118,12 +125,14 @@ export function sortBy(column: string): void {
 export function renderSummary(devices: DashboardDevice[] = currentDevices()): void {
     let online = 0;
     let warning = 0;
+    let critical = 0;
     let offline = 0;
     let spikes = 0;
     devices.forEach((device) => {
         if (device.status === "online") online++;
         else if (device.status === "warning") warning++;
-        else if (device.status === "offline" || device.status === "critical") offline++;
+        else if (device.status === "critical") critical++;
+        else if (device.status === "offline") offline++;
         if (device.error_spike) spikes++;
     });
     const element = document.getElementById("summary-cards");
@@ -132,6 +141,7 @@ export function renderSummary(devices: DashboardDevice[] = currentDevices()): vo
     element.innerHTML =
         `<div class='card card-online'><div class='card-num'>${online}</div><div class='card-label'>${t("online")}</div></div>` +
         `<div class='card card-warning'><div class='card-num'>${warning}</div><div class='card-label'>${t("warning")}</div></div>` +
+        `<div class='card card-offline'><div class='card-num'>${critical}</div><div class='card-label'>Critical</div></div>` +
         `<div class='card card-offline'><div class='card-num'>${offline}</div><div class='card-label'>${t("offline")}</div></div>` +
         `<div class='card'><div class='card-num'>${devices.length}</div><div class='card-label'>${t("total")}</div></div>` +
         `<div class='${spikeClass}'><div class='card-num'>${spikes}</div><div class='card-label'>${t("error_spikes")}</div></div>`;
@@ -183,7 +193,9 @@ window.sortBy = sortBy;
 window.unregisterDevice = unregisterDevice;
 
 renderTable();
+renderSummary();
 renderAttention();
 updateSortIndicators();
 updateLastRefreshed();
 window.setInterval(refresh, 30_000);
+document.addEventListener("DOMContentLoaded", () => initializeOnboarding(true));

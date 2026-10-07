@@ -45,6 +45,14 @@ The test server uses `127.0.0.1:8080`; stop any existing TracePulse WebGUI
 process on that port before running the suite so Playwright does not reuse an
 older binary.
 
+To test a fresh server already running at another address, set
+`TRACEPULSE_TEST_BASE_URL` before running the tests (for example, in PowerShell:
+`$env:TRACEPULSE_TEST_BASE_URL = 'http://127.0.0.1:8081'`). The default auto-start
+command still starts the ordinary WebGUI on port 8080, so start the alternate
+server separately first with `cargo run -- --web --port 8081`. The configured
+`[web] port` can also change the default port. Browser tests reuse a running server and do not rebuild
+its embedded JavaScript; rebuild and restart it after changing frontend bundles.
+
 ## Runtime globals
 
 Values injected by `src/web/server.rs` are typed in

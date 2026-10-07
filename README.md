@@ -153,6 +153,8 @@ cargo run -- --web
 ```
 After launching, open `http://localhost:8080` in your web browser.
 
+To use another port, run `./tracepulse --web --port 9090` (or `--port=9090`), then open `http://127.0.0.1:9090`. For a persistent default, add `[web]` with `port = 9090` to `config.toml` beside the executable. Priority: `--port` > `[web] port` > 8080. Ports must be integers from 1 to 65535. A command-line override applies only to that launch; it does not rewrite the configuration file. The listener remains local-only (`127.0.0.1`).
+
 ---
 
 ## User Operations Guide
@@ -262,14 +264,21 @@ ipfix_port = 4739
 sflow_port = 6343
 
 [alert]
-error_rate_threshold = 0.05
 spike_threshold = 10
 health_warning_threshold = 80
 health_critical_threshold = 60
+cpu = { warning = 80.0, critical = 90.0 }
+memory = { warning = 80.0, critical = 90.0 }
+bandwidth = { warning = 80.0, critical = 90.0 }
+error_rate = { warning = 5.0, critical = 10.0 }
 
 [retention]
 history_days = 7
 ```
+
+Metric thresholds are percentages: alerts fire at or above Warning / Critical, independently for each metric. Health score thresholds control the dashboard indicator only. Repeated alerts are suppressed until severity changes or the metric recovers. Error rate uses polling deltas: errors / (successful packets + errors) x 100; the first sample, idle intervals, and counter resets are not evaluated. CPU or memory values that cannot be collected are not treated as zero for alerting or health display.
+
+Legacy `error_rate_threshold` fractions migrate to an error-rate Warning percentage on load, with Critical set to twice Warning (capped at 100%). Invalid legacy pairs use the 5% / 10% defaults.
 
 ---
 
@@ -426,6 +435,8 @@ cargo run -- --web
 ```
 起動後、ブラウザで `http://localhost:8080` へアクセスしてください。
 
+別のポートを使う場合は `./tracepulse --web --port 9090`（または `--port=9090`）で起動し、`http://127.0.0.1:9090` へアクセスします。常用するポートは、実行ファイルと同じディレクトリの `config.toml` に `[web]` と `port = 9090` を設定します。優先順位は `--port` > `[web] port` > 8080、有効範囲は1〜65535の整数です。起動引数の指定はその起動中のみ有効で、設定ファイルを書き換えません。待受アドレスは従来どおり `127.0.0.1`（ローカルのみ）です。
+
 ---
 
 ## ユーザー操作ガイド
@@ -528,14 +539,21 @@ ipfix_port = 4739
 sflow_port = 6343
 
 [alert]
-error_rate_threshold = 0.05
 spike_threshold = 10
 health_warning_threshold = 80
 health_critical_threshold = 60
+cpu = { warning = 80.0, critical = 90.0 }
+memory = { warning = 80.0, critical = 90.0 }
+bandwidth = { warning = 80.0, critical = 90.0 }
+error_rate = { warning = 5.0, critical = 10.0 }
 
 [retention]
 history_days = 7
 ```
+
+個別閾値の単位は%です。CPU・メモリ・帯域利用率・エラー率それぞれで、値がWarning / Critical以上になると発報します。ヘルススコア閾値はダッシュボードの表示専用です。同じ重要度の継続超過は再発報せず、重要度の変化・回復後の再超過時に発報します。エラー率はポーリング間の差分から「エラー / (正常パケット + エラー) x 100」で計算し、初回・無通信・カウンタリセット時は判定しません。CPU・メモリ未取得時は0%とみなさず、スコアも未取得表示にします。
+
+旧`error_rate_threshold`の小数設定は読込時にWarningの%値へ移行し、CriticalはWarningの2倍（上限100%）になります。移行後に有効な閾値の組が作れない場合は初期値5% / 10%を使用します。
 
 ---
 

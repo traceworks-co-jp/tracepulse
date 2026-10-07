@@ -25,6 +25,14 @@ pub struct SnmpConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AlertConfig {
+    #[serde(default)]
+    pub cpu: crate::alert::rules::MetricThresholds,
+    #[serde(default)]
+    pub memory: crate::alert::rules::MetricThresholds,
+    #[serde(default)]
+    pub bandwidth: crate::alert::rules::MetricThresholds,
+    #[serde(default = "defaults::default_error_rate_thresholds")]
+    pub error_rate: crate::alert::rules::MetricThresholds,
     #[serde(default = "defaults::default_error_rate_threshold")]
     pub error_rate_threshold: f64,
     #[serde(default = "defaults::default_spike_threshold")]
@@ -73,7 +81,15 @@ impl Default for FlowConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WebConfig {
+    #[serde(default = "defaults::default_web_port")]
+    pub port: std::num::NonZeroU16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub web: WebConfig,
     #[serde(default)]
     pub polling: PollingConfig,
     #[serde(default)]
@@ -95,7 +111,24 @@ impl AppConfig {
         }
 
         let content = std::fs::read_to_string(path)?;
-        let config: AppConfig = toml::from_str(&content)?;
+        let mut config: AppConfig = toml::from_str(&content)?;
+        let root: toml::Value = toml::from_str(&content)?;
+        if let Some(alert) = root.get("alert") {
+            if alert.get("error_rate").is_none() && alert.get("error_rate_threshold").is_some() {
+                let warning = config.alert.error_rate_threshold * 100.0;
+                let migrated = crate::alert::rules::MetricThresholds {
+                    warning,
+                    critical: (warning * 2.0).min(100.0),
+                };
+                if migrated.validate() {
+                    config.alert.error_rate = migrated;
+                }
+            }
+        }
+        if [&config.alert.cpu, &config.alert.memory, &config.alert.bandwidth, &config.alert.error_rate]
+            .iter().any(|thresholds| !thresholds.validate()) {
+            return Err(crate::error::AppError::Config("metric thresholds must satisfy 0 < warning < critical <= 100".into()));
+        }
         Ok(config)
     }
 }

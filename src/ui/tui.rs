@@ -695,6 +695,7 @@ fn start_poll_task(
     runner_config: crate::config::AppConfig,
     broadcaster: crate::alert::broadcaster::AlertBroadcaster,
     database_path: &std::path::Path,
+    metric_tracker: Arc<Mutex<crate::alert::rules::MetricAlertTracker>>,
 ) -> Result<PollTask, AppError> {
     let repository = Repository::new(
         rusqlite::Connection::open(database_path).map_err(|e| AppError::Database(e.to_string()))?,
@@ -739,6 +740,9 @@ fn start_poll_task(
                     if !dev.status.eq_ignore_ascii_case("offline") {
                         engine.publish_alert(AlertEvent::device_offline(&cfg, "SNMP timeout"));
                     }
+                    if let (Some(id), Ok(mut tracker)) = (dev.id, metric_tracker.lock()) {
+                        tracker.transitions(id, Vec::new());
+                    }
                     polled.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
@@ -746,6 +750,7 @@ fn start_poll_task(
                 if let Ok((system, interfaces)) = engine.poll_device(&cfg) {
                     let _ = engine.repository.update_device_status(&cfg.ip, "online");
                     if let Some(device_id) = dev.id {
+                        let mut metric_events = engine.config.alert.system_alerts(&cfg, system.cpu_usage, system.memory_usage);
                         let now = chrono::Utc::now().to_rfc3339();
                         let metrics = DeviceMetrics {
                             id: None,
@@ -761,10 +766,8 @@ fn start_poll_task(
                             let mut sample = iface.clone();
                             sample.device_id = device_id;
                             sample.sampled_at = now.clone();
-                            if let Ok(Some(prev)) = engine
-                                .repository
-                                .get_latest_interface_sample(device_id, sample.if_index)
-                            {
+                            let previous = engine.repository.get_latest_interface_sample(device_id, sample.if_index).ok().flatten();
+                            if let Some(prev) = previous.as_ref() {
                                 sample.bandwidth_utilization =
                                     calculate_bandwidth_utilization_from_delta(
                                         prev.in_octets.saturating_add(prev.out_octets),
@@ -773,7 +776,21 @@ fn start_poll_task(
                                         1_000_000_000,
                                     );
                             }
+                            metric_events.extend(engine.config.alert.interface_alerts(&cfg, previous.as_ref(), &sample));
                             let _ = engine.repository.save_sample(&sample);
+                        }
+
+                        let status = if metric_events.iter().any(|event| event.severity == crate::alert::AlertSeverity::Critical) { "critical" }
+                            else if !metric_events.is_empty() { "warning" } else { "online" };
+                        let _ = engine.repository.update_device_status(&cfg.ip, status);
+                        let transitions = metric_tracker.lock().map(|mut tracker| tracker.transitions(device_id, metric_events)).unwrap_or_default();
+                        for event in transitions {
+                            let _ = engine.repository.save_alert(&crate::db::models::AlertEvent {
+                                id: None, device_id, alert_type: event.kind.as_str().to_string(),
+                                severity: event.severity.to_string(), details: event.message.clone(),
+                                created_at: Some(event.occurred_at.to_rfc3339()),
+                            });
+                            engine.publish_alert(event);
                         }
 
                         let spike_threshold = engine.config.alert.spike_threshold;
@@ -921,6 +938,7 @@ impl TuiRenderer {
         let mut status_msg =
             tui_help_text(self.runner.notification_provider().is_some(), tab_count);
         let flow_repository = self.runner.flow_repository();
+        let metric_tracker = Arc::new(Mutex::new(crate::alert::rules::MetricAlertTracker::default()));
 
         loop {
             // スキャン完了チェック
@@ -938,6 +956,7 @@ impl TuiRenderer {
                     self.runner.config.clone(),
                     self.runner.alert_broadcaster(),
                     self.runner.database_path(),
+                    Arc::clone(&metric_tracker),
                 ) {
                     Ok(poll_task) => {
                         mode = TuiMode::Polling(poll_task);
@@ -2382,6 +2401,7 @@ impl TuiRenderer {
                                         self.runner.config.clone(),
                                         self.runner.alert_broadcaster(),
                                         self.runner.database_path(),
+                                        Arc::clone(&metric_tracker),
                                     ) {
                                         Ok(poll_task) => {
                                             mode = TuiMode::Polling(poll_task);

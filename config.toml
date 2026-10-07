@@ -1,3 +1,6 @@
+[web]
+port = 8080
+
 [polling]
 interval_seconds = 30
 
@@ -14,10 +17,13 @@ sflow_port = 6343
 timezone = "utc" # "utc" または "jst"
 
 [alert]
-error_rate_threshold = 0.05
 spike_threshold = 10
 health_warning_threshold = 80
 health_critical_threshold = 60
+cpu = { warning = 80.0, critical = 90.0 }
+memory = { warning = 80.0, critical = 90.0 }
+bandwidth = { warning = 80.0, critical = 90.0 }
+error_rate = { warning = 5.0, critical = 10.0 }
 
 [retention]
 history_days = 7

@@ -98,7 +98,12 @@ impl AppRunner {
     pub fn run_web(self) -> Result<(), AppError> {
         println!("TracePulse WebGUI mode started");
         let repository = Repository::new(self.connection);
-        let server = WebServer::new("127.0.0.1", 8080, self.config, repository);
+        let server = WebServer::new(
+            "127.0.0.1",
+            self.config.web.port.get(),
+            self.config,
+            repository,
+        );
         server.start()?;
         Ok(())
     }

@@ -2,6 +2,10 @@ pub fn default_polling_interval() -> u64 {
     30
 }
 
+pub fn default_web_port() -> std::num::NonZeroU16 {
+    std::num::NonZeroU16::new(8080).expect("default web port is nonzero")
+}
+
 pub fn default_snmp_community() -> String {
     "public".to_string()
 }
@@ -20,6 +24,10 @@ pub fn default_hardware_oid_overrides() -> Vec<String> {
 
 pub fn default_error_rate_threshold() -> f64 {
     0.05
+}
+
+pub fn default_error_rate_thresholds() -> crate::alert::rules::MetricThresholds {
+    crate::alert::rules::MetricThresholds { warning: 5.0, critical: 10.0 }
 }
 
 pub fn default_spike_threshold() -> u64 {

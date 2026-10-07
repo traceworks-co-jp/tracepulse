@@ -523,6 +523,21 @@ fn respond_js(stream: TcpStream, body: &str) -> Result<(), AppError> {
     respond_app_js(stream, body)
 }
 
+fn respond_static_asset(
+    mut stream: TcpStream,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), AppError> {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-cache, must-revalidate\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    Ok(())
+}
+
 fn respond_extension(stream: TcpStream, response: WebExtensionResponse) -> Result<(), AppError> {
     respond_extension_reply(
         stream,
@@ -630,6 +645,22 @@ fn handle_connection(
         )
     {
         return respond_extension_reply(stream, response);
+    }
+
+    if req.method == "GET" && clean_path == "/static/brand/tracepulse-logo.svg" {
+        return respond_static_asset(stream, "image/svg+xml", TRACEPULSE_LOGO_SVG.as_bytes());
+    }
+    if req.method == "GET" && clean_path == "/favicon.svg" {
+        return respond_static_asset(stream, "image/svg+xml", FAVICON_SVG.as_bytes());
+    }
+    if req.method == "GET" && clean_path == "/favicon.ico" {
+        return respond_static_asset(stream, "image/x-icon", FAVICON_ICO);
+    }
+    if req.method == "GET" && clean_path == "/favicon-dark.ico" {
+        return respond_static_asset(stream, "image/x-icon", FAVICON_DARK_ICO);
+    }
+    if req.method == "GET" && clean_path == "/apple-touch-icon.png" {
+        return respond_static_asset(stream, "image/png", APPLE_TOUCH_ICON_PNG);
     }
 
     if req.method == "GET" && clean_path == "/static/js/device-detail.js" {
@@ -1161,27 +1192,45 @@ fn flow_interface_name(index: Option<u32>, name: Option<&str>) -> String {
 }
 
 fn api_devices(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> String {
-    let spike_threshold = cfg.lock().map(|c| c.alert.spike_threshold).unwrap_or(10);
+    let alert_config = cfg.lock().map(|c| c.alert.clone()).unwrap_or_default();
     let Ok(repo) = repo.lock() else {
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
     let devices = repo.list_devices().unwrap_or_default();
     let items: Vec<String> = devices.iter().map(|d| {
         let spike = d.id
-            .and_then(|id| repo.check_interface_spikes(id, spike_threshold).ok())
+            .and_then(|id| repo.check_interface_spikes(id, alert_config.spike_threshold).ok())
             .map(|spikes| !spikes.is_empty())
             .unwrap_or(false);
-        format!(
-            r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","error_spike":{}}}"#,
-            escape_json(&d.ip),
-            escape_json(&d.name),
-            escape_json(&d.status),
-            escape_json(&d.community),
-            escape_json(d.last_seen_at.as_deref().unwrap_or("")),
-            spike,
-        )
+        dashboard_device_json(&repo, d, spike, false, &alert_config)
     }).collect();
     format!("[{}]", items.join(","))
+}
+
+fn dashboard_device_json(repo: &Repository, device: &crate::db::models::Device, spike: bool, redact: bool, config: &crate::config::AlertConfig) -> String {
+    let score = device.id.filter(|_| device.status != "offline").and_then(|id| {
+        let metrics = repo.get_device_metrics_history(id, 1).ok()?.pop()?;
+        let cpu = metrics.cpu_usage?;
+        let memory = metrics.memory_usage?;
+        let interfaces = repo.get_latest_interfaces(id).ok()?;
+        let bandwidth = interfaces.iter().map(|sample| sample.bandwidth_utilization).fold(0.0, f64::max);
+        let error_rate = interfaces.iter().filter_map(|sample| {
+            let history = repo.get_recent_interface_samples(id, sample.if_index, 2).ok()?;
+            crate::alert::rules::interface_error_rate(history.get(1)?, history.first()?)
+        }).fold(0.0, f64::max);
+        Some(crate::alert::HealthScorer::new(config.health_warning_threshold, config.health_critical_threshold).score(error_rate, bandwidth, cpu, memory))
+    });
+    let health_status = score.map(|score| {
+        if score >= config.health_warning_threshold { "online" }
+        else if score >= config.health_critical_threshold { "warning" }
+        else { "critical" }
+    });
+    serde_json::json!({
+        "ip": device.ip, "name": device.name, "status": device.status,
+        "community": if redact { "" } else { &device.community },
+        "last_seen": device.last_seen_at.as_deref().unwrap_or(""), "error_spike": spike,
+        "health_score": score, "health_status": health_status,
+    }).to_string()
 }
 
 fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String) {
@@ -1455,17 +1504,13 @@ fn api_get_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
     let Ok(c) = cfg.lock() else {
         return r#"{"error":"lock failed"}"#.to_string();
     };
-    format!(
-        r#"{{"polling":{{"interval_seconds":{}}},"snmp":{{"default_community":"{}"}},"display":{{"timezone":"{}"}},"alert":{{"error_rate_threshold":{},"spike_threshold":{},"health_warning_threshold":{},"health_critical_threshold":{}}},"retention":{{"history_days":{}}}}}"#,
-        c.polling.interval_seconds,
-        escape_json(&c.snmp.default_community),
-        escape_json(&c.display.timezone),
-        c.alert.error_rate_threshold,
-        c.alert.spike_threshold,
-        c.alert.health_warning_threshold,
-        c.alert.health_critical_threshold,
-        c.retention.history_days,
-    )
+    serde_json::json!({
+        "polling": { "interval_seconds": c.polling.interval_seconds },
+        "snmp": { "default_community": c.snmp.default_community },
+        "display": { "timezone": c.display.timezone },
+        "alert": c.alert,
+        "retention": { "history_days": c.retention.history_days },
+    }).to_string()
 }
 
 fn api_post_settings(
@@ -1473,112 +1518,84 @@ fn api_post_settings(
     cfg: &Arc<Mutex<AppConfig>>,
     cfg_path: &std::path::Path,
 ) -> String {
-    // JSON フィールドを手動パース（依存追加なし）
-    fn parse_u64(body: &str, key: &str) -> Option<u64> {
-        let pat = format!("\"{}\":", key);
-        let start = body.find(&pat)? + pat.len();
-        let s = body[start..].trim_start();
-        let end = s.find(|c: char| !c.is_ascii_digit())?;
-        s[..end].parse().ok()
-    }
-    fn parse_u32(body: &str, key: &str) -> Option<u32> {
-        parse_u64(body, key).map(|v| v as u32)
-    }
-    fn parse_f64(body: &str, key: &str) -> Option<f64> {
-        let pat = format!("\"{}\":", key);
-        let start = body.find(&pat)? + pat.len();
-        let s = body[start..].trim_start();
-        let end = s.find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')?;
-        s[..end].parse().ok()
-    }
-    fn parse_str_field(body: &str, key: &str) -> Option<String> {
-        let pat = format!("\"{}\":\"", key);
-        let start = body.find(&pat)? + pat.len();
-        let end = body[start..].find('"')?;
-        Some(body[start..start + end].to_string())
-    }
-
-    let Ok(mut c) = cfg.lock() else {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str(body) else {
+        return r#"{"error":"invalid JSON"}"#.into();
+    };
+    let Ok(mut guard) = cfg.lock() else {
         return r#"{"error":"lock failed"}"#.to_string();
     };
-
-    // バリデーション付き更新
-    if let Some(v) = parse_u64(body, "interval_seconds") {
-        if !(5..=600).contains(&v) {
-            return r#"{"error":"interval_seconds must be 5-600"}"#.to_string();
+    let mut updated = guard.clone();
+    let mut alert_fields = serde_json::Map::new();
+    for (key, value) in fields {
+        match key.as_str() {
+            "interval_seconds" => match value.as_u64() {
+                Some(interval) if (5..=600).contains(&interval) => updated.polling.interval_seconds = interval,
+                _ => return r#"{"error":"interval_seconds must be 5-600"}"#.into(),
+            },
+            "default_community" => match value.as_str() {
+                Some(community) if !community.is_empty() => updated.snmp.default_community = community.into(),
+                _ => return r#"{"error":"invalid community"}"#.into(),
+            },
+            "timezone" => match value.as_str().map(str::to_lowercase) {
+                Some(timezone) if timezone == "utc" || timezone == "jst" => updated.display.timezone = timezone,
+                _ => return r#"{"error":"timezone must be utc or jst"}"#.into(),
+            },
+            "history_days" => match value.as_u64() {
+                Some(days) if (1..=u32::MAX as u64).contains(&days) => updated.retention.history_days = days as u32,
+                _ => return r#"{"error":"history_days must be >= 1"}"#.into(),
+            },
+            _ => { alert_fields.insert(key, value); }
         }
-        c.polling.interval_seconds = v;
     }
-    if let Some(v) = parse_str_field(body, "default_community")
-        && !v.is_empty()
-    {
-        c.snmp.default_community = v;
+    if let Err(error) = update_alert_fields(&mut updated.alert, alert_fields) {
+        return serde_json::json!({"error": error}).to_string();
     }
-    if let Some(v) = parse_str_field(body, "timezone") {
-        let tz = v.to_lowercase();
-        if tz != "utc" && tz != "jst" {
-            return r#"{"error":"timezone must be utc or jst"}"#.to_string();
-        }
-        c.display.timezone = tz;
-    }
-    if let Some(v) = parse_f64(body, "error_rate_threshold") {
-        if v < 0.0 || v > 1.0 {
-            return r#"{"error":"error_rate_threshold must be 0.0-1.0"}"#.to_string();
-        }
-        c.alert.error_rate_threshold = v;
-    }
-    if let Some(v) = parse_u64(body, "spike_threshold") {
-        if v < 1 {
-            return r#"{"error":"spike_threshold must be >= 1"}"#.to_string();
-        }
-        c.alert.spike_threshold = v;
-    }
-    if let Some(v) = parse_u32(body, "health_warning_threshold") {
-        if v > 100 {
-            return r#"{"error":"health_warning_threshold must be 0-100"}"#.to_string();
-        }
-        c.alert.health_warning_threshold = v;
-    }
-    if let Some(v) = parse_u32(body, "health_critical_threshold") {
-        if v > 100 {
-            return r#"{"error":"health_critical_threshold must be 0-100"}"#.to_string();
-        }
-        c.alert.health_critical_threshold = v;
-    }
-    if let Some(v) = parse_u32(body, "history_days") {
-        if v < 1 {
-            return r#"{"error":"history_days must be >= 1"}"#.to_string();
-        }
-        c.retention.history_days = v;
-    }
-
-    // Warning >= Critical の整合性チェック
-    if c.alert.health_warning_threshold <= c.alert.health_critical_threshold {
-        return r#"{"error":"warning threshold must be greater than critical threshold"}"#
-            .to_string();
-    }
-
-    if let Err(e) = persist_config(&c, cfg_path) {
+    if let Err(e) = persist_config(&updated, cfg_path) {
         return format!(
             r#"{{"error":"failed to write config: {}"}}"#,
             escape_json(&e)
         );
     }
-
+    *guard = updated;
     r#"{"ok":true}"#.to_string()
+}
+
+fn update_alert_fields(alert: &mut crate::config::AlertConfig, fields: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let legacy_error_rate = if !fields.contains_key("error_rate") {
+        fields.get("error_rate_threshold").and_then(serde_json::Value::as_f64)
+    } else { None };
+    let mut merged = serde_json::to_value(&*alert).map_err(|error| error.to_string())?;
+    let object = merged.as_object_mut().ok_or("invalid alert config")?;
+    for (key, value) in fields {
+        if !object.contains_key(&key) { return Err(format!("unsupported field: {key}")); }
+        if matches!(key.as_str(), "cpu" | "memory" | "bandwidth" | "error_rate") {
+            let thresholds: crate::alert::rules::MetricThresholds = serde_json::from_value(value.clone()).map_err(|_| format!("invalid {key} thresholds"))?;
+            if !thresholds.validate() { return Err(format!("{key}: 0 < Warning < Critical <= 100 (%)")); }
+        }
+        object.insert(key, value);
+    }
+    let mut updated: crate::config::AlertConfig = serde_json::from_value(merged).map_err(|error| error.to_string())?;
+    if updated.spike_threshold == 0 || !(0.0..=1.0).contains(&updated.error_rate_threshold)
+        || updated.health_warning_threshold > 100
+        || updated.health_warning_threshold <= updated.health_critical_threshold {
+        return Err("invalid spike or display thresholds".into());
+    }
+    if let Some(rate) = legacy_error_rate {
+        updated.error_rate = crate::alert::rules::MetricThresholds {
+            warning: rate * 100.0, critical: (rate * 200.0).min(100.0),
+        };
+        if !updated.error_rate.validate() { return Err("invalid legacy error rate".into()); }
+    }
+    updated.error_rate_threshold = updated.error_rate.warning / 100.0;
+    *alert = updated;
+    Ok(())
 }
 
 fn api_alert_thresholds(cfg: &Arc<Mutex<AppConfig>>) -> String {
     let Ok(config) = cfg.lock() else {
         return r#"{"error":"lock failed"}"#.into();
     };
-    serde_json::json!({
-        "error_rate_threshold": config.alert.error_rate_threshold,
-        "spike_threshold": config.alert.spike_threshold,
-        "health_warning_threshold": config.alert.health_warning_threshold,
-        "health_critical_threshold": config.alert.health_critical_threshold,
-    })
-    .to_string()
+    serde_json::to_string(&config.alert).unwrap_or_default()
 }
 
 fn api_post_alert_thresholds(
@@ -1590,52 +1607,15 @@ fn api_post_alert_thresholds(
     else {
         return r#"{"error":"invalid JSON"}"#.into();
     };
-    if fields.is_empty()
-        || fields.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "error_rate_threshold"
-                    | "spike_threshold"
-                    | "health_warning_threshold"
-                    | "health_critical_threshold"
-            )
-        })
-    {
+    if fields.is_empty() {
         return r#"{"error":"unsupported field"}"#.into();
     }
     let Ok(mut guard) = cfg.lock() else {
         return r#"{"error":"lock failed"}"#.into();
     };
     let mut updated = guard.clone();
-    for (key, value) in fields {
-        match key.as_str() {
-            "error_rate_threshold" => match value.as_f64() {
-                Some(number) if (0.0..=1.0).contains(&number) => {
-                    updated.alert.error_rate_threshold = number
-                }
-                _ => return r#"{"error":"invalid error rate"}"#.into(),
-            },
-            "spike_threshold" => match value.as_u64() {
-                Some(number) if number >= 1 => updated.alert.spike_threshold = number,
-                _ => return r#"{"error":"invalid spike threshold"}"#.into(),
-            },
-            "health_warning_threshold" => match value.as_u64() {
-                Some(number) if number <= 100 => {
-                    updated.alert.health_warning_threshold = number as u32
-                }
-                _ => return r#"{"error":"invalid warning threshold"}"#.into(),
-            },
-            "health_critical_threshold" => match value.as_u64() {
-                Some(number) if number <= 100 => {
-                    updated.alert.health_critical_threshold = number as u32
-                }
-                _ => return r#"{"error":"invalid critical threshold"}"#.into(),
-            },
-            _ => unreachable!(),
-        }
-    }
-    if updated.alert.health_warning_threshold <= updated.alert.health_critical_threshold {
-        return r#"{"error":"warning threshold must exceed critical"}"#.into();
+    if let Err(error) = update_alert_fields(&mut updated.alert, fields) {
+        return serde_json::json!({"error": error}).to_string();
     }
     if let Err(error) = persist_config(&updated, path) {
         return serde_json::json!({"error":error}).to_string();
@@ -1756,6 +1736,9 @@ fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), Strin
     );
 
     let alert = section(&mut root, "alert");
+    for (name, thresholds) in [("cpu", &c.alert.cpu), ("memory", &c.alert.memory), ("bandwidth", &c.alert.bandwidth), ("error_rate", &c.alert.error_rate)] {
+        alert.insert(name.to_string(), toml::Value::try_from(thresholds).map_err(|error| error.to_string())?);
+    }
     alert.insert(
         "error_rate_threshold".to_string(),
         toml::Value::Float(c.alert.error_rate_threshold),
@@ -2756,26 +2739,18 @@ fn page_dashboard(
     extension: Option<&dyn WebExtensionProvider>,
     redact: bool,
 ) -> String {
-    let spike_threshold = cfg.lock().map(|c| c.alert.spike_threshold).unwrap_or(10);
+    let alert_config = cfg.lock().map(|c| c.alert.clone()).unwrap_or_default();
     let (devices, spikes_count, devices_json, recent_alerts) = {
         if let Ok(r) = repo.lock() {
             let devs = r.list_devices().unwrap_or_default();
             let mut sc = 0usize;
             let json: Vec<String> = devs.iter().map(|d| {
                 let spike = d.id
-                    .and_then(|id| r.check_interface_spikes(id, spike_threshold).ok())
+                    .and_then(|id| r.check_interface_spikes(id, alert_config.spike_threshold).ok())
                     .map(|spikes| !spikes.is_empty())
                     .unwrap_or(false);
                 if spike { sc += 1; }
-                format!(
-                    r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","error_spike":{}}}"#,
-                    escape_json(&d.ip),
-                    escape_json(&d.name),
-                    escape_json(&d.status),
-                    if redact { String::new() } else { escape_json(&d.community) },
-                    escape_json(d.last_seen_at.as_deref().unwrap_or("")),
-                    spike,
-                )
+                dashboard_device_json(&r, d, spike, redact, &alert_config)
             }).collect();
             let alerts = r.get_recent_alerts(10).unwrap_or_default();
             (devs, sc, json, alerts)
@@ -2799,6 +2774,7 @@ fn page_dashboard(
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str(BRAND_HEAD_HTML);
     html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Dashboard</title>");
     html.push_str(COMMON_CSS);
@@ -2830,6 +2806,7 @@ fn page_dashboard(
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");
     html.push_str("<th id='th-name' onclick='sortBy(\"name\")' data-i18n='hostname'>Name <span class='sort-icon' id='sort-name'></span></th>");
     html.push_str("<th id='th-status' onclick='sortBy(\"status\")' data-i18n='status'>Status <span class='sort-icon' id='sort-status'></span></th>");
+    html.push_str("<th id='th-health_score' onclick='sortBy(\"health_score\")' data-i18n='health_score'>Health Score <span class='sort-icon' id='sort-health_score'></span></th>");
     html.push_str("<th id='th-community' onclick='sortBy(\"community\")' data-i18n='community'>Community <span class='sort-icon' id='sort-community'></span></th>");
     html.push_str("<th id='th-last_seen' onclick='sortBy(\"last_seen\")' data-i18n='time'>Last Seen <span class='sort-icon' id='sort-last_seen'></span></th>");
     html.push_str("<th data-i18n='actions'>Actions</th>");
@@ -2882,6 +2859,7 @@ fn page_settings(
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str(BRAND_HEAD_HTML);
     html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Settings</title>");
     html.push_str(COMMON_CSS);
@@ -2912,7 +2890,7 @@ fn page_settings(
         // 現在値をサーバー側でレンダリングして初期値として埋め込む
         if let Ok(c) = cfg.lock() {
             html.push_str(&format!(
-            "var INIT = {{interval:{},community:'{}',error_rate:{},spike:{},warn:{},crit:{},days:{},timezone:'{}'}};\n",
+            "var INIT = {{interval:{},community:'{}',error_rate:{},spike:{},warn:{},crit:{},days:{},timezone:'{}',thresholds:{{cpu:{},memory:{},bandwidth:{},error_rate:{}}}}};\n",
             c.polling.interval_seconds,
             escape_json(&c.snmp.default_community),
             c.alert.error_rate_threshold,
@@ -2921,6 +2899,10 @@ fn page_settings(
             c.alert.health_critical_threshold,
             c.retention.history_days,
             escape_json(&c.display.timezone),
+            serde_json::to_string(&c.alert.cpu).unwrap_or_default(),
+            serde_json::to_string(&c.alert.memory).unwrap_or_default(),
+            serde_json::to_string(&c.alert.bandwidth).unwrap_or_default(),
+            serde_json::to_string(&c.alert.error_rate).unwrap_or_default(),
         ));
         } else {
             html.push_str("var INIT = {interval:30,community:'public',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
@@ -2946,6 +2928,7 @@ fn page_device_detail(
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str(BRAND_HEAD_HTML);
     html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str(&format!(
         "<title>TracePulse \u{2013} {}</title>",
@@ -3108,6 +3091,7 @@ fn page_discovery(
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str(BRAND_HEAD_HTML);
     html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Discovery</title>");
     html.push_str(COMMON_CSS);
@@ -3390,6 +3374,7 @@ fn page_diagnostics(
     html.push_str("<html lang='en'><head>");
     html.push_str("<meta charset='utf-8'>");
     html.push_str("<meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str(BRAND_HEAD_HTML);
     html.push_str("<script src='/static/js/theme.js'></script>");
     html.push_str("<title>TracePulse \u{2013} Diagnostics</title>");
     html.push_str(COMMON_CSS);
@@ -3506,7 +3491,9 @@ const COMMON_CSS: &str = "<style>
   html[data-theme='light'] body { background: #f8fafc; color: #0f172a; }
     nav { background: #1e293b; border-bottom: 1px solid #334155; padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
   html[data-theme='light'] nav { background: #ffffff; border-bottom-color: #cbd5e1; }
-  nav .brand { font-weight: 700; font-size: 1.1rem; color: #38bdf8; text-decoration: none; }
+    nav .brand { display:flex; align-items:center; gap:.625rem; flex:none; font-size:1.1875rem; font-weight:700; text-decoration:none; }
+    nav .brand-logo { display:block; width:auto; height:30px; filter:brightness(0) invert(1); }
+    html[data-theme='light'] nav .brand-logo { filter:none; }
   html[data-theme='light'] nav .brand { color: #0284c7; }
   nav a { color: #94a3b8; text-decoration: none; font-size: .9rem; }
   html[data-theme='light'] nav a { color: #475569; }
@@ -3686,7 +3673,7 @@ pub fn shared_navigation_html(extension: &dyn WebExtensionProvider) -> String {
 }
 
 const NAV_HTML: &str = "<nav>
-  <a class='brand' href='/'>TracePulse</a>
+    <a class='brand' href='/'><img class='brand-logo' src='/static/brand/tracepulse-logo.svg' alt=''><span class='brand-name'>TracePulse</span></a>
     <a href='/' data-i18n='nav_dashboard'>Dashboard</a>
     <a href='/discovery' data-i18n='nav_discovery'>Discovery</a>
   <a href='/diagnostics' data-i18n='nav_diagnostics'>Diagnostics</a>
@@ -3718,8 +3705,16 @@ const SETTINGS_CSS: &str = "<style>
   .field-group input, .field-group select { background:#0f172a; border:1px solid #334155; color:#f1f5f9; padding:.45rem .7rem; border-radius:.375rem; font-size:.95rem; }
   .field-group input:focus, .field-group select:focus { outline:none; border-color:#3b82f6; }
   .field-hint { font-size:.75rem; color:#64748b; margin-top:.15rem; }
+    .metric-thresholds { width:100%; border-collapse:collapse; margin-bottom:1rem; table-layout:fixed; }
+    .metric-thresholds th, .metric-thresholds td { padding:.6rem .4rem; text-align:left; border-bottom:1px solid #334155; }
+    .metric-thresholds input { width:100%; min-width:0; box-sizing:border-box; background:#0f172a; border:1px solid #334155; color:#f1f5f9; padding:.45rem; border-radius:.375rem; }
+    .metric-thresholds th { font-size:.82rem; color:#94a3b8; }
+    @media(max-width:600px) { .field-row { grid-template-columns:1fr; } .settings-section { padding:1rem; } }
+    html[data-theme='light'] .metric-thresholds input { background:#fff; color:#0f172a; border-color:#cbd5e1; }
   .score-bar { display:flex; align-items:center; gap:.75rem; margin-top:.5rem; }
   .score-bar span { font-size:.82rem; color:#94a3b8; min-width:6rem; }
+    .score-legend { display:grid; gap:.3rem; margin-top:.5rem; font-size:.82rem; color:#94a3b8; }
+    .score-legend[hidden] { display:none; }
   .threshold-visual { flex:1; height:.5rem; border-radius:.25rem; background:linear-gradient(to right, #ef4444 0%, #ef4444 var(--crit), #f59e0b var(--crit), #f59e0b var(--warn), #4ade80 var(--warn), #4ade80 100%); }
   .actions { display:flex; align-items:center; gap:1rem; margin-top:1rem; }
   .toast { padding:.5rem 1rem; border-radius:.375rem; font-size:.9rem; display:none; }
@@ -3768,40 +3763,49 @@ const SETTINGS_HTML: &str = "<main>
 
 <div class='settings-section'>
   <h2 data-i18n='alert_thresholds'>Alert Thresholds</h2>
+    <table class='metric-thresholds'>
+        <thead><tr><th data-i18n='metric'>Metric</th><th>Warning (%)</th><th>Critical (%)</th></tr></thead>
+        <tbody>
+            <tr><th><label for='cpu_warning'>CPU</label></th><td><input type='number' id='cpu_warning' aria-label='CPU Warning (%)' min='0.01' max='100' step='0.01'></td><td><input type='number' id='cpu_critical' aria-label='CPU Critical (%)' min='0.01' max='100' step='0.01'></td></tr>
+            <tr><th data-i18n='metric_memory'>Memory</th><td><input type='number' id='memory_warning' aria-label='Memory Warning (%)' min='0.01' max='100' step='0.01'></td><td><input type='number' id='memory_critical' aria-label='Memory Critical (%)' min='0.01' max='100' step='0.01'></td></tr>
+            <tr><th data-i18n='metric_bandwidth'>Bandwidth Utilization</th><td><input type='number' id='bandwidth_warning' aria-label='Bandwidth Warning (%)' min='0.01' max='100' step='0.01'></td><td><input type='number' id='bandwidth_critical' aria-label='Bandwidth Critical (%)' min='0.01' max='100' step='0.01'></td></tr>
+            <tr><th data-i18n='metric_error_rate'>Error Rate</th><td><input type='number' id='error_rate_warning' aria-label='Error Rate Warning (%)' min='0.01' max='100' step='0.01'></td><td><input type='number' id='error_rate_critical' aria-label='Error Rate Critical (%)' min='0.01' max='100' step='0.01'></td></tr>
+        </tbody>
+    </table>
   <div class='field-row'>
-    <div class='field-group'>
-      <label data-i18n='error_rate_threshold'>Error Rate Threshold (0.0 – 1.0)</label>
-      <input type='number' id='error_rate' min='0' max='1' step='0.01'>
-      <div class='field-hint' data-i18n='error_rate_hint'>e.g. 0.05 = alert when error rate exceeds 5%</div>
-    </div>
     <div class='field-group'>
       <label data-i18n='spike_threshold'>Spike Threshold (error count delta)</label>
       <input type='number' id='spike' min='1' step='1'>
       <div class='field-hint' data-i18n='spike_threshold_hint'>Alert when error count jumps by this amount between polls</div>
     </div>
   </div>
+</div>
+<div class='settings-section'>
+    <h2 data-i18n='health_display'>Health Score (Display Only)</h2>
   <div class='field-row'>
     <div class='field-group'>
-      <label data-i18n='warning_threshold'>Health Score — Warning threshold (0 – 100)</label>
+    <label for='warn_t' data-i18n='warning_threshold'>Warning Boundary (Healthy / Warning)</label>
       <input type='number' id='warn_t' min='1' max='100' step='1' oninput='updateBar()'>
-      <div class='field-hint' data-i18n='warning_threshold_hint'>Score below this value turns status yellow (Warning)</div>
+    <div class='field-hint' data-i18n='warning_threshold_hint'>Score below this value turns the indicator yellow (Warning)</div>
     </div>
     <div class='field-group'>
-      <label data-i18n='critical_threshold'>Health Score — Critical threshold (0 – 100)</label>
+    <label for='crit_t' data-i18n='critical_threshold'>Critical Boundary (Warning / Critical)</label>
       <input type='number' id='crit_t' min='0' max='99' step='1' oninput='updateBar()'>
-      <div class='field-hint' data-i18n='critical_threshold_hint'>Score below this value turns status red (Critical)</div>
+    <div class='field-hint' data-i18n='critical_threshold_hint'>Score below this value turns the indicator red (Critical)</div>
     </div>
   </div>
   <div class='score-bar'>
     <span data-i18n='score_preview'>Score preview</span>
     <div class='threshold-visual' id='tbar' style='--warn:80%;--crit:60%'></div>
-    <span id='bar-label' style='font-size:.78rem;color:#64748b'></span>
   </div>
   <div class='field-hint' style='margin-top:.5rem'>
     <span data-i18n='score_formula'>Health score (0–100) = 100 − error_rate×1.5 − bandwidth×0.3 − cpu/3 − memory/3</span><br>
-    <span style='color:#4ade80'>■</span> ≥ Warning: Online &nbsp;
-    <span style='color:#f59e0b'>■</span> ≥ Critical: Warning &nbsp;
-    <span style='color:#ef4444'>■</span> &lt; Critical: Critical
+        <span data-i18n='score_formula_units'>error_rate, bandwidth, cpu and memory are percentages (0–100); 1% is calculated as 1, not 0.01.</span>
+    </div>
+    <div id='bar-label' class='score-legend' aria-live='polite'>
+        <div><span style='color:#4ade80' aria-hidden='true'>■</span> <span id='legend-healthy'></span></div>
+        <div><span style='color:#f59e0b' aria-hidden='true'>■</span> <span id='legend-warning'></span></div>
+        <div><span style='color:#ef4444' aria-hidden='true'>■</span> <span id='legend-critical'></span></div>
   </div>
 </div>
 
@@ -3982,6 +3986,12 @@ const DISCOVERY_BUNDLE_JS: &str = include_str!("../../frontend/dist/discovery.js
 const TOPOLOGY_BUNDLE_JS: &str = include_str!("../../frontend/dist/topology.js");
 const THEME_BUNDLE_JS: &str = include_str!("../../frontend/dist/theme.js");
 const I18N_BUNDLE_JS: &str = include_str!("../../frontend/dist/i18n.js");
+const TRACEPULSE_LOGO_SVG: &str = include_str!("../../frontend/assets/tracepulse-logo-artifact.svg");
+const FAVICON_SVG: &str = include_str!("../../frontend/assets/favicon.svg");
+const FAVICON_ICO: &[u8] = include_bytes!("../../frontend/assets/favicon.ico");
+const FAVICON_DARK_ICO: &[u8] = include_bytes!("../../frontend/assets/favicon-dark.ico");
+const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../../frontend/assets/apple-touch-icon.png");
+const BRAND_HEAD_HTML: &str = "<link rel='icon' href='/favicon.svg?v=2' type='image/svg+xml'><link rel='icon' href='/favicon.ico?v=2' type='image/x-icon' media='(prefers-color-scheme: light)'><link rel='icon' href='/favicon-dark.ico?v=2' type='image/x-icon' media='(prefers-color-scheme: dark)'><link rel='apple-touch-icon' href='/apple-touch-icon.png'>";
 
 const DASHBOARD_CSS: &str = "<style>
     .dashboard-table-scroll { max-height:min(60vh, 560px); overflow:auto; border:1px solid #334155; border-radius:.5rem; background:#1e293b; }
@@ -4371,6 +4381,7 @@ fn run_polling_loop_with_observer(
         println!("Polling engine started");
     }
     const OFFLINE_GRACE_INTERVALS: i64 = 3;
+    let mut metric_tracker = crate::alert::rules::MetricAlertTracker::default();
 
     loop {
         let (interval, spike_threshold) = config
@@ -4378,6 +4389,7 @@ fn run_polling_loop_with_observer(
             .map(|c| (c.polling.interval_seconds, c.alert.spike_threshold))
             .unwrap_or((30, 10));
         let snmp_overrides = config.lock().map(|c| c.snmp.clone()).unwrap_or_default();
+        let alert_config = config.lock().map(|c| c.alert.clone()).unwrap_or_default();
         std::thread::sleep(Duration::from_secs(interval));
 
         let devices = match repo.lock() {
@@ -4547,15 +4559,16 @@ fn run_polling_loop_with_observer(
                     ));
                 }
 
+                let mut metric_events = Vec::new();
                 if let Some(metrics) = result.metrics {
+                    metric_events.extend(alert_config.system_alerts(&dev_config, metrics.cpu_usage, metrics.memory_usage));
                     let _ = r.save_device_metrics(&metrics);
                 }
 
                 for sample in &result.samples {
                     let mut sample = sample.clone();
-                    if let Ok(Some(prev)) =
-                        r.get_latest_interface_sample(sample.device_id, sample.if_index)
-                    {
+                    let previous = r.get_latest_interface_sample(sample.device_id, sample.if_index).ok().flatten();
+                    if let Some(prev) = previous.as_ref() {
                         sample.bandwidth_utilization = calculate_bandwidth_utilization_from_delta(
                             prev.in_octets.saturating_add(prev.out_octets),
                             sample.in_octets.saturating_add(sample.out_octets),
@@ -4563,6 +4576,7 @@ fn run_polling_loop_with_observer(
                             1_000_000_000,
                         );
                     }
+                    metric_events.extend(alert_config.interface_alerts(&dev_config, previous.as_ref(), &sample));
                     let _ = r.save_sample(&sample);
                     if let Some(observer) = observer.as_deref() {
                         let history = r
@@ -4570,6 +4584,24 @@ fn run_polling_loop_with_observer(
                             .unwrap_or_default();
                         observer.observe_interface_sample(&dev_config, &sample, &history, &alerts);
                     }
+                }
+
+                if result.status == "online" {
+                    let status = if metric_events.iter().any(|event| event.severity == crate::alert::AlertSeverity::Critical) {
+                        "critical"
+                    } else if !metric_events.is_empty() { "warning" } else { "online" };
+                    let _ = r.update_device_status(&result.ip, status);
+                }
+                for event in metric_tracker.transitions(result.device_id, metric_events) {
+                    let _ = r.save_alert(&AlertEvent {
+                        id: None,
+                        device_id: result.device_id,
+                        alert_type: event.kind.as_str().to_string(),
+                        severity: event.severity.to_string(),
+                        details: event.message.clone(),
+                        created_at: Some(event.occurred_at.to_rfc3339()),
+                    });
+                    alerts.publish(event);
                 }
 
                 // スパイク検出（インターフェース単位）
@@ -5177,6 +5209,41 @@ mod tests {
             Some("https://example.invalid")
         );
 
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn metric_settings_save_reload_and_reject_invalid_updates_atomically() {
+        let path = std::env::temp_dir().join(format!("tracepulse-metric-settings-{}.toml", std::process::id()));
+        let config = Arc::new(Mutex::new(AppConfig::default()));
+        let result = super::api_post_settings(r#"{"interval_seconds":45,"cpu":{"warning":70,"critical":95},"error_rate":{"warning":1,"critical":2}}"#, &config, &path);
+        assert_eq!(result, r#"{"ok":true}"#);
+        let reloaded = AppConfig::load(&path).unwrap();
+        assert_eq!(reloaded.alert.cpu.warning, 70.0);
+        assert_eq!(reloaded.alert.error_rate.warning, 1.0);
+        assert_eq!(reloaded.alert.error_rate.critical, 2.0);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        for invalid in [
+            r#"{"interval_seconds":60,"memory":{"warning":90,"critical":80}}"#,
+            r#"{"cpu":{"warning":-1,"critical":90}}"#,
+            r#"{"error_rate":{"warning":1,"critical":101}}"#,
+            r#"{"bandwidth":{"warning":null,"critical":90}}"#,
+            r#"{"cpu":{"warning":80,"critical":90,"typo":1}}"#,
+        ] {
+            assert!(super::api_post_settings(invalid, &config, &path).contains("error"));
+            assert_eq!(config.lock().unwrap().polling.interval_seconds, 45);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+        }
+        assert!(super::api_post_alert_thresholds(r#"{"memory":{"warning":75,"critical":85}}"#, &config, &path).contains("ok"));
+        let body: serde_json::Value = serde_json::from_str(&super::api_get_settings(&config)).unwrap();
+        assert_eq!(body["alert"]["memory"]["critical"], 85.0);
+        assert!(super::api_post_alert_thresholds(r#"{"error_rate_threshold":0.02}"#, &config, &path).contains("ok"));
+        assert_eq!(config.lock().unwrap().alert.error_rate.warning, 2.0);
+        assert_eq!(config.lock().unwrap().alert.error_rate.critical, 4.0);
+        std::fs::write(&path, "[alert]\nerror_rate_threshold = 0.01\n").unwrap();
+        let migrated = AppConfig::load(&path).unwrap();
+        assert_eq!(migrated.alert.error_rate.warning, 1.0);
+        assert_eq!(migrated.alert.error_rate.critical, 2.0);
         let _ = std::fs::remove_file(path);
     }
 
