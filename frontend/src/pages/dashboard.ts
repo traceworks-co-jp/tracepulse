@@ -34,6 +34,16 @@ function statusOrder(status?: string): number {
     return order[status || ""] ?? 5;
 }
 
+function statusClass(status?: string | null): string {
+    switch (status) {
+        case "online": return "status-online";
+        case "offline": return "status-offline";
+        case "warning": return "status-warning";
+        case "critical": return "status-critical";
+        default: return "status-unknown";
+    }
+}
+
 function compareValue(a: DashboardDevice, b: DashboardDevice, column: (typeof columns)[number]): number {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
     if (column === "status") return statusOrder(a.status) - statusOrder(b.status);
@@ -83,19 +93,18 @@ export function renderTable(): void {
     }
 
     tbody.innerHTML = sorted.map((device) => {
-        const classMap: Record<string, string> = { online: "status-online", offline: "status-offline", warning: "status-warning", critical: "status-critical" };
-        const statusClass = classMap[device.status || ""] || "status-unknown";
+        const statusBadgeClass = statusClass(device.status);
         const rowClass = device.error_spike ? " class=spike-row" : "";
         const spikeBadge = device.error_spike ? "<span class=spike-badge>&#9888; Error Spike</span>" : "";
         const deleting = deletingIps.has(device.ip);
         const actionLabel = deleting ? t("unregistering") : t("unregister");
         const encodedIp = encodeURIComponent(device.ip);
         const encodedName = encodeURIComponent(device.name || device.ip);
-        const actionButton = `<button class='btn-row-danger' data-ip='${encodedIp}' data-name='${encodedName}' onclick='unregisterDevice(this.dataset.ip,this.dataset.name)' ${deleting ? "disabled" : ""}>${actionLabel}</button>`;
+        const actionButton = `<button class='btn-row-danger' data-ip="${escapeHtml(encodedIp)}" data-name="${escapeHtml(encodedName)}" onclick='unregisterDevice(this.dataset.ip,this.dataset.name)' ${deleting ? "disabled" : ""}>${actionLabel}</button>`;
         const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
-        const healthClass = classMap[device.health_status || ""] || "status-unknown";
-        const health = typeof device.health_score === "number" ? `<span class='${healthClass}'>${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label='${escapeHtml(t("health_score"))}' style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
-        return `<tr${rowClass}><td><a href='/device/${encodeURIComponent(device.ip)}' style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(device.name || "")}${spikeBadge}</td><td><span class=${statusClass}>${escapeHtml(device.status)}</span></td><td>${health}</td><td>${escapeHtml(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
+        const healthBadgeClass = statusClass(device.health_status);
+        const health = typeof device.health_score === "number" ? `<span class="${escapeHtml(healthBadgeClass)}">${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label="${escapeHtml(t("health_score"))}" style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
+        return `<tr${rowClass}><td><a href="/device/${escapeHtml(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(device.name || "")}${spikeBadge}</td><td><span class="${escapeHtml(statusBadgeClass)}">${escapeHtml(device.status)}</span></td><td>${health}</td><td>${escapeHtml(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
     }).join("");
 }
 

@@ -397,6 +397,7 @@ test("dashboard health score remains separate from metric alarm status", async (
         json: [
             { ip: "192.0.2.1", name: "cpu-alarm", status: "critical", health_score: 67, health_status: "warning" },
             { ip: "192.0.2.2", name: "unknown-metrics", status: "online", health_score: null },
+            { ip: "192.0.2.3' onmouseover='alert(1)", name: "router' onmouseover='alert(1)", status: "online' onmouseover='alert(1)", health_score: 50, health_status: "warning' onmouseover='alert(1)" },
         ]
     }));
     await page.goto("/");
@@ -406,6 +407,10 @@ test("dashboard health score remains separate from metric alarm status", async (
     await expect(row).toContainText("67/100");
     await expect(row.locator("meter")).toHaveAttribute("value", "67");
     await expect(page.locator("#dash-tbody tr").filter({ hasText: "unknown-metrics" }).locator("meter")).toHaveCount(0);
+    const untrustedRow = page.locator("#dash-tbody tr").filter({ hasText: "router' onmouseover='alert(1)" });
+    await expect(untrustedRow.locator("[onmouseover]")).toHaveCount(0);
+    await expect(untrustedRow.locator(".status-unknown")).toHaveCount(2);
+    await expect(untrustedRow.locator("button")).toHaveAttribute("data-name", "router'%20onmouseover%3D'alert(1)");
 });
 
 test("health score legend follows boundaries and language changes", async ({ page }) => {
