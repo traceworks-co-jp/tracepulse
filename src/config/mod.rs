@@ -125,9 +125,18 @@ impl AppConfig {
                 }
             }
         }
-        if [&config.alert.cpu, &config.alert.memory, &config.alert.bandwidth, &config.alert.error_rate]
-            .iter().any(|thresholds| !thresholds.validate()) {
-            return Err(crate::error::AppError::Config("metric thresholds must satisfy 0 < warning < critical <= 100".into()));
+        if [
+            &config.alert.cpu,
+            &config.alert.memory,
+            &config.alert.bandwidth,
+            &config.alert.error_rate,
+        ]
+        .iter()
+        .any(|thresholds| !thresholds.validate())
+        {
+            return Err(crate::error::AppError::Config(
+                "metric thresholds must satisfy 0 < warning < critical <= 100".into(),
+            ));
         }
         Ok(config)
     }

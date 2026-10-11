@@ -27,7 +27,10 @@ pub fn default_error_rate_threshold() -> f64 {
 }
 
 pub fn default_error_rate_thresholds() -> crate::alert::rules::MetricThresholds {
-    crate::alert::rules::MetricThresholds { warning: 5.0, critical: 10.0 }
+    crate::alert::rules::MetricThresholds {
+        warning: 5.0,
+        critical: 10.0,
+    }
 }
 
 pub fn default_spike_threshold() -> u64 {

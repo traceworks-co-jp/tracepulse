@@ -55,7 +55,9 @@ fn parse_web_port(
     let mut override_port = None;
     while let Some(argument) = arguments.next() {
         let value = if argument == "--port" {
-            arguments.next().map(String::as_str)
+            arguments
+                .next()
+                .map(String::as_str)
                 .ok_or_else(|| AppError::Validation("--port requires a value (1-65535)".into()))?
         } else if let Some(value) = argument.strip_prefix("--port=") {
             value
@@ -63,10 +65,13 @@ fn parse_web_port(
             continue;
         };
         if override_port.is_some() {
-            return Err(AppError::Validation("--port can only be specified once".into()));
+            return Err(AppError::Validation(
+                "--port can only be specified once".into(),
+            ));
         }
-        override_port = Some(value.parse::<std::num::NonZeroU16>()
-            .map_err(|_| AppError::Validation("--port must be an integer from 1 to 65535".into()))?);
+        override_port = Some(value.parse::<std::num::NonZeroU16>().map_err(|_| {
+            AppError::Validation("--port must be an integer from 1 to 65535".into())
+        })?);
     }
     Ok(override_port.unwrap_or(configured_port))
 }
@@ -82,11 +87,29 @@ mod startup_tests {
     #[test]
     fn web_port_uses_default_or_config_unless_overridden() {
         let defaults = AppConfig::default();
-        assert_eq!(parse_web_port(&arguments(&["tracepulse", "--web"]), defaults.web.port).unwrap().get(), 8080);
+        assert_eq!(
+            parse_web_port(&arguments(&["tracepulse", "--web"]), defaults.web.port)
+                .unwrap()
+                .get(),
+            8080
+        );
         let config: AppConfig = toml::from_str("[web]\nport = 9090\n").unwrap();
-        assert_eq!(parse_web_port(&arguments(&["tracepulse"]), config.web.port).unwrap().get(), 9090);
-        for options in [vec!["tracepulse", "--web", "--port", "18083"], vec!["tracepulse", "--port=18083"]] {
-            assert_eq!(parse_web_port(&arguments(&options), config.web.port).unwrap().get(), 18083);
+        assert_eq!(
+            parse_web_port(&arguments(&["tracepulse"]), config.web.port)
+                .unwrap()
+                .get(),
+            9090
+        );
+        for options in [
+            vec!["tracepulse", "--web", "--port", "18083"],
+            vec!["tracepulse", "--port=18083"],
+        ] {
+            assert_eq!(
+                parse_web_port(&arguments(&options), config.web.port)
+                    .unwrap()
+                    .get(),
+                18083
+            );
         }
         let legacy: AppConfig = toml::from_str("[polling]\ninterval_seconds = 30\n").unwrap();
         assert_eq!(legacy.web.port.get(), 8080);
@@ -99,10 +122,22 @@ mod startup_tests {
         let port = AppConfig::default().web.port;
         for value in ["", "0", "-1", "65536", "9090.5", "abc"] {
             assert!(parse_web_port(&arguments(&["tracepulse", "--port", value]), port).is_err());
-            assert!(parse_web_port(&arguments(&["tracepulse", &format!("--port={value}")]), port).is_err());
+            assert!(
+                parse_web_port(
+                    &arguments(&["tracepulse", &format!("--port={value}")]),
+                    port
+                )
+                .is_err()
+            );
         }
         assert!(parse_web_port(&arguments(&["tracepulse", "--port"]), port).is_err());
-        assert!(parse_web_port(&arguments(&["tracepulse", "--port", "9090", "--port=9091"]), port).is_err());
+        assert!(
+            parse_web_port(
+                &arguments(&["tracepulse", "--port", "9090", "--port=9091"]),
+                port
+            )
+            .is_err()
+        );
         for value in ["1", "65535"] {
             assert!(parse_web_port(&arguments(&["tracepulse", "--port", value]), port).is_ok());
         }

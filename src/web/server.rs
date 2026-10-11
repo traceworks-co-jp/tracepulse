@@ -651,7 +651,11 @@ fn handle_connection(
         return respond_static_asset(stream, "image/svg+xml", TRACEPULSE_LOGO_SVG.as_bytes());
     }
     if req.method == "GET" && clean_path == "/static/brand/tracepulse-logo-light.svg" {
-        return respond_static_asset(stream, "image/svg+xml", TRACEPULSE_LOGO_LIGHT_SVG.as_bytes());
+        return respond_static_asset(
+            stream,
+            "image/svg+xml",
+            TRACEPULSE_LOGO_LIGHT_SVG.as_bytes(),
+        );
     }
     if req.method == "GET" && clean_path == "/favicon.svg" {
         return respond_static_asset(stream, "image/svg+xml", FAVICON_SVG.as_bytes());
@@ -1200,40 +1204,74 @@ fn api_devices(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> St
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
     let devices = repo.list_devices().unwrap_or_default();
-    let items: Vec<String> = devices.iter().map(|d| {
-        let spike = d.id
-            .and_then(|id| repo.check_interface_spikes(id, alert_config.spike_threshold).ok())
-            .map(|spikes| !spikes.is_empty())
-            .unwrap_or(false);
-        dashboard_device_json(&repo, d, spike, false, &alert_config)
-    }).collect();
+    let items: Vec<String> = devices
+        .iter()
+        .map(|d| {
+            let spike =
+                d.id.and_then(|id| {
+                    repo.check_interface_spikes(id, alert_config.spike_threshold)
+                        .ok()
+                })
+                .map(|spikes| !spikes.is_empty())
+                .unwrap_or(false);
+            dashboard_device_json(&repo, d, spike, false, &alert_config)
+        })
+        .collect();
     format!("[{}]", items.join(","))
 }
 
-fn dashboard_device_json(repo: &Repository, device: &crate::db::models::Device, spike: bool, redact: bool, config: &crate::config::AlertConfig) -> String {
-    let score = device.id.filter(|_| device.status != "offline").and_then(|id| {
-        let metrics = repo.get_device_metrics_history(id, 1).ok()?.pop()?;
-        let cpu = metrics.cpu_usage?;
-        let memory = metrics.memory_usage?;
-        let interfaces = repo.get_latest_interfaces(id).ok()?;
-        let bandwidth = interfaces.iter().map(|sample| sample.bandwidth_utilization).fold(0.0, f64::max);
-        let error_rate = interfaces.iter().filter_map(|sample| {
-            let history = repo.get_recent_interface_samples(id, sample.if_index, 2).ok()?;
-            crate::alert::rules::interface_error_rate(history.get(1)?, history.first()?)
-        }).fold(0.0, f64::max);
-        Some(crate::alert::HealthScorer::new(config.health_warning_threshold, config.health_critical_threshold).score(error_rate, bandwidth, cpu, memory))
-    });
+fn dashboard_device_json(
+    repo: &Repository,
+    device: &crate::db::models::Device,
+    spike: bool,
+    redact: bool,
+    config: &crate::config::AlertConfig,
+) -> String {
+    let score = device
+        .id
+        .filter(|_| device.status != "offline")
+        .and_then(|id| {
+            let metrics = repo.get_device_metrics_history(id, 1).ok()?.pop()?;
+            let cpu = metrics.cpu_usage?;
+            let memory = metrics.memory_usage?;
+            let interfaces = repo.get_latest_interfaces(id).ok()?;
+            let bandwidth = interfaces
+                .iter()
+                .map(|sample| sample.bandwidth_utilization)
+                .fold(0.0, f64::max);
+            let error_rate = interfaces
+                .iter()
+                .filter_map(|sample| {
+                    let history = repo
+                        .get_recent_interface_samples(id, sample.if_index, 2)
+                        .ok()?;
+                    crate::alert::rules::interface_error_rate(history.get(1)?, history.first()?)
+                })
+                .fold(0.0, f64::max);
+            Some(
+                crate::alert::HealthScorer::new(
+                    config.health_warning_threshold,
+                    config.health_critical_threshold,
+                )
+                .score(error_rate, bandwidth, cpu, memory),
+            )
+        });
     let health_status = score.map(|score| {
-        if score >= config.health_warning_threshold { "online" }
-        else if score >= config.health_critical_threshold { "warning" }
-        else { "critical" }
+        if score >= config.health_warning_threshold {
+            "online"
+        } else if score >= config.health_critical_threshold {
+            "warning"
+        } else {
+            "critical"
+        }
     });
     serde_json::json!({
         "ip": device.ip, "name": device.name, "status": device.status,
         "community": if redact { "" } else { &device.community },
         "last_seen": device.last_seen_at.as_deref().unwrap_or(""), "error_spike": spike,
         "health_score": score, "health_status": health_status,
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String) {
@@ -1513,7 +1551,8 @@ fn api_get_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
         "display": { "timezone": c.display.timezone },
         "alert": c.alert,
         "retention": { "history_days": c.retention.history_days },
-    }).to_string()
+    })
+    .to_string()
 }
 
 fn api_post_settings(
@@ -1532,22 +1571,32 @@ fn api_post_settings(
     for (key, value) in fields {
         match key.as_str() {
             "interval_seconds" => match value.as_u64() {
-                Some(interval) if (5..=600).contains(&interval) => updated.polling.interval_seconds = interval,
+                Some(interval) if (5..=600).contains(&interval) => {
+                    updated.polling.interval_seconds = interval
+                }
                 _ => return r#"{"error":"interval_seconds must be 5-600"}"#.into(),
             },
             "default_community" => match value.as_str() {
-                Some(community) if !community.is_empty() => updated.snmp.default_community = community.into(),
+                Some(community) if !community.is_empty() => {
+                    updated.snmp.default_community = community.into()
+                }
                 _ => return r#"{"error":"invalid community"}"#.into(),
             },
             "timezone" => match value.as_str().map(str::to_lowercase) {
-                Some(timezone) if timezone == "utc" || timezone == "jst" => updated.display.timezone = timezone,
+                Some(timezone) if timezone == "utc" || timezone == "jst" => {
+                    updated.display.timezone = timezone
+                }
                 _ => return r#"{"error":"timezone must be utc or jst"}"#.into(),
             },
             "history_days" => match value.as_u64() {
-                Some(days) if (1..=u32::MAX as u64).contains(&days) => updated.retention.history_days = days as u32,
+                Some(days) if (1..=u32::MAX as u64).contains(&days) => {
+                    updated.retention.history_days = days as u32
+                }
                 _ => return r#"{"error":"history_days must be >= 1"}"#.into(),
             },
-            _ => { alert_fields.insert(key, value); }
+            _ => {
+                alert_fields.insert(key, value);
+            }
         }
     }
     if let Err(error) = update_alert_fields(&mut updated.alert, alert_fields) {
@@ -1563,31 +1612,50 @@ fn api_post_settings(
     r#"{"ok":true}"#.to_string()
 }
 
-fn update_alert_fields(alert: &mut crate::config::AlertConfig, fields: serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+fn update_alert_fields(
+    alert: &mut crate::config::AlertConfig,
+    fields: serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
     let legacy_error_rate = if !fields.contains_key("error_rate") {
-        fields.get("error_rate_threshold").and_then(serde_json::Value::as_f64)
-    } else { None };
+        fields
+            .get("error_rate_threshold")
+            .and_then(serde_json::Value::as_f64)
+    } else {
+        None
+    };
     let mut merged = serde_json::to_value(&*alert).map_err(|error| error.to_string())?;
     let object = merged.as_object_mut().ok_or("invalid alert config")?;
     for (key, value) in fields {
-        if !object.contains_key(&key) { return Err(format!("unsupported field: {key}")); }
+        if !object.contains_key(&key) {
+            return Err(format!("unsupported field: {key}"));
+        }
         if matches!(key.as_str(), "cpu" | "memory" | "bandwidth" | "error_rate") {
-            let thresholds: crate::alert::rules::MetricThresholds = serde_json::from_value(value.clone()).map_err(|_| format!("invalid {key} thresholds"))?;
-            if !thresholds.validate() { return Err(format!("{key}: 0 < Warning < Critical <= 100 (%)")); }
+            let thresholds: crate::alert::rules::MetricThresholds =
+                serde_json::from_value(value.clone())
+                    .map_err(|_| format!("invalid {key} thresholds"))?;
+            if !thresholds.validate() {
+                return Err(format!("{key}: 0 < Warning < Critical <= 100 (%)"));
+            }
         }
         object.insert(key, value);
     }
-    let mut updated: crate::config::AlertConfig = serde_json::from_value(merged).map_err(|error| error.to_string())?;
-    if updated.spike_threshold == 0 || !(0.0..=1.0).contains(&updated.error_rate_threshold)
+    let mut updated: crate::config::AlertConfig =
+        serde_json::from_value(merged).map_err(|error| error.to_string())?;
+    if updated.spike_threshold == 0
+        || !(0.0..=1.0).contains(&updated.error_rate_threshold)
         || updated.health_warning_threshold > 100
-        || updated.health_warning_threshold <= updated.health_critical_threshold {
+        || updated.health_warning_threshold <= updated.health_critical_threshold
+    {
         return Err("invalid spike or display thresholds".into());
     }
     if let Some(rate) = legacy_error_rate {
         updated.error_rate = crate::alert::rules::MetricThresholds {
-            warning: rate * 100.0, critical: (rate * 200.0).min(100.0),
+            warning: rate * 100.0,
+            critical: (rate * 200.0).min(100.0),
         };
-        if !updated.error_rate.validate() { return Err("invalid legacy error rate".into()); }
+        if !updated.error_rate.validate() {
+            return Err("invalid legacy error rate".into());
+        }
     }
     updated.error_rate_threshold = updated.error_rate.warning / 100.0;
     *alert = updated;
@@ -1739,8 +1807,16 @@ fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), Strin
     );
 
     let alert = section(&mut root, "alert");
-    for (name, thresholds) in [("cpu", &c.alert.cpu), ("memory", &c.alert.memory), ("bandwidth", &c.alert.bandwidth), ("error_rate", &c.alert.error_rate)] {
-        alert.insert(name.to_string(), toml::Value::try_from(thresholds).map_err(|error| error.to_string())?);
+    for (name, thresholds) in [
+        ("cpu", &c.alert.cpu),
+        ("memory", &c.alert.memory),
+        ("bandwidth", &c.alert.bandwidth),
+        ("error_rate", &c.alert.error_rate),
+    ] {
+        alert.insert(
+            name.to_string(),
+            toml::Value::try_from(thresholds).map_err(|error| error.to_string())?,
+        );
     }
     alert.insert(
         "error_rate_threshold".to_string(),
@@ -2747,14 +2823,22 @@ fn page_dashboard(
         if let Ok(r) = repo.lock() {
             let devs = r.list_devices().unwrap_or_default();
             let mut sc = 0usize;
-            let json: Vec<String> = devs.iter().map(|d| {
-                let spike = d.id
-                    .and_then(|id| r.check_interface_spikes(id, alert_config.spike_threshold).ok())
-                    .map(|spikes| !spikes.is_empty())
-                    .unwrap_or(false);
-                if spike { sc += 1; }
-                dashboard_device_json(&r, d, spike, redact, &alert_config)
-            }).collect();
+            let json: Vec<String> = devs
+                .iter()
+                .map(|d| {
+                    let spike =
+                        d.id.and_then(|id| {
+                            r.check_interface_spikes(id, alert_config.spike_threshold)
+                                .ok()
+                        })
+                        .map(|spikes| !spikes.is_empty())
+                        .unwrap_or(false);
+                    if spike {
+                        sc += 1;
+                    }
+                    dashboard_device_json(&r, d, spike, redact, &alert_config)
+                })
+                .collect();
             let alerts = r.get_recent_alerts(10).unwrap_or_default();
             (devs, sc, json, alerts)
         } else {
@@ -4007,7 +4091,8 @@ const TOPOLOGY_BUNDLE_JS: &str = include_str!("../../frontend/dist/topology.js")
 const THEME_BUNDLE_JS: &str = include_str!("../../frontend/dist/theme.js");
 const I18N_BUNDLE_JS: &str = include_str!("../../frontend/dist/i18n.js");
 const TRACEPULSE_LOGO_SVG: &str = include_str!("../../frontend/assets/TracePulse-logo-dark.svg");
-const TRACEPULSE_LOGO_LIGHT_SVG: &str = include_str!("../../frontend/assets/TracePulse-logo-light.svg");
+const TRACEPULSE_LOGO_LIGHT_SVG: &str =
+    include_str!("../../frontend/assets/TracePulse-logo-light.svg");
 const FAVICON_SVG: &str = include_str!("../../frontend/assets/favicon.svg");
 const FAVICON_ICO: &[u8] = include_bytes!("../../frontend/assets/favicon.ico");
 const FAVICON_DARK_ICO: &[u8] = include_bytes!("../../frontend/assets/favicon-dark.ico");
@@ -4582,13 +4667,20 @@ fn run_polling_loop_with_observer(
 
                 let mut metric_events = Vec::new();
                 if let Some(metrics) = result.metrics {
-                    metric_events.extend(alert_config.system_alerts(&dev_config, metrics.cpu_usage, metrics.memory_usage));
+                    metric_events.extend(alert_config.system_alerts(
+                        &dev_config,
+                        metrics.cpu_usage,
+                        metrics.memory_usage,
+                    ));
                     let _ = r.save_device_metrics(&metrics);
                 }
 
                 for sample in &result.samples {
                     let mut sample = sample.clone();
-                    let previous = r.get_latest_interface_sample(sample.device_id, sample.if_index).ok().flatten();
+                    let previous = r
+                        .get_latest_interface_sample(sample.device_id, sample.if_index)
+                        .ok()
+                        .flatten();
                     if let Some(prev) = previous.as_ref() {
                         sample.bandwidth_utilization = calculate_bandwidth_utilization_from_delta(
                             prev.in_octets.saturating_add(prev.out_octets),
@@ -4597,7 +4689,11 @@ fn run_polling_loop_with_observer(
                             1_000_000_000,
                         );
                     }
-                    metric_events.extend(alert_config.interface_alerts(&dev_config, previous.as_ref(), &sample));
+                    metric_events.extend(alert_config.interface_alerts(
+                        &dev_config,
+                        previous.as_ref(),
+                        &sample,
+                    ));
                     let _ = r.save_sample(&sample);
                     if let Some(observer) = observer.as_deref() {
                         let history = r
@@ -4608,9 +4704,16 @@ fn run_polling_loop_with_observer(
                 }
 
                 if result.status == "online" {
-                    let status = if metric_events.iter().any(|event| event.severity == crate::alert::AlertSeverity::Critical) {
+                    let status = if metric_events
+                        .iter()
+                        .any(|event| event.severity == crate::alert::AlertSeverity::Critical)
+                    {
                         "critical"
-                    } else if !metric_events.is_empty() { "warning" } else { "online" };
+                    } else if !metric_events.is_empty() {
+                        "warning"
+                    } else {
+                        "online"
+                    };
                     let _ = r.update_device_status(&result.ip, status);
                 }
                 for event in metric_tracker.transitions(result.device_id, metric_events) {
@@ -5243,9 +5346,16 @@ mod tests {
 
     #[test]
     fn metric_settings_save_reload_and_reject_invalid_updates_atomically() {
-        let path = std::env::temp_dir().join(format!("tracepulse-metric-settings-{}.toml", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "tracepulse-metric-settings-{}.toml",
+            std::process::id()
+        ));
         let config = Arc::new(Mutex::new(AppConfig::default()));
-        let result = super::api_post_settings(r#"{"interval_seconds":45,"cpu":{"warning":70,"critical":95},"error_rate":{"warning":1,"critical":2}}"#, &config, &path);
+        let result = super::api_post_settings(
+            r#"{"interval_seconds":45,"cpu":{"warning":70,"critical":95},"error_rate":{"warning":1,"critical":2}}"#,
+            &config,
+            &path,
+        );
         assert_eq!(result, r#"{"ok":true}"#);
         let reloaded = AppConfig::load(&path).unwrap();
         assert_eq!(reloaded.alert.cpu.warning, 70.0);
@@ -5263,10 +5373,21 @@ mod tests {
             assert_eq!(config.lock().unwrap().polling.interval_seconds, 45);
             assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
         }
-        assert!(super::api_post_alert_thresholds(r#"{"memory":{"warning":75,"critical":85}}"#, &config, &path).contains("ok"));
-        let body: serde_json::Value = serde_json::from_str(&super::api_get_settings(&config)).unwrap();
+        assert!(
+            super::api_post_alert_thresholds(
+                r#"{"memory":{"warning":75,"critical":85}}"#,
+                &config,
+                &path
+            )
+            .contains("ok")
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&super::api_get_settings(&config)).unwrap();
         assert_eq!(body["alert"]["memory"]["critical"], 85.0);
-        assert!(super::api_post_alert_thresholds(r#"{"error_rate_threshold":0.02}"#, &config, &path).contains("ok"));
+        assert!(
+            super::api_post_alert_thresholds(r#"{"error_rate_threshold":0.02}"#, &config, &path)
+                .contains("ok")
+        );
         assert_eq!(config.lock().unwrap().alert.error_rate.warning, 2.0);
         assert_eq!(config.lock().unwrap().alert.error_rate.critical, 4.0);
         std::fs::write(&path, "[alert]\nerror_rate_threshold = 0.01\n").unwrap();

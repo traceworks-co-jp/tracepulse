@@ -9,7 +9,10 @@ pub struct MetricThresholds {
 
 impl Default for MetricThresholds {
     fn default() -> Self {
-        Self { warning: 80.0, critical: 90.0 }
+        Self {
+            warning: 80.0,
+            critical: 90.0,
+        }
     }
 }
 
@@ -39,9 +42,13 @@ pub fn interface_error_rate(
     previous: &crate::db::models::InterfaceSample,
     current: &crate::db::models::InterfaceSample,
 ) -> Option<f64> {
-    let errors = current.in_errors.checked_sub(previous.in_errors)?
+    let errors = current
+        .in_errors
+        .checked_sub(previous.in_errors)?
         .saturating_add(current.out_errors.checked_sub(previous.out_errors)?);
-    let packets = current.in_packets.checked_sub(previous.in_packets)?
+    let packets = current
+        .in_packets
+        .checked_sub(previous.in_packets)?
         .saturating_add(current.out_packets.checked_sub(previous.out_packets)?);
     let total = packets.saturating_add(errors);
     (total > 0).then(|| (errors as f64 / total as f64) * 100.0)
@@ -53,11 +60,19 @@ pub struct MetricAlertTracker {
 }
 
 impl MetricAlertTracker {
-    pub fn transitions(&mut self, device_id: i64, events: Vec<crate::alert::event::AlertEvent>) -> Vec<crate::alert::event::AlertEvent> {
+    pub fn transitions(
+        &mut self,
+        device_id: i64,
+        events: Vec<crate::alert::event::AlertEvent>,
+    ) -> Vec<crate::alert::event::AlertEvent> {
         let mut next = std::collections::HashMap::new();
         let mut changed = Vec::new();
         for event in events {
-            let key = (device_id, event.interface_id, event.kind.as_str().to_string());
+            let key = (
+                device_id,
+                event.interface_id,
+                event.kind.as_str().to_string(),
+            );
             if self.active.get(&key) != Some(&event.severity) {
                 changed.push(event.clone());
             }
@@ -79,34 +94,75 @@ impl crate::config::AlertConfig {
         interface: Option<&crate::db::models::InterfaceSample>,
     ) -> Option<crate::alert::event::AlertEvent> {
         let severity = thresholds.severity(value)?;
-        let threshold = if severity == AlertSeverity::Critical { thresholds.critical } else { thresholds.warning };
+        let threshold = if severity == AlertSeverity::Critical {
+            thresholds.critical
+        } else {
+            thresholds.warning
+        };
         let mut event = crate::alert::event::AlertEvent::new(
             crate::alert::event::AlertKind::Custom(format!("{}_HIGH", metric.to_uppercase())),
             severity,
             device,
-            format!("{} ({}) {}{} {:.2}% >= {:.2}% ({})", device.name, device.ip, metric,
-                interface.map(|sample| format!(" {} (if-{})", sample.if_name, sample.if_index)).unwrap_or_default(),
-                value, threshold, severity),
-        ).with_observed_value(format!("{value:.2}%")).with_threshold(format!("{threshold:.2}%"));
+            format!(
+                "{} ({}) {}{} {:.2}% >= {:.2}% ({})",
+                device.name,
+                device.ip,
+                metric,
+                interface
+                    .map(|sample| format!(" {} (if-{})", sample.if_name, sample.if_index))
+                    .unwrap_or_default(),
+                value,
+                threshold,
+                severity
+            ),
+        )
+        .with_observed_value(format!("{value:.2}%"))
+        .with_threshold(format!("{threshold:.2}%"));
         if let Some(sample) = interface {
-            event = event.with_interface(sample.if_name.clone()).with_interface_id(i64::from(sample.if_index));
+            event = event
+                .with_interface(sample.if_name.clone())
+                .with_interface_id(i64::from(sample.if_index));
         }
         Some(event)
     }
 
-    pub fn system_alerts(&self, device: &crate::device::types::DeviceConfig, cpu: Option<u32>, memory: Option<u32>) -> Vec<crate::alert::event::AlertEvent> {
-        [("cpu", cpu, &self.cpu), ("memory", memory, &self.memory)].into_iter()
-            .filter_map(|(metric, value, thresholds)| self.metric_alert(device, metric, f64::from(value?), thresholds, None)).collect()
+    pub fn system_alerts(
+        &self,
+        device: &crate::device::types::DeviceConfig,
+        cpu: Option<u32>,
+        memory: Option<u32>,
+    ) -> Vec<crate::alert::event::AlertEvent> {
+        [("cpu", cpu, &self.cpu), ("memory", memory, &self.memory)]
+            .into_iter()
+            .filter_map(|(metric, value, thresholds)| {
+                self.metric_alert(device, metric, f64::from(value?), thresholds, None)
+            })
+            .collect()
     }
 
-    pub fn interface_alerts(&self, device: &crate::device::types::DeviceConfig, previous: Option<&crate::db::models::InterfaceSample>, current: &crate::db::models::InterfaceSample) -> Vec<crate::alert::event::AlertEvent> {
-        let Some(previous) = previous else { return Vec::new(); };
+    pub fn interface_alerts(
+        &self,
+        device: &crate::device::types::DeviceConfig,
+        previous: Option<&crate::db::models::InterfaceSample>,
+        current: &crate::db::models::InterfaceSample,
+    ) -> Vec<crate::alert::event::AlertEvent> {
+        let Some(previous) = previous else {
+            return Vec::new();
+        };
         let mut events = Vec::new();
-        if let Some(event) = self.metric_alert(device, "bandwidth", current.bandwidth_utilization, &self.bandwidth, Some(current)) {
+        if let Some(event) = self.metric_alert(
+            device,
+            "bandwidth",
+            current.bandwidth_utilization,
+            &self.bandwidth,
+            Some(current),
+        ) {
             events.push(event);
         }
         if let Some(rate) = interface_error_rate(previous, current) {
-            if let Some(event) = self.metric_alert(device, "error_rate", rate, &self.error_rate, Some(current)) {
+            if let Some(event) =
+                self.metric_alert(device, "error_rate", rate, &self.error_rate, Some(current))
+            {
                 events.push(event);
             }
         }
@@ -127,7 +183,13 @@ mod metric_tests {
         assert_eq!(thresholds.severity(79.9), None);
         assert_eq!(thresholds.severity(f64::NAN), None);
         assert!(thresholds.validate());
-        assert!(!MetricThresholds { warning: 90.0, critical: 80.0 }.validate());
+        assert!(
+            !MetricThresholds {
+                warning: 90.0,
+                critical: 80.0
+            }
+            .validate()
+        );
     }
 
     #[test]
@@ -141,10 +203,24 @@ mod metric_tests {
         assert_eq!(events[0].kind.as_str(), "CPU_HIGH");
         assert_eq!(events[0].severity, AlertSeverity::Critical);
         assert_eq!(events[0].observed_value.as_deref(), Some("100.00%"));
-        assert!(tracker.transitions(1, config.system_alerts(&device, Some(100), None)).is_empty());
-        assert_eq!(tracker.transitions(1, config.system_alerts(&device, Some(80), None)).len(), 1);
+        assert!(
+            tracker
+                .transitions(1, config.system_alerts(&device, Some(100), None))
+                .is_empty()
+        );
+        assert_eq!(
+            tracker
+                .transitions(1, config.system_alerts(&device, Some(80), None))
+                .len(),
+            1
+        );
         assert!(tracker.transitions(1, Vec::new()).is_empty());
-        assert_eq!(tracker.transitions(1, config.system_alerts(&device, Some(100), None)).len(), 1);
+        assert_eq!(
+            tracker
+                .transitions(1, config.system_alerts(&device, Some(100), None))
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -163,7 +239,10 @@ mod metric_tests {
         current.bandwidth_utilization = 90.0;
         assert_eq!(interface_error_rate(&previous, &current), Some(1.0));
         let mut config = crate::config::AlertConfig::default();
-        config.error_rate = MetricThresholds { warning: 1.0, critical: 2.0 };
+        config.error_rate = MetricThresholds {
+            warning: 1.0,
+            critical: 2.0,
+        };
         let device = crate::device::types::DeviceConfig::new("192.0.2.1", "public");
         let events = config.interface_alerts(&device, Some(&previous), &current);
         assert_eq!(events.len(), 2);
@@ -175,7 +254,12 @@ mod metric_tests {
         assert_eq!(interface_error_rate(&previous, &previous), None);
         current.in_errors = 0;
         assert_eq!(interface_error_rate(&previous, &current), None);
-        assert_eq!(config.system_alerts(&device, None, Some(100))[0].kind.as_str(), "MEMORY_HIGH");
+        assert_eq!(
+            config.system_alerts(&device, None, Some(100))[0]
+                .kind
+                .as_str(),
+            "MEMORY_HIGH"
+        );
     }
 }
 
