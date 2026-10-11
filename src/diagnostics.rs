@@ -213,7 +213,7 @@ pub fn run_basic(
 async fn probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Option<f64>, bool) {
     #[cfg(windows)]
     {
-        return windows_probe(target, sequence, ttl);
+        windows_probe(target, sequence, ttl)
     }
     #[cfg(not(windows))]
     {
@@ -309,7 +309,7 @@ fn windows_probe(target: IpAddr, sequence: u8, ttl: Option<u8>) -> (String, Opti
             std::ptr::null_mut(),
             None,
             std::ptr::null_mut(),
-            u32::from(Ipv4Addr::from(address)).to_be(),
+            u32::from(address).to_be(),
             payload.as_ptr() as _,
             payload.len() as u16,
             &options,

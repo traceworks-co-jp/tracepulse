@@ -113,16 +113,17 @@ impl AppConfig {
         let content = std::fs::read_to_string(path)?;
         let mut config: AppConfig = toml::from_str(&content)?;
         let root: toml::Value = toml::from_str(&content)?;
-        if let Some(alert) = root.get("alert") {
-            if alert.get("error_rate").is_none() && alert.get("error_rate_threshold").is_some() {
-                let warning = config.alert.error_rate_threshold * 100.0;
-                let migrated = crate::alert::rules::MetricThresholds {
-                    warning,
-                    critical: (warning * 2.0).min(100.0),
-                };
-                if migrated.validate() {
-                    config.alert.error_rate = migrated;
-                }
+        if let Some(alert) = root.get("alert")
+            && alert.get("error_rate").is_none()
+            && alert.get("error_rate_threshold").is_some()
+        {
+            let warning = config.alert.error_rate_threshold * 100.0;
+            let migrated = crate::alert::rules::MetricThresholds {
+                warning,
+                critical: (warning * 2.0).min(100.0),
+            };
+            if migrated.validate() {
+                config.alert.error_rate = migrated;
             }
         }
         if [

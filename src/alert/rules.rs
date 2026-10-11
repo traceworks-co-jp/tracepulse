@@ -159,12 +159,11 @@ impl crate::config::AlertConfig {
         ) {
             events.push(event);
         }
-        if let Some(rate) = interface_error_rate(previous, current) {
-            if let Some(event) =
+        if let Some(rate) = interface_error_rate(previous, current)
+            && let Some(event) =
                 self.metric_alert(device, "error_rate", rate, &self.error_rate, Some(current))
-            {
-                events.push(event);
-            }
+        {
+            events.push(event);
         }
         events
     }
