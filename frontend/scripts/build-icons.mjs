@@ -30,8 +30,10 @@ try {
             const x = (left + right - side) / 2;
             const y = (top + bottom - side) / 2;
             const serializer = new XMLSerializer();
-            return { viewBox: `${x} ${y} ${side} ${side}`, x, y, side,
-                paths: selected.map(path => serializer.serializeToString(path)).join("") };
+            return {
+                viewBox: `${x} ${y} ${side} ${side}`, x, y, side,
+                paths: selected.map(path => serializer.serializeToString(path)).join("")
+            };
         });
     }
 
