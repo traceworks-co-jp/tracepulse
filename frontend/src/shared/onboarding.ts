@@ -51,6 +51,8 @@ export function initializeOnboarding(auto = false): void {
     let timer: number | undefined;
     let deadline: number | undefined;
     let previousFocus: HTMLElement | null = null;
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(storageKey) === "done"; } catch { /* ignore */ }
 
     const stop = (): void => {
         controller.abort();
@@ -59,14 +61,22 @@ export function initializeOnboarding(auto = false): void {
         controller = new AbortController();
         busy = false;
     };
-    const remember = (): void => { try { localStorage.setItem(storageKey, "done"); } catch { /* ignore */ } };
+    const remember = (): void => {
+        dismissed = true;
+        if (auto) launch.hidden = true;
+        try { localStorage.setItem(storageKey, "done"); } catch { /* ignore */ }
+    };
     const close = (): void => {
         stop();
         remember();
         dialog.close();
         dialog.replaceChildren();
         devices = [];
-        previousFocus?.focus();
+        if (previousFocus?.hidden) {
+            const heading = document.querySelector<HTMLElement>("main h1");
+            heading?.setAttribute("tabindex", "-1");
+            heading?.focus();
+        } else previousFocus?.focus();
         window.refreshDashboard?.();
     };
     const status = (message: string, error = false): void => {
@@ -207,12 +217,11 @@ export function initializeOnboarding(auto = false): void {
     launch.className = "setup-launch";
     launch.type = "button";
     launch.textContent = text("guide");
+    launch.hidden = auto && dismissed;
     launch.addEventListener("click", () => open());
     document.querySelector("main h1")?.after(launch);
     window.addEventListener("tracepulse-language-change", () => { launch.textContent = text("guide"); if (dialog.open && step !== 1) render(); });
     if (auto) {
-        let dismissed = false;
-        try { dismissed = localStorage.getItem(storageKey) === "done"; } catch { /* ignore */ }
         if (!dismissed) void request<FoundDevice[]>("/api/devices", controller.signal).then((existing) => { if (existing.length === 0) open(true); }).catch(() => { /* keep normal dashboard available */ });
     }
 }

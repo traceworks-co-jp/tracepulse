@@ -17,6 +17,21 @@ The generated `frontend/dist/*.js` files are intentionally kept as repository
 artifacts during the initial migration so Rust builds can serve stable assets
 without requiring Node.js during every `cargo build`.
 
+## Brand Icons
+
+After replacing the Community logo SVGs, regenerate favicon SVG/ICO files and
+the 180px Apple Touch Icon from the symbol, without the wordmark:
+
+```bash
+npx playwright install chromium
+npm run build:icons
+```
+
+The generator uses Chromium to rasterize the supplied artwork and `png-to-ico`
+to package 16px, 32px and 48px ICO variants. The SVG adapts to the browser color
+scheme. Generated assets are committed, so ordinary Rust builds do not need this
+step. Rebuild and restart the server after regenerating embedded icons.
+
 ## Rust build integration policy
 
 The initial migration does not call npm from `build.rs`. This keeps ordinary

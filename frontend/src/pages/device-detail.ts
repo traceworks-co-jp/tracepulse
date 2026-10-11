@@ -398,8 +398,19 @@ function formatCounterWithBreakdown(total: unknown, delta: unknown, errorBreakdo
 }
 
 function diagnosticBadge(status: string | undefined): string {
-    const key = status || "healthy";
-    return `<span class='diagnostic-badge ${escapeHtml(key)}'>${t(`diagnostic_${key}`)}</span>`;
+    const diagnostics = {
+        healthy: { className: "healthy", translation: "diagnostic_healthy" },
+        l1_error: { className: "l1_error", translation: "diagnostic_l1_error" },
+        duplex_mismatch: { className: "duplex_mismatch", translation: "diagnostic_duplex_mismatch" },
+        congestion: { className: "congestion", translation: "diagnostic_congestion" },
+        down: { className: "down", translation: "diagnostic_down" },
+    } as const;
+    const diagnostic = status === undefined
+        ? diagnostics.healthy
+        : Object.prototype.hasOwnProperty.call(diagnostics, status)
+            ? diagnostics[status as keyof typeof diagnostics]
+            : diagnostics.down;
+    return `<span class='diagnostic-badge ${diagnostic.className}'>${escapeHtml(t(diagnostic.translation))}</span>`;
 }
 
 export function renderInterfaces(ifaces: DeviceInterface[] = []): void {

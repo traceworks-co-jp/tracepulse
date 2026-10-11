@@ -650,6 +650,9 @@ fn handle_connection(
     if req.method == "GET" && clean_path == "/static/brand/tracepulse-logo.svg" {
         return respond_static_asset(stream, "image/svg+xml", TRACEPULSE_LOGO_SVG.as_bytes());
     }
+    if req.method == "GET" && clean_path == "/static/brand/tracepulse-logo-light.svg" {
+        return respond_static_asset(stream, "image/svg+xml", TRACEPULSE_LOGO_LIGHT_SVG.as_bytes());
+    }
     if req.method == "GET" && clean_path == "/favicon.svg" {
         return respond_static_asset(stream, "image/svg+xml", FAVICON_SVG.as_bytes());
     }
@@ -3489,17 +3492,28 @@ const COMMON_CSS: &str = "<style>
   html[data-theme='light'] { color-scheme: light; }
   body { font-family: system-ui, sans-serif; background: #0f172a; color: #f1f5f9; min-height: 100vh; }
   html[data-theme='light'] body { background: #f8fafc; color: #0f172a; }
-    nav { background: #1e293b; border-bottom: 1px solid #334155; padding: .75rem 1.5rem; display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
+    nav { background: #1e293b; border-bottom: 1px solid #334155; padding: .75rem 1.5rem; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: .6rem 1rem; }
+    nav .nav-links { display:flex; align-items:center; gap:1rem; min-width:0; overflow-x:auto; scrollbar-width:thin; padding:.25rem 0; }
+    nav .nav-links a { flex:none; white-space:nowrap; }
+    nav .nav-controls { display:flex; align-items:center; gap:.5rem; min-width:0; }
   html[data-theme='light'] nav { background: #ffffff; border-bottom-color: #cbd5e1; }
     nav .brand { display:flex; align-items:center; gap:.625rem; flex:none; font-size:1.1875rem; font-weight:700; text-decoration:none; }
-    nav .brand-logo { display:block; width:auto; height:30px; filter:brightness(0) invert(1); }
-    html[data-theme='light'] nav .brand-logo { filter:none; }
-  html[data-theme='light'] nav .brand { color: #0284c7; }
+    nav .brand-logo { display:block; width:40px; height:30px; object-fit:contain; }
+    nav .brand-logo-light { display:none; }
+    html[data-theme='light'] nav .brand-logo-dark { display:none; }
+    html[data-theme='light'] nav .brand-logo-light { display:block; }
+        nav .brand-name { display:flex; flex-direction:column; align-items:flex-start; line-height:1.05; }
+        nav .brand-name-main { display:block; white-space:nowrap; }
+        nav .brand-name-trace { color:#00D2FF; }
+        nav .brand-name-pulse { color:#10B981; }
+        nav .brand-name-enterprise { color:#89BEEA; font-size:.78em; font-weight:600; }
+        html[data-theme='light'] nav .brand-name-trace { color:#1E293B; }
+        html[data-theme='light'] nav .brand-name-pulse { color:#00B894; }
+        html[data-theme='light'] nav .brand-name-enterprise { color:#2A506F; }
   nav a { color: #94a3b8; text-decoration: none; font-size: .9rem; }
   html[data-theme='light'] nav a { color: #475569; }
   nav a:hover { color: #f1f5f9; }
   html[data-theme='light'] nav a:hover { color: #0f172a; }
-  nav .nav-spacer { flex: 1; }
   nav .lang-wrap { display:flex; align-items:center; gap:.5rem; color:#94a3b8; font-size:.85rem; }
   html[data-theme='light'] nav .lang-wrap { color:#475569; }
   nav .theme-wrap { display:flex; align-items:center; gap:.5rem; color:#94a3b8; font-size:.85rem; }
@@ -3517,6 +3531,9 @@ const COMMON_CSS: &str = "<style>
     html[data-theme='light'] nav .account-trigger, html[data-theme='light'] nav .account-panel { background:#fff; color:#0f172a; border-color:#cbd5e1; }
     html[data-theme='light'] nav .account-panel a, html[data-theme='light'] nav .account-panel button { color:#0f172a; }
     html[data-theme='light'] nav .account-panel a:hover, html[data-theme='light'] nav .account-panel button:hover { background:#e2e8f0; }
+        @media(max-width:1400px) { nav .theme-wrap > span, nav .lang-wrap > span { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); white-space:nowrap; } }
+        @media(max-width:760px) { body nav { grid-template-columns:minmax(0,1fr) auto; column-gap:.5rem; } nav .nav-controls { grid-column:2; grid-row:1; } nav .nav-links { grid-column:1 / -1; grid-row:2; } }
+        @media(max-width:480px) { nav .brand-name { display:none; } nav .brand-logo { width:35px; height:26px; } nav .theme-select { width:4.5rem; } nav .lang-select { width:5.5rem; } }
   main { max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem; }
   h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #e2e8f0; }
   html[data-theme='light'] h1 { color:#0f172a; }
@@ -3600,7 +3617,7 @@ const COMMON_CSS: &str = "<style>
     html[data-theme='light'] { --tp-page:#f3f7fa; --tp-surface:#ffffff; --tp-raised:#f7fafc; --tp-border:#d5e0e8; --tp-text:#152337; --tp-muted:#5d7084; --tp-accent:#148f83; --tp-accent-ink:#ffffff; }
     body { background:radial-gradient(ellipse at 50% 0%,rgba(24,52,71,.42),transparent 54%),var(--tp-page); color:var(--tp-text); font-family:'Segoe UI',system-ui,sans-serif; line-height:1.5; }
     html[data-theme='light'] body { background:radial-gradient(ellipse at 50% 0%,#e4f4f2,transparent 58%),var(--tp-page); color:var(--tp-text); }
-    body nav { background:rgba(21,35,55,.96); border-bottom-color:var(--tp-border); padding:.8rem clamp(1rem,3vw,2rem); gap:1rem 1.4rem; }
+    body nav { background:rgba(21,35,55,.96); border-bottom-color:var(--tp-border); padding:.75rem 1.25rem; gap:.6rem 1rem; }
     html[data-theme='light'] body nav { background:rgba(255,255,255,.96); border-bottom-color:var(--tp-border); }
     body nav :is(.lang-select,.theme-select) { border-color:#40556d; border-radius:5px; background:#0c1727; color:var(--tp-text); }
     html[data-theme='light'] body nav :is(.lang-select,.theme-select) { border-color:#cbd8e2; background:#fff; color:var(--tp-text); }
@@ -3656,8 +3673,8 @@ fn navigation_html(extension: Option<&dyn WebExtensionProvider>) -> String {
             1,
         );
         navigation = navigation.replacen(
-            "</nav>",
-            &format!("{}</nav>", extension.account_menu_html()),
+            "  </div>\n</nav>",
+            &format!("{}  </div>\n</nav>", extension.account_menu_html()),
             1,
         );
     }
@@ -3673,26 +3690,29 @@ pub fn shared_navigation_html(extension: &dyn WebExtensionProvider) -> String {
 }
 
 const NAV_HTML: &str = "<nav>
-    <a class='brand' href='/'><img class='brand-logo' src='/static/brand/tracepulse-logo.svg' alt=''><span class='brand-name'>TracePulse</span></a>
+    <a class='brand' href='/' aria-label='TracePulse Enterprise'><img class='brand-logo brand-logo-dark' src='/static/brand/tracepulse-logo.svg?v=4' alt=''><img class='brand-logo brand-logo-light' src='/static/brand/tracepulse-logo-light.svg?v=4' alt=''><span class='brand-name'><span class='brand-name-main'><span class='brand-name-trace'>Trace</span><span class='brand-name-pulse'>Pulse</span></span><span class='brand-name-enterprise'>Enterprise</span></span></a>
+    <div class='nav-links'>
     <a href='/' data-i18n='nav_dashboard'>Dashboard</a>
     <a href='/discovery' data-i18n='nav_discovery'>Discovery</a>
   <a href='/diagnostics' data-i18n='nav_diagnostics'>Diagnostics</a>
   <a href='/settings' data-i18n='nav_settings'>Settings</a>
-  <div class='nav-spacer'></div>
-  <div class='theme-wrap'>
+    </div>
+    <div class='nav-controls'>
+    <label class='theme-wrap' for='theme-select'>
     <span data-i18n='theme_label'>Theme</span>
     <select id='theme-select' class='theme-select' onchange='setTheme(this.value)'>
       <option value='dark' data-i18n='theme_dark'>Dark</option>
       <option value='light' data-i18n='theme_light'>Light</option>
     </select>
-  </div>
-  <div class='lang-wrap'>
+    </label>
+    <label class='lang-wrap' for='lang-select'>
     <span data-i18n='language_label'>Language</span>
     <select id='lang-select' class='lang-select' onchange='setLanguage(this.value)'>
       <option value='en' data-i18n='english'>English</option>
       <option value='ja' data-i18n='japanese'>日本語</option>
     </select>
-  </div>
+    </label>
+    </div>
 </nav>";
 
 const SETTINGS_CSS: &str = "<style>
@@ -3986,12 +4006,13 @@ const DISCOVERY_BUNDLE_JS: &str = include_str!("../../frontend/dist/discovery.js
 const TOPOLOGY_BUNDLE_JS: &str = include_str!("../../frontend/dist/topology.js");
 const THEME_BUNDLE_JS: &str = include_str!("../../frontend/dist/theme.js");
 const I18N_BUNDLE_JS: &str = include_str!("../../frontend/dist/i18n.js");
-const TRACEPULSE_LOGO_SVG: &str = include_str!("../../frontend/assets/tracepulse-logo-artifact.svg");
+const TRACEPULSE_LOGO_SVG: &str = include_str!("../../frontend/assets/TracePulse-logo-dark.svg");
+const TRACEPULSE_LOGO_LIGHT_SVG: &str = include_str!("../../frontend/assets/TracePulse-logo-light.svg");
 const FAVICON_SVG: &str = include_str!("../../frontend/assets/favicon.svg");
 const FAVICON_ICO: &[u8] = include_bytes!("../../frontend/assets/favicon.ico");
 const FAVICON_DARK_ICO: &[u8] = include_bytes!("../../frontend/assets/favicon-dark.ico");
 const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../../frontend/assets/apple-touch-icon.png");
-const BRAND_HEAD_HTML: &str = "<link rel='icon' href='/favicon.svg?v=2' type='image/svg+xml'><link rel='icon' href='/favicon.ico?v=2' type='image/x-icon' media='(prefers-color-scheme: light)'><link rel='icon' href='/favicon-dark.ico?v=2' type='image/x-icon' media='(prefers-color-scheme: dark)'><link rel='apple-touch-icon' href='/apple-touch-icon.png'>";
+const BRAND_HEAD_HTML: &str = "<link rel='icon' href='/favicon.svg?v=3' type='image/svg+xml'><link rel='icon' href='/favicon.ico?v=3' type='image/x-icon' media='(prefers-color-scheme: light)'><link rel='icon' href='/favicon-dark.ico?v=3' type='image/x-icon' media='(prefers-color-scheme: dark)'><link rel='apple-touch-icon' href='/apple-touch-icon.png?v=3'>";
 
 const DASHBOARD_CSS: &str = "<style>
     .dashboard-table-scroll { max-height:min(60vh, 560px); overflow:auto; border:1px solid #334155; border-radius:.5rem; background:#1e293b; }
@@ -4969,6 +4990,14 @@ mod tests {
             navigation.find("lang-select").unwrap() < navigation.find("account-trigger").unwrap()
         );
         assert!(navigation.find("account-trigger").unwrap() < navigation.find("</nav>").unwrap());
+        let links = navigation.split("<div class='nav-links'>").nth(1).unwrap();
+        let (links, controls) = links.split_once("<div class='nav-controls'>").unwrap();
+        assert!(links.contains("User Management"));
+        assert!(!links.contains("theme-select"));
+        assert!(controls.contains("account-trigger"));
+        assert!(controls.contains("for='theme-select'"));
+        assert!(controls.contains("for='lang-select'"));
+        assert!(controls.contains("Account</button>  </div>\n</nav>"));
     }
 
     #[test]

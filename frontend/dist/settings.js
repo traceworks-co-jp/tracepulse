@@ -126,6 +126,11 @@ var TracePulseSettings = (() => {
     let timer;
     let deadline;
     let previousFocus = null;
+    let dismissed = false;
+    try {
+      dismissed = localStorage.getItem(storageKey) === "done";
+    } catch {
+    }
     const stop = () => {
       controller.abort();
       window.clearTimeout(timer);
@@ -134,6 +139,8 @@ var TracePulseSettings = (() => {
       busy = false;
     };
     const remember = () => {
+      dismissed = true;
+      if (auto) launch.hidden = true;
       try {
         localStorage.setItem(storageKey, "done");
       } catch {
@@ -145,7 +152,11 @@ var TracePulseSettings = (() => {
       dialog.close();
       dialog.replaceChildren();
       devices = [];
-      previousFocus?.focus();
+      if (previousFocus?.hidden) {
+        const heading = document.querySelector("main h1");
+        heading?.setAttribute("tabindex", "-1");
+        heading?.focus();
+      } else previousFocus?.focus();
       window.refreshDashboard?.();
     };
     const status = (message, error = false) => {
@@ -326,6 +337,7 @@ var TracePulseSettings = (() => {
     launch.className = "setup-launch";
     launch.type = "button";
     launch.textContent = text("guide");
+    launch.hidden = auto && dismissed;
     launch.addEventListener("click", () => open());
     document.querySelector("main h1")?.after(launch);
     window.addEventListener("tracepulse-language-change", () => {
@@ -333,11 +345,6 @@ var TracePulseSettings = (() => {
       if (dialog.open && step !== 1) render();
     });
     if (auto) {
-      let dismissed = false;
-      try {
-        dismissed = localStorage.getItem(storageKey) === "done";
-      } catch {
-      }
       if (!dismissed) void request("/api/devices", controller.signal).then((existing) => {
         if (existing.length === 0) open(true);
       }).catch(() => {

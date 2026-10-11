@@ -149,7 +149,7 @@ export function openActiveDiagnostic(target: string, kind: string, port?: number
     }
     const usesPort = kind === "port" || diagnosticExtension?.tabs.some((tab) => tab.kind === kind && tab.portPrompt);
     if (targetLabel) targetLabel.textContent = `${kind.toUpperCase()} ${target}${usesPort && port ? `:${port}` : ""}`;
-    panel.querySelectorAll<HTMLButtonElement>(".diag-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.kind === kind || (kind === "traceroute" && button.dataset.kind === "ping")));
+    panel.querySelectorAll<HTMLButtonElement>(".diag-tabs button").forEach((button) => button.classList.toggle("active", button.dataset.kind === kind));
     panel.classList.add("open");
     diagnosticSocket?.close();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";

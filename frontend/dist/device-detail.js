@@ -308,8 +308,15 @@ var TracePulseDeviceDetail = (() => {
     return `<span class='err-cell${flipPopover ? " flip" : ""}' tabindex='0'>${formatCounter(total, delta)}${errorBreakdownPopoverHtml(errorBreakdown, metrics)}</span>`;
   }
   function diagnosticBadge(status) {
-    const key = status || "healthy";
-    return `<span class='diagnostic-badge ${esc(key)}'>${t(`diagnostic_${key}`)}</span>`;
+    const diagnostics = {
+      healthy: { className: "healthy", translation: "diagnostic_healthy" },
+      l1_error: { className: "l1_error", translation: "diagnostic_l1_error" },
+      duplex_mismatch: { className: "duplex_mismatch", translation: "diagnostic_duplex_mismatch" },
+      congestion: { className: "congestion", translation: "diagnostic_congestion" },
+      down: { className: "down", translation: "diagnostic_down" }
+    };
+    const diagnostic = status === void 0 ? diagnostics.healthy : Object.prototype.hasOwnProperty.call(diagnostics, status) ? diagnostics[status] : diagnostics.down;
+    return `<span class='diagnostic-badge ${diagnostic.className}'>${esc(t(diagnostic.translation))}</span>`;
   }
   function renderInterfaces(ifaces = []) {
     const tbody = document.getElementById("if-tbody");

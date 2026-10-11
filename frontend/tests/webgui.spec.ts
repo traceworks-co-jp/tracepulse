@@ -16,9 +16,11 @@ test("setup guide appears only for empty monitoring and remembers Skip", async (
     expect(bounds!.y + bounds!.height / 2).toBeCloseTo(page.viewportSize()!.height / 2, 0);
     await guide.getByRole("button", { name: "Skip", exact: true }).click();
     await expect(guide).not.toBeVisible();
+    await expect(page.locator(".setup-launch")).toBeHidden();
     expect(await page.evaluate(() => localStorage.getItem("tracepulse-onboarding-v1"))).toBe("done");
     await page.reload();
     await expect(guide).not.toBeVisible();
+    await expect(page.locator(".setup-launch")).toBeHidden();
     await page.goto("/settings");
     const launch = page.getByRole("button", { name: "Setup Guide", exact: true });
     await launch.click();
@@ -76,8 +78,10 @@ test("setup guide discovers and registers only selected devices then finishes", 
     await guide.getByRole("button", { name: "Next", exact: true }).click();
     await expect(guide).toContainText("Outbound notifications are not available in Community edition");
     await guide.getByRole("button", { name: "Finish", exact: true }).click();
+    await expect(page.locator(".setup-launch")).toBeHidden();
     await page.reload();
     await expect(guide).not.toBeVisible();
+    await expect(page.locator(".setup-launch")).toBeHidden();
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("test-secret");
 });
 
@@ -128,6 +132,8 @@ test("setup guide can be skipped during polling without stale results", async ({
     await guide.getByRole("button", { name: "Discover", exact: true }).click();
     await expect(guide.locator("#setup-status")).toContainText("1 / 254");
     await guide.getByRole("button", { name: "Skip", exact: true }).click();
+    await expect(page.locator(".setup-launch")).toBeHidden();
+    await page.goto("/settings");
     await page.getByRole("button", { name: "Setup Guide", exact: true }).click();
     await expect(guide.locator("h2")).toHaveText("Welcome to TracePulse");
     await page.clock.install();
@@ -195,11 +201,23 @@ test("setup guide language selection can be dismissed without changing the langu
     await expect(guide).not.toBeVisible();
     expect(await page.evaluate(() => localStorage.getItem("tracepulse-lang"))).toBeNull();
     await page.reload();
-    await expect(page.locator(".setup-launch")).toBeVisible();
+    await expect(page.locator(".setup-launch")).toBeHidden();
     await expect(guide).not.toBeVisible();
+    await page.goto("/settings");
     await page.getByRole("button", { name: "Setup Guide", exact: true }).click();
     await expect(guide.locator("h2")).toHaveText("Welcome to TracePulse");
     await expect(guide.locator("#setup-language")).toHaveCount(0);
+});
+
+test("setup guide closes a manual dashboard launch without leaving focus on a hidden button", async ({ page }) => {
+    await page.route("**/api/devices", (route) => route.fulfill({ json: [{ ip: "192.0.2.1" }] }));
+    await page.goto("/");
+    await page.getByRole("button", { name: "Setup Guide", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".setup-launch")).toBeHidden();
+    await expect(page.locator("main h1")).toBeFocused();
+    await page.reload();
+    await expect(page.locator(".setup-launch")).toBeHidden();
 });
 
 test("dashboard loads compiled frontend assets without console errors", async ({ page }) => {
@@ -213,30 +231,124 @@ test("dashboard loads compiled frontend assets without console errors", async ({
     await expect(page.locator("body")).toHaveAttribute("data-title-key", "dashboard_title");
     await expect(page.locator("#dash-table")).toBeVisible();
     await expect(page.locator("nav .brand")).toHaveAttribute("href", "/");
-    await expect(page.locator("nav .brand-logo")).toHaveAttribute("src", "/static/brand/tracepulse-logo.svg");
-    await expect(page.locator("nav .brand-logo")).toHaveCSS("height", "30px");
+    await expect(page.locator("nav .brand-logo-dark")).toHaveAttribute("src", "/static/brand/tracepulse-logo.svg?v=4");
+    await expect(page.locator("nav .brand-logo-light")).toHaveAttribute("src", "/static/brand/tracepulse-logo-light.svg?v=4");
+    await expect(page.locator("nav .brand-logo-dark")).toHaveCSS("height", "30px");
     await expect(page.locator("nav .brand-name")).toHaveText("TracePulse");
+    await expect(page.locator("nav .brand-name-trace")).toHaveCSS("color", "rgb(0, 210, 255)");
+    await expect(page.locator("nav .brand-name-pulse")).toHaveCSS("color", "rgb(16, 185, 129)");
     await expect(page.locator("nav .brand")).toHaveCSS("gap", "10px");
     await expect(page.locator("nav .brand-name")).toHaveCSS("font-size", "19px");
     await expect(page.locator("nav .brand-name")).toHaveCSS("font-weight", "700");
     await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
-    await expect(page.locator("nav .brand-logo")).toHaveCSS("filter", "brightness(0) invert(1)");
+    await expect(page.locator("nav .brand-logo-dark")).toBeVisible();
+    await expect(page.locator("nav .brand-logo-light")).toBeHidden();
+    await expect(page.locator("nav .brand-logo-dark")).toHaveCSS("filter", "none");
     await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
-    await expect(page.locator("nav .brand-logo")).toHaveCSS("filter", "none");
-    await expect(page.locator("link[rel='icon'][type='image/svg+xml']")).toHaveAttribute("href", "/favicon.svg?v=2");
-    await expect(page.locator("link[rel='icon'][media='(prefers-color-scheme: light)']")).toHaveAttribute("href", "/favicon.ico?v=2");
-    await expect(page.locator("link[rel='icon'][media='(prefers-color-scheme: dark)']")).toHaveAttribute("href", "/favicon-dark.ico?v=2");
-    await expect(page.locator("link[rel='apple-touch-icon']")).toHaveAttribute("href", "/apple-touch-icon.png");
+    await expect(page.locator("nav .brand-logo-dark")).toBeHidden();
+    await expect(page.locator("nav .brand-logo-light")).toBeVisible();
+    await expect(page.locator("nav .brand-logo-light")).toHaveCSS("filter", "none");
+    await expect(page.locator("nav .brand-name-trace")).toHaveCSS("color", "rgb(30, 41, 59)");
+    await expect(page.locator("nav .brand-name-pulse")).toHaveCSS("color", "rgb(0, 184, 148)");
+    await expect(page.locator("link[rel='icon'][type='image/svg+xml']")).toHaveAttribute("href", "/favicon.svg?v=3");
+    await expect(page.locator("link[rel='icon'][media='(prefers-color-scheme: light)']")).toHaveAttribute("href", "/favicon.ico?v=3");
+    await expect(page.locator("link[rel='icon'][media='(prefers-color-scheme: dark)']")).toHaveAttribute("href", "/favicon-dark.ico?v=3");
+    await expect(page.locator("link[rel='apple-touch-icon']")).toHaveAttribute("href", "/apple-touch-icon.png?v=3");
     await expect(page.locator("script[src^='/static/js/dashboard.js']")).toHaveCount(1);
     await expect(page.locator("script[src^='/static/js/i18n.js']")).toHaveCount(1);
-    expect((await page.request.get("/favicon.ico?v=2")).headers()["content-type"]).toContain("image/x-icon");
-    expect((await page.request.get("/favicon-dark.ico?v=2")).headers()["content-type"]).toContain("image/x-icon");
+    expect((await page.request.get("/favicon.ico?v=3")).headers()["content-type"]).toContain("image/x-icon");
+    expect((await page.request.get("/favicon-dark.ico?v=3")).headers()["content-type"]).toContain("image/x-icon");
     const svgFavicon = await page.request.get("/favicon.svg");
     expect(svgFavicon.headers()["content-type"]).toContain("image/svg+xml");
     expect(await svgFavicon.text()).toContain("prefers-color-scheme: dark");
     expect((await page.request.get("/apple-touch-icon.png")).headers()["content-type"]).toContain("image/png");
     expect((await page.request.get("/static/brand/tracepulse-logo.svg")).headers()["content-type"]).toContain("image/svg+xml");
+    const lightLogo = await page.request.get("/static/brand/tracepulse-logo-light.svg");
+    expect(lightLogo.headers()["content-type"]).toContain("image/svg+xml");
+    expect(await lightLogo.text()).toContain("#00B894");
     expect(consoleErrors).toEqual([]);
+});
+
+test("favicon assets contain the new symbol and render in both color schemes", async ({ page }) => {
+    await page.goto("/");
+    for (const filename of ["favicon.ico", "favicon-dark.ico"]) {
+        const response = await page.request.get(`/${filename}?v=3`);
+        expect(response.ok()).toBeTruthy();
+        const ico = await response.body();
+        expect(ico.readUInt16LE(2)).toBe(1);
+        expect(ico.readUInt16LE(4)).toBe(3);
+        expect([0, 1, 2].map(index => ico.readUInt8(6 + index * 16))).toEqual([16, 32, 48]);
+    }
+    const touch = await (await page.request.get("/apple-touch-icon.png?v=3")).body();
+    expect(touch.readUInt32BE(16)).toBe(180);
+    expect(touch.readUInt32BE(20)).toBe(180);
+    for (const theme of ["light", "dark"] as const) {
+        await page.emulateMedia({ colorScheme: theme });
+        await page.evaluate(value => window.setTheme?.(value), theme);
+        const coloredPixels = await page.evaluate(async theme => {
+            const image = new Image();
+            image.src = "/favicon.svg?v=3";
+            await image.decode();
+            const canvas = document.createElement("canvas");
+            canvas.width = canvas.height = 64;
+            const context = canvas.getContext("2d")!;
+            context.drawImage(image, 0, 0, 64, 64);
+            const pixels = context.getImageData(0, 0, 64, 64).data;
+            const expected = theme === "light" ? [0, 184, 148] : [16, 185, 129];
+            let count = 0;
+            for (let index = 0; index < pixels.length; index += 4) {
+                if (pixels[index] === expected[0] && pixels[index + 1] === expected[1]
+                    && pixels[index + 2] === expected[2] && pixels[index + 3] === 255) count++;
+            }
+            return count;
+        }, theme);
+        expect(coloredPixels).toBeGreaterThan(0);
+    }
+});
+
+test("Community logos render in both themes without changing navigation size", async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem("tracepulse-onboarding-v1", "done"));
+    await page.goto("/");
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        let brandWidth: number | undefined;
+        for (const theme of ["dark", "light"]) {
+            await page.evaluate((value) => window.setTheme?.(value), theme);
+            const logo = page.locator(`nav .brand-logo-${theme}`);
+            await expect(logo).toBeVisible();
+            await expect(logo).toHaveCSS("height", width === 375 ? "26px" : "30px");
+            await expect.poll(() => logo.evaluate(element => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+            const bounds = await page.locator("nav .brand").boundingBox();
+            if (brandWidth === undefined) brandWidth = bounds!.width;
+            else expect(bounds!.width).toBe(brandWidth);
+            const controls = await page.locator("nav .nav-controls").boundingBox();
+            expect(bounds!.x).toBeGreaterThanOrEqual(0);
+            expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(controls!.x);
+            expect(controls!.x + controls!.width).toBeLessThanOrEqual(width);
+        }
+    }
+});
+
+test("interface diagnostic badges reject untrusted status values", async ({ page }) => {
+    await page.goto("/");
+    await page.addScriptTag({ url: "/static/js/device-detail.js" });
+    const markup = await page.evaluate(() => {
+        const tbody = document.createElement("tbody");
+        tbody.id = "if-tbody";
+        document.body.append(tbody);
+        window.renderInterfaces?.([
+            { if_index: 1, if_name: "uplink", link_status: "up", health_status: "l1_error" },
+            { if_index: 2, if_name: "untrusted", link_status: "up", health_status: "unknown' onmouseover='alert(1)" },
+        ]);
+        return tbody.innerHTML;
+    });
+    expect(markup).toContain("diagnostic-badge l1_error");
+    expect(markup).toContain("L1 Error");
+    expect(markup).toContain("diagnostic-badge down");
+    expect(markup).not.toContain("onmouseover");
+    expect(markup).not.toContain("diagnostic-badge unknown");
+    await expect(page.locator("#if-tbody [onmouseover]")).toHaveCount(0);
+    await expect(page.locator("#if-tbody .diagnostic-badge.down")).toHaveText("Down");
 });
 
 test("Community settings do not expose notification destinations", async ({ page, request }) => {
@@ -281,10 +393,12 @@ test("metric settings use percentages and validate Warning before saving", async
 });
 
 test("dashboard health score remains separate from metric alarm status", async ({ page }) => {
-    await page.route("**/api/devices", (route) => route.fulfill({ json: [
-        { ip: "192.0.2.1", name: "cpu-alarm", status: "critical", health_score: 67, health_status: "warning" },
-        { ip: "192.0.2.2", name: "unknown-metrics", status: "online", health_score: null },
-    ] }));
+    await page.route("**/api/devices", (route) => route.fulfill({
+        json: [
+            { ip: "192.0.2.1", name: "cpu-alarm", status: "critical", health_score: 67, health_status: "warning" },
+            { ip: "192.0.2.2", name: "unknown-metrics", status: "online", health_score: null },
+        ]
+    }));
     await page.goto("/");
     await page.evaluate(() => window.refreshDashboard?.());
     const row = page.locator("#dash-tbody tr").filter({ hasText: "cpu-alarm" });
@@ -352,11 +466,15 @@ test("completed basic diagnostics show result cards", async ({ page }) => {
     const run = (kind: string, port?: number) => page.evaluate(({ kind, port }) => (window as any).openActiveDiagnostic("127.0.0.1", kind, port), { kind, port });
 
     await run("ping");
+    await expect(page.locator(".diag-tabs button[data-kind='ping']")).toHaveClass(/active/);
+    await expect(page.locator(".diag-tabs button[data-kind='traceroute']")).not.toHaveClass(/active/);
     await expect(page.locator(".diag-result-card h3")).toHaveText("Ping Result");
     await expect(page.locator(".diag-result-card")).toContainText("100%");
     await expect(page.locator(".diag-result-verdict.failed")).toContainText("NO RESPONSE");
     await expect(page.locator(".diag-result-card")).not.toContainText("null");
     await run("traceroute");
+    await expect(page.locator(".diag-tabs button[data-kind='traceroute']")).toHaveClass(/active/);
+    await expect(page.locator(".diag-tabs button[data-kind='ping']")).not.toHaveClass(/active/);
     await expect(page.locator(".diag-result-card h3")).toHaveText("Traceroute Result");
     await expect(page.locator(".diag-result-card")).toContainText("Responding Hops");
     await run("port", 80);
