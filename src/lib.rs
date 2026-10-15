@@ -24,15 +24,16 @@ pub fn run() -> Result<(), AppError> {
     let args: Vec<String> = std::env::args().collect();
     let mode = parse_mode(&args);
 
-    // 実行ファイルと同じディレクトリに config/DB を配置する
+    let data_dir = data_dir();
+    std::fs::create_dir_all(&data_dir)?;
     let config_path = config_path();
     let mut config = AppConfig::load(&config_path)?;
     config.web.port = parse_web_port(&args, config.web.port)?;
 
-    let db_path = exe_dir().join("data.db");
+    let db_path = data_dir.join("data.db");
     let conn = crate::db::sqlite::initialize_database(&db_path)?;
 
-    let runner = AppRunner::new(config, conn);
+    let runner = AppRunner::new(config, conn).with_database_path(db_path);
     match mode {
         AppMode::Cli => runner.run_cli(),
         AppMode::Web => runner.run_web(),
@@ -159,5 +160,12 @@ pub fn exe_dir() -> PathBuf {
 }
 
 pub fn config_path() -> PathBuf {
-    exe_dir().join("config.toml")
+    data_dir().join("config.toml")
+}
+
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("TRACEPULSE_DATA_DIR")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(exe_dir)
 }

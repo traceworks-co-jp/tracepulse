@@ -1,0 +1,27 @@
+services:
+  tracepulse:
+    image: ghcr.io/traceworks-co-jp/tracepulse:latest
+    container_name: tracepulse
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      # Optional flow ingestion; match the ports configured in config.toml.
+      # - "2055:2055/udp"
+      # - "4739:4739/udp"
+      # - "6343:6343/udp"
+    # Recommended on native Linux for direct LAN SNMP/Ping/discovery access:
+    # network_mode: host
+    # Remove the entire ports section when enabling host networking.
+    # Docker Desktop requires host networking support to be enabled explicitly.
+    volumes:
+      # Persists both data.db (including SQLite sidecars) and config.toml.
+      - tracepulse-data:/data
+      # Optional: mount an existing writable configuration file separately.
+      # - ./config.toml:/data/config.toml
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+
+volumes:
+  tracepulse-data:

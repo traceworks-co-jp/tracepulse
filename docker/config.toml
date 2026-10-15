@@ -1,0 +1,6 @@
+[web]
+port = 8080
+
+[display]
+timezone = "utc"
+language = "en"

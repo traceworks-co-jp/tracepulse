@@ -38,7 +38,7 @@ impl AppRunner {
             notifications: None,
             flow_repository: None,
             tui_extension: None,
-            database_path: crate::exe_dir().join("data.db"),
+            database_path: crate::data_dir().join("data.db"),
         }
     }
 
@@ -98,12 +98,8 @@ impl AppRunner {
     pub fn run_web(self) -> Result<(), AppError> {
         println!("TracePulse WebGUI mode started");
         let repository = Repository::new(self.connection);
-        let server = WebServer::new(
-            "127.0.0.1",
-            self.config.web.port.get(),
-            self.config,
-            repository,
-        );
+        let host = std::env::var("TRACEPULSE_WEB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let server = WebServer::new(&host, self.config.web.port.get(), self.config, repository);
         server.start()?;
         Ok(())
     }

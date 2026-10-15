@@ -23,6 +23,19 @@ UI.
 
 ## Quick Start
 
+### Docker (Linux amd64 / arm64)
+
+```bash
+docker run -d --name tracepulse -p 8080:8080 -v tracepulse-data:/data ghcr.io/traceworks-co-jp/tracepulse:latest
+```
+
+Open <http://localhost:8080>. Docker selects the image for your platform,
+including Raspberry Pi 4/5 with a 64-bit OS and Apple Silicon with Docker Desktop.
+The named volume keeps the SQLite database and configuration across container
+recreation. See [Docker Deployment](#docker-deployment) for networking and security.
+
+### Native Binary
+
 Download the archive for your platform from the [latest release](https://github.com/traceworks-co-jp/trace-pulse/releases/latest), extract it, and run one of the following commands:
 
 ```bash
@@ -84,7 +97,7 @@ separate TracePulse Enterprise package through the notification provider API.
 ## System Requirements
 
 - **OS**: Verified on Windows 11 and Ubuntu 26.04. TracePulse also builds for macOS (see the `cfg(target_os = "macos")` branches in `src/web/server.rs`), but macOS has not yet been verified by the maintainers.
-- **Architecture**: x86_64.
+- **Architecture**: x86_64; Docker images also support Linux arm64 (64-bit Raspberry Pi and Apple Silicon via Docker Desktop).
 - **Network access**: SNMP reachability (UDP/161, v1/v2c/v3) to monitored devices, and optionally UDP 2055/4739/6343 if NetFlow/IPFIX/sFlow ingestion is used.
 - No external database or additional runtime is required; TracePulse ships as a single portable binary with an embedded SQLite database.
 
@@ -153,7 +166,82 @@ cargo run -- --web
 ```
 After launching, open `http://localhost:8080` in your web browser.
 
-To use another port, run `./tracepulse --web --port 9090` (or `--port=9090`), then open `http://127.0.0.1:9090`. For a persistent default, add `[web]` with `port = 9090` to `config.toml` beside the executable. Priority: `--port` > `[web] port` > 8080. Ports must be integers from 1 to 65535. A command-line override applies only to that launch; it does not rewrite the configuration file. The listener remains local-only (`127.0.0.1`).
+To use another port, run `./tracepulse --web --port 9090` (or `--port=9090`), then open `http://127.0.0.1:9090`. For a persistent default, add `[web]` with `port = 9090` to `config.toml` beside the executable. Priority: `--port` > `[web] port` > 8080. Ports must be integers from 1 to 65535. A command-line override applies only to that launch; it does not rewrite the configuration file. The listener defaults to local-only (`127.0.0.1`); `TRACEPULSE_WEB_HOST` overrides the bind address.
+
+## Docker Deployment
+
+Run the bundled [docker-compose.yml](docker-compose.yml) with:
+
+```bash
+docker compose up -d
+```
+
+Images are published to `ghcr.io/traceworks-co-jp/tracepulse` for `linux/amd64`
+and `linux/arm64`. Use `:latest` for the most recently published `v*` tag or pin
+a release such as `:v0.1.0`. The image contains only the runtime, vendor
+templates, service definitions, licenses, and a default configuration; Node.js
+and the Rust toolchain are not shipped.
+
+### Storage and Configuration
+
+| Path / variable | Container default | Purpose |
+| --- | --- | --- |
+| `TRACEPULSE_DATA_DIR` | `/data` | Writable directory for `data.db`, SQLite sidecars, and `config.toml` |
+| `TRACEPULSE_WEB_HOST` | `0.0.0.0` | Web UI bind address inside the container |
+| `/opt/tracepulse/templates` | Bundled templates | Optional directory mount for custom vendor templates |
+| `/opt/tracepulse/config/services.toml` | Bundled service definitions | Optional file mount for custom service names |
+
+On first container startup, a default `config.toml` is copied into the data
+directory only if no configuration exists. Later starts preserve it, including
+changes saved from the Web UI. Both database and configuration are persisted by
+the single `/data` volume. To supply your own configuration, mount an existing
+file at `/data/config.toml` as shown in the Compose comments. Keep it writable
+if you want to save settings from the Web UI. Restart the container after
+manually editing the configuration. Keep `[web] port = 8080` when using the
+default port mapping, or update the mapping to match your configured port.
+Without these environment variables, native binaries retain their existing
+executable-adjacent storage and loopback-only Web UI defaults.
+
+### Networking and Security
+
+The quick-start command publishes port 8080 on all host interfaces. The
+Community Web UI has no authentication: use a trusted LAN only, restrict access
+with a firewall, and never expose it directly to the Internet. For local-only
+access, replace `-p 8080:8080` with `-p 127.0.0.1:8080:8080`.
+
+Bridge networking normally permits outbound SNMP (UDP/161) and Ping. On native
+Linux, host networking is recommended for direct LAN discovery and monitoring:
+replace the port mapping with `--network host`, or enable `network_mode: host`
+and remove `ports` in Compose. Docker Desktop requires supported, explicitly
+enabled host networking; otherwise use bridge networking and explicit target
+CIDRs. The image uses Docker's default root user for writable mounted storage
+and ICMP sockets. Compose drops all capabilities except `NET_RAW`, needed for
+Ping/traceroute; do not use `--privileged`. Hardened `docker run` deployments can
+also use `--cap-drop ALL --cap-add NET_RAW`.
+
+For flow ingestion with bridge networking, additionally publish the configured
+UDP ports (defaults: `2055:2055/udp`, `4739:4739/udp`, `6343:6343/udp`); examples
+are included in Compose. Do not publish UDP/161: TracePulse sends SNMP requests
+to monitored devices, rather than acting as an SNMP agent.
+
+### Build and Publish
+
+```bash
+docker build -t tracepulse:local .
+```
+
+[.github/workflows/docker-publish.yml](.github/workflows/docker-publish.yml)
+builds and smoke-tests the image on relevant pull requests and manual runs.
+Pushing a `v*` tag also builds both architectures with Buildx/QEMU and publishes
+the exact version tag (including `v`) and `latest` to GHCR. This is independent
+of the native-binary release workflow and uses the repository's `GITHUB_TOKEN`
+with `packages: write`; no separate registry account or PAT is required.
+
+Maintainers: after the first successful publication, open the `tracepulse`
+package's settings on GitHub and change its visibility to **Public** so the
+quick-start command can pull anonymously. If organization policy restricts
+package creation or Actions access, allow this repository to publish first.
+The workflow's OCI source label links the package to its source repository.
 
 ---
 

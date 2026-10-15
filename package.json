@@ -1,5 +1,6 @@
 {
     "scripts": {
+        "build": "npm run build:web",
         "build:icons": "node frontend/scripts/build-icons.mjs",
         "build:web": "npm run build:web:device && npm run build:web:dashboard && npm run build:web:settings && npm run build:web:diagnostics && npm run build:web:discovery && npm run build:web:topology && npm run build:web:theme && npm run build:web:i18n",
         "build:web:device": "esbuild frontend/src/pages/device-detail.ts --bundle --format=iife --global-name=TracePulseDeviceDetail --target=es2020 --outfile=frontend/dist/device-detail.js",
