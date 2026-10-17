@@ -231,6 +231,7 @@ test("dashboard loads compiled frontend assets without console errors", async ({
     await expect(page.locator("body")).toHaveAttribute("data-title-key", "dashboard_title");
     await expect(page.locator("#dash-table")).toBeVisible();
     await expect(page.locator("nav .brand")).toHaveAttribute("href", "/");
+    await expect(page.locator("nav .brand")).toHaveAttribute("aria-label", "TracePulse");
     await expect(page.locator("nav .brand-logo-dark")).toHaveAttribute("src", "/static/brand/tracepulse-logo.svg?v=4");
     await expect(page.locator("nav .brand-logo-light")).toHaveAttribute("src", "/static/brand/tracepulse-logo-light.svg?v=4");
     await expect(page.locator("nav .brand-logo-dark")).toHaveCSS("height", "30px");

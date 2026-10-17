@@ -3590,10 +3590,8 @@ const COMMON_CSS: &str = "<style>
         nav .brand-name-main { display:block; white-space:nowrap; }
         nav .brand-name-trace { color:#00D2FF; }
         nav .brand-name-pulse { color:#10B981; }
-        nav .brand-name-enterprise { color:#89BEEA; font-size:.78em; font-weight:600; }
         html[data-theme='light'] nav .brand-name-trace { color:#1E293B; }
         html[data-theme='light'] nav .brand-name-pulse { color:#00B894; }
-        html[data-theme='light'] nav .brand-name-enterprise { color:#2A506F; }
   nav a { color: #94a3b8; text-decoration: none; font-size: .9rem; }
   html[data-theme='light'] nav a { color: #475569; }
   nav a:hover { color: #f1f5f9; }
@@ -3774,7 +3772,7 @@ pub fn shared_navigation_html(extension: &dyn WebExtensionProvider) -> String {
 }
 
 const NAV_HTML: &str = "<nav>
-    <a class='brand' href='/' aria-label='TracePulse Enterprise'><img class='brand-logo brand-logo-dark' src='/static/brand/tracepulse-logo.svg?v=4' alt=''><img class='brand-logo brand-logo-light' src='/static/brand/tracepulse-logo-light.svg?v=4' alt=''><span class='brand-name'><span class='brand-name-main'><span class='brand-name-trace'>Trace</span><span class='brand-name-pulse'>Pulse</span></span><span class='brand-name-enterprise'>Enterprise</span></span></a>
+    <a class='brand' href='/' aria-label='TracePulse'><img class='brand-logo brand-logo-dark' src='/static/brand/tracepulse-logo.svg?v=4' alt=''><img class='brand-logo brand-logo-light' src='/static/brand/tracepulse-logo-light.svg?v=4' alt=''><span class='brand-name'><span class='brand-name-main'><span class='brand-name-trace'>Trace</span><span class='brand-name-pulse'>Pulse</span></span></span></a>
     <div class='nav-links'>
     <a href='/' data-i18n='nav_dashboard'>Dashboard</a>
     <a href='/discovery' data-i18n='nav_discovery'>Discovery</a>
@@ -4825,6 +4823,14 @@ mod tests {
     use crate::db::sqlite::initialize_database;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn community_navigation_uses_tracepulse_branding() {
+        let navigation = super::navigation_html(None);
+
+        assert!(navigation.contains("aria-label='TracePulse'"));
+        assert!(!navigation.contains("Enterprise"));
+    }
 
     #[test]
     fn enterprise_can_override_core_settings_path() {
