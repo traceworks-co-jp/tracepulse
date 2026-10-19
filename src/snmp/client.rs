@@ -2,35 +2,84 @@ use crate::config::SnmpConfig;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::monitor::interface::InterfaceMonitor;
-use crate::snmp::template::VendorOidTemplate;
+use crate::snmp::template::{InterfaceTableTemplate, TemplateRegistry, VendorOidTemplate};
 use crate::snmp::walk::{SnmpValue, SnmpVarBind};
+use crate::snmp::walk_api::{WalkStep, walk_with};
+use crate::snmp::{ReliableWalkOutcome, WalkOptions, WalkReason};
 use snmp::{SyncSession, Value};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 /// `walk_oid` の既定取得上限。
 pub const DEFAULT_WALK_MAX_VARBINDS: usize = 1024;
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TemplateMetricReading {
+    pub key: String,
+    pub label: String,
+    pub unit: String,
+    pub data_type: crate::snmp::template::NumericDataType,
+    pub oid: String,
+    pub value: Option<serde_json::Number>,
+    pub value_text: Option<String>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SnmpClient {
     community: String,
     overrides: Option<SnmpConfig>,
-    templates: HashMap<u32, VendorOidTemplate>,
+    templates: std::sync::Arc<TemplateRegistry>,
 }
 
 impl SnmpClient {
-    fn template_for_enterprise_id(&self, enterprise_id: Option<u32>) -> Option<&VendorOidTemplate> {
-        enterprise_id
-            .and_then(|id| self.templates.get(&id))
-            .or_else(|| self.templates.get(&0))
+    pub fn query_template_metrics(
+        &self,
+        device: &DeviceConfig,
+    ) -> Result<Vec<TemplateMetricReading>, AppError> {
+        let mut session = self.open_session(device)?;
+        self.query_template_metrics_with_session(&mut session, &device.ip)
+    }
+
+    fn query_template_metrics_with_session(
+        &self,
+        session: &mut SyncSession,
+        device_label: &str,
+    ) -> Result<Vec<TemplateMetricReading>, AppError> {
+        let sys_object_id = query_string(session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])?;
+        let template = self.templates.select(Some(&sys_object_id));
+        Ok(template.numeric_metrics.iter().map(|metric| {
+            let result = parse_oid_string(&metric.oid)
+                .ok_or_else(|| AppError::Validation(format!("invalid metric OID '{}'", metric.oid)))
+                .and_then(|oid| query_numeric_value(session, &oid));
+            let (value, error) = match result {
+                Ok(value) => (Some(value), None),
+                Err(error) => {
+                    tracing::warn!(device = %device_label, metric = %metric.key, %error, "Template metric unavailable");
+                    (None, Some(error.to_string()))
+                }
+            };
+            TemplateMetricReading {
+                key: metric.key.clone(),
+                label: metric.label.clone(),
+                unit: metric.unit.clone(),
+                data_type: metric.data_type,
+                oid: metric.oid.clone(),
+                value_text: value.as_ref().map(ToString::to_string),
+                value,
+                error,
+            }
+        }).collect())
     }
 
     fn query_cpu_from_template(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
     ) -> Option<u32> {
-        self.template_for_enterprise_id(vendor_enterprise_id)?
+        self.templates
+            .select(sys_object_id)
             .cpu
             .candidates
             .iter()
@@ -52,8 +101,6 @@ impl SnmpClient {
 
         for (sensor_type, group_list) in &template.sensors {
             for group in group_list {
-                let mut group_found = false;
-
                 let descr_map: HashMap<u32, String> =
                     if let Some(descr_prefix) = parse_oid_string(&group.descr_prefix) {
                         query_table_strings(session, &descr_prefix)
@@ -94,7 +141,6 @@ impl SnmpClient {
                 all_indices.dedup();
 
                 for index in all_indices {
-                    group_found = true;
                     let name = descr_map.get(&index).cloned().unwrap_or_else(|| {
                         format!("{} Sensor {}", sensor_type.to_uppercase(), index)
                     });
@@ -134,21 +180,6 @@ impl SnmpClient {
                         is_alarm,
                     });
                 }
-
-                if !group_found && group.fallback_builtin_power && sensor_type == "power" {
-                    sensors.push(SnmpHardwareSensor {
-                        index: 1006,
-                        name: "Built-in Power Supply".to_string(),
-                        sensor_type: "power".to_string(),
-                        source: "builtin-fallback".to_string(),
-                        oid: "1.3.6.1.4.1.9.9.13.1.1.1.3.1006".to_string(),
-                        value: Some(1),
-                        unit: None,
-                        status: Some(1),
-                        status_text: Some("Normal".to_string()),
-                        is_alarm: false,
-                    });
-                }
             }
         }
 
@@ -156,41 +187,34 @@ impl SnmpClient {
     }
 }
 
-fn get_template_dir() -> std::path::PathBuf {
-    let candidates = [
-        crate::exe_dir().join("templates"),
-        crate::exe_dir().join("../templates"),
-        crate::exe_dir().join("../../templates"),
-        std::path::PathBuf::from("templates"),
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join("templates"),
-    ];
-
-    for path in &candidates {
-        if path.exists() && path.is_dir() {
-            return path.clone();
-        }
-    }
-    std::path::PathBuf::from("templates")
+pub fn initialize_templates() -> std::sync::Arc<TemplateRegistry> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Arc<TemplateRegistry>> =
+        std::sync::OnceLock::new();
+    REGISTRY
+        .get_or_init(|| {
+            let dir = crate::data_dir().join("custom_templates");
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                tracing::error!("[Template] Cannot create {:?}: {}", dir, error);
+            }
+            std::sync::Arc::new(TemplateRegistry::load(&dir))
+        })
+        .clone()
 }
 
 impl SnmpClient {
     pub fn new(community: impl Into<String>) -> Self {
-        let template_dir = get_template_dir();
         Self {
             community: community.into(),
             overrides: None,
-            templates: VendorOidTemplate::load_all_from_dir(&template_dir),
+            templates: initialize_templates(),
         }
     }
 
     pub fn with_snmp_config(community: impl Into<String>, overrides: SnmpConfig) -> Self {
-        let template_dir = get_template_dir();
         Self {
             community: community.into(),
             overrides: Some(overrides),
-            templates: VendorOidTemplate::load_all_from_dir(&template_dir),
+            templates: initialize_templates(),
         }
     }
 
@@ -224,20 +248,16 @@ impl SnmpClient {
 
         let sys_object_id = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0]).ok();
 
-        let vendor_enterprise_id = sys_object_id
-            .as_deref()
-            .and_then(parse_enterprise_id_from_sys_object_id);
-
-        let cpu_usage = self.query_cpu_usage(&mut session, vendor_enterprise_id)?;
+        let cpu_usage = self.query_cpu_usage(&mut session, sys_object_id.as_deref())?;
 
         let memory_usage = self
-            .query_memory_usage(&mut session, vendor_enterprise_id)
+            .query_memory_usage(&mut session, sys_object_id.as_deref())
             .unwrap_or(None);
         let memory_used_bytes = self
-            .query_memory_used_bytes(&mut session, vendor_enterprise_id)
+            .query_memory_used_bytes(&mut session, None)
             .unwrap_or(None);
         let hardware =
-            self.query_hardware_inventory_with_session(&mut session, vendor_enterprise_id)?;
+            self.query_hardware_inventory_with_session(&mut session, sys_object_id.as_deref())?;
 
         Ok(SnmpDeviceInfo {
             sys_name,
@@ -255,12 +275,21 @@ impl SnmpClient {
     ) -> Result<Vec<SnmpHardwareSensor>, AppError> {
         let mut session = self.open_session(device)?;
         let sys_object_id = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0]).ok();
-        let vendor_enterprise_id = sys_object_id
-            .as_deref()
-            .and_then(parse_enterprise_id_from_sys_object_id);
         Ok(self
-            .query_hardware_inventory_with_session(&mut session, vendor_enterprise_id)?
+            .query_hardware_inventory_with_session(&mut session, sys_object_id.as_deref())?
             .sensors)
+    }
+
+    pub fn query_sys_object_id(&self, device: &DeviceConfig) -> Result<String, AppError> {
+        let mut session = self.open_session(device)?;
+        query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])
+    }
+
+    pub fn query_numeric_oid(&self, device: &DeviceConfig, oid: &str) -> Result<i64, AppError> {
+        let oid = parse_oid_string(oid)
+            .ok_or_else(|| AppError::Validation(format!("invalid numeric OID '{oid}'")))?;
+        let mut session = self.open_session(device)?;
+        query_i64(&mut session, &oid)
     }
 
     pub fn diagnose_device(&self, device: &DeviceConfig) -> Result<SnmpDiagnostics, AppError> {
@@ -309,7 +338,7 @@ impl SnmpClient {
                     .ok()
                     .flatten()
             })
-            .filter(|v| *v > 0);
+            .filter(|v| *v <= 100);
         if let Some(ref oid) = cpu_override {
             cpu_probes.push(SnmpOidProbe {
                 label: "Manual CPU Override".to_string(),
@@ -327,7 +356,7 @@ impl SnmpClient {
 
         let (vendor_cpu_value, vendor_cpu_rows) = self.diagnose_cpu_vendor_candidates(
             &mut session,
-            vendor_enterprise_id,
+            sys_object_id.as_deref(),
             vendor_name.as_deref(),
         )?;
         cpu_probes.extend(vendor_cpu_rows);
@@ -340,7 +369,7 @@ impl SnmpClient {
             oid: "1.3.6.1.2.1.25.3.3.1.2".to_string(),
             value: cpu_standard,
             selected: false,
-            status: if cpu_standard.filter(|v| *v > 0).is_some() {
+            status: if cpu_standard.filter(|v| *v <= 100).is_some() {
                 "ok"
             } else {
                 "n/a"
@@ -350,9 +379,9 @@ impl SnmpClient {
 
         let cpu_selected = cpu_override_value
             .or(vendor_cpu_value)
-            .or(cpu_standard.filter(|v| *v > 0));
+            .or(cpu_standard.filter(|v| *v <= 100));
 
-        let memory_usage = None;
+        let memory_usage = self.query_memory_usage(&mut session, sys_object_id.as_deref())?;
         let (memory_used_bytes, memory_byte_probes) = self.diagnose_memory_bytes_candidates(
             &mut session,
             vendor_enterprise_id,
@@ -373,7 +402,7 @@ impl SnmpClient {
         }
 
         let hardware = self
-            .query_hardware_inventory(device, vendor_enterprise_id)
+            .query_hardware_inventory(device, sys_object_id.as_deref())
             .unwrap_or_else(|_| HardwareInventory {
                 sensors: Vec::new(),
                 probes: Vec::new(),
@@ -528,8 +557,10 @@ impl SnmpClient {
 
     pub fn discover_interface_indexes(&self, device: &DeviceConfig) -> Result<Vec<u32>, AppError> {
         let mut session = self.open_session(device)?;
+        let table = self.interface_table(&mut session)?;
         // ifIndex テーブル (1.3.6.1.2.1.2.2.1.1) を GETNEXT でウォーク
-        let prefix = [1u32, 3, 6, 1, 2, 1, 2, 2, 1, 1];
+        let prefix = parse_oid_string(&table.index)
+            .ok_or_else(|| AppError::Validation("invalid interface index OID".into()))?;
         let mut current = prefix.to_vec();
         let mut indexes = Vec::new();
 
@@ -573,7 +604,8 @@ impl SnmpClient {
         // GETNEXT ウォークで何も取れない機器は ifIndex 1〜8 を直接試す
         if indexes.is_empty() {
             for i in 1u32..=8 {
-                let oid = [1u32, 3, 6, 1, 2, 1, 2, 2, 1, 1, i];
+                let mut oid = prefix.clone();
+                oid.push(i);
                 if let Ok(mut r) = session.get(&oid)
                     && r.varbinds.next().is_some()
                 {
@@ -585,33 +617,43 @@ impl SnmpClient {
         Ok(indexes)
     }
 
+    fn interface_table(
+        &self,
+        session: &mut SyncSession,
+    ) -> Result<InterfaceTableTemplate, AppError> {
+        let sys_object_id = match query_string(session, &[1, 3, 6, 1, 2, 1, 1, 2, 0]) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(%error, "Cannot identify interface template; using RFC defaults");
+                None
+            }
+        };
+        self.templates
+            .select(sys_object_id.as_deref())
+            .tables
+            .interfaces
+            .as_ref()
+            .or_else(|| self.templates.select(None).tables.interfaces.as_ref())
+            .cloned()
+            .ok_or_else(|| AppError::Validation("RFC interface template is missing".into()))
+    }
+
     pub fn query_interface(
         &self,
         device: &DeviceConfig,
         if_index: u32,
         if_name: Option<&str>,
     ) -> Result<InterfaceMonitor, AppError> {
-        if device.ip.trim().is_empty() {
-            return Err(AppError::Validation("SNMP device IP is empty".to_string()));
-        }
+        self.query_interface_with_session(self.open_session(device)?, if_index, if_name)
+    }
 
-        let community = if device.community.trim().is_empty() {
-            self.community.clone()
-        } else {
-            device.community.clone()
-        };
-
-        let session_addr = format!("{}:161", device.ip);
-        let mut session = SyncSession::new(
-            session_addr.as_str(),
-            community.as_bytes(),
-            Some(Duration::from_secs(2)),
-            1,
-        )
-        .map_err(|err| {
-            AppError::Validation(format!("SNMP session error for {}: {}", device.ip, err))
-        })?;
-
+    fn query_interface_with_session(
+        &self,
+        mut session: SyncSession,
+        if_index: u32,
+        if_name: Option<&str>,
+    ) -> Result<InterfaceMonitor, AppError> {
+        let table = self.interface_table(&mut session)?;
         let oid_prefix = [1, 3, 6, 1, 2, 1, 2, 2, 1];
         let link_status = query_u32(
             &mut session,
@@ -703,29 +745,13 @@ impl SnmpClient {
             &[1u32, 3, 6, 1, 2, 1, 10, 7, 2, 1, 16, if_index],
         )
         .unwrap_or(0);
-        let in_octets = query_u64(
-            &mut session,
-            &oid_prefix
-                .iter()
-                .copied()
-                .chain([10, if_index])
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(0);
-        let out_octets = query_u64(
-            &mut session,
-            &oid_prefix
-                .iter()
-                .copied()
-                .chain([16, if_index])
-                .collect::<Vec<_>>(),
-        )
-        .unwrap_or(0);
+        let in_octets = query_u64(&mut session, &indexed_oid(&table.in_octets, if_index)?)?;
+        let out_octets = query_u64(&mut session, &indexed_oid(&table.out_octets, if_index)?)?;
 
         let resolved_name = match if_name {
             Some(name) => name.to_string(),
             None => {
-                let name_oid = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2, if_index];
+                let name_oid = indexed_oid(&table.name, if_index)?;
                 query_string(&mut session, &name_oid).unwrap_or_else(|_| format!("if-{}", if_index))
             }
         };
@@ -754,6 +780,14 @@ impl SnmpClient {
     }
 
     fn open_session(&self, device: &DeviceConfig) -> Result<SyncSession, AppError> {
+        self.open_session_with_timeout(device, Duration::from_secs(2))
+    }
+
+    fn open_session_with_timeout(
+        &self,
+        device: &DeviceConfig,
+        timeout: Duration,
+    ) -> Result<SyncSession, AppError> {
         let community = if device.community.trim().is_empty() {
             self.community.clone()
         } else {
@@ -764,7 +798,7 @@ impl SnmpClient {
         SyncSession::new(
             session_addr.as_str(),
             community.as_bytes(),
-            Some(Duration::from_secs(2)),
+            Some(timeout),
             1,
         )
         .map_err(|err| {
@@ -833,6 +867,98 @@ impl SnmpClient {
         Ok(varbinds)
     }
 
+    /// A bounded GETNEXT walk that reports completion quality instead of silently
+    /// treating transport and agent errors as the end of a table.
+    pub fn walk_oid_reliable(
+        &self,
+        device: &DeviceConfig,
+        prefix: &[u32],
+        options: &WalkOptions,
+        cancellation: &AtomicBool,
+    ) -> ReliableWalkOutcome {
+        if device.ip.trim().is_empty() {
+            return failed_walk(WalkReason::InvalidRequest(
+                "SNMP device IP is empty".to_string(),
+            ));
+        }
+
+        walk_with(prefix, options, cancellation, |current, remaining| {
+            let request_timeout = remaining.min(Duration::from_secs(2));
+            let mut session = match self.open_session_with_timeout(device, request_timeout) {
+                Ok(session) => session,
+                Err(error) => return WalkStep::Error(WalkReason::Transport(error.to_string())),
+            };
+            let mut response = match session.getnext(current) {
+                Ok(response) => response,
+                Err(error) => {
+                    let error_text = format!("{error:?}");
+                    let reason = if error_text.contains("ReceiveError") {
+                        WalkReason::RequestTimeout
+                    } else {
+                        WalkReason::Transport(error_text)
+                    };
+                    return WalkStep::Error(reason);
+                }
+            };
+
+            if response.error_status == 2 {
+                return WalkStep::Unsupported(format!(
+                    "SNMP noSuchName at varbind {}",
+                    response.error_index
+                ));
+            }
+            if response.error_status != 0 {
+                return WalkStep::Error(WalkReason::AgentError {
+                    status: response.error_status,
+                    index: response.error_index,
+                });
+            }
+
+            let Some((name, value)) = response.varbinds.next() else {
+                return WalkStep::Error(WalkReason::EmptyResponse);
+            };
+            let mut oid_buf = [0u32; 128];
+            let oid = match name.read_name(&mut oid_buf) {
+                Ok(oid) => oid.to_vec(),
+                Err(_) => return WalkStep::Error(WalkReason::InvalidOid),
+            };
+
+            match value {
+                Value::Constructed(0x82, _) => WalkStep::EndOfMib,
+                Value::Constructed(0x80 | 0x81, _) => {
+                    WalkStep::Unsupported(format!("SNMP exception value for OID {oid:?}"))
+                }
+                value => WalkStep::VarBind(SnmpVarBind {
+                    oid,
+                    value: SnmpValue::from_raw(&value),
+                }),
+            }
+        })
+    }
+
+    /// Async wrapper for callers that need to keep blocking SNMP socket I/O off
+    /// the Tokio executor. Cancellation remains observable inside the worker.
+    pub async fn walk_oid_reliable_async(
+        &self,
+        device: &DeviceConfig,
+        prefix: &[u32],
+        options: WalkOptions,
+        cancellation: std::sync::Arc<AtomicBool>,
+    ) -> ReliableWalkOutcome {
+        let client = self.clone();
+        let device = device.clone();
+        let prefix = prefix.to_vec();
+        tokio::task::spawn_blocking(move || {
+            client.walk_oid_reliable(&device, &prefix, &options, &cancellation)
+        })
+        .await
+        .unwrap_or_else(|error| {
+            failed_walk(WalkReason::Transport(format!(
+                "SNMP walk task failed: {error}"
+            )))
+        })
+    }
+
     /// 非同期コンテキスト向けの `walk_oid`。ブロッキング I/O を専用スレッドへ退避する。
     pub async fn walk_oid_async(
         &self,
@@ -859,6 +985,56 @@ impl SnmpClient {
         .await
         .map_err(|err| AppError::Validation(format!("SNMP walk task failed: {}", err)))?
     }
+}
+
+fn failed_walk(reason: WalkReason) -> ReliableWalkOutcome {
+    ReliableWalkOutcome {
+        status: crate::snmp::ReliableWalkStatus::Failed,
+        varbinds: Vec::new(),
+        reason: Some(reason),
+        count: 0,
+        cursor: None,
+    }
+}
+
+fn indexed_oid(column: &str, index: u32) -> Result<Vec<u32>, AppError> {
+    let mut oid = parse_oid_string(column)
+        .ok_or_else(|| AppError::Validation(format!("invalid table column OID '{column}'")))?;
+    oid.push(index);
+    Ok(oid)
+}
+
+fn query_numeric_value(
+    session: &mut SyncSession,
+    oid: &[u32],
+) -> Result<serde_json::Number, AppError> {
+    let mut response = session.get(oid).map_err(|error| {
+        AppError::Validation(format!("SNMP GET failed for OID {:?}: {:?}", oid, error))
+    })?;
+    if response.error_status != 0 {
+        return Err(AppError::Validation(format!(
+            "SNMP agent error {} at index {} for OID {:?}",
+            response.error_status, response.error_index, oid
+        )));
+    }
+    response
+        .varbinds
+        .find_map(|(name, value)| {
+            if name != oid {
+                return None;
+            }
+            match value {
+                Value::Integer(value) => Some(value.into()),
+                Value::Unsigned32(value) | Value::Counter32(value) | Value::Timeticks(value) => {
+                    Some(value.into())
+                }
+                Value::Counter64(value) => Some(value.into()),
+                _ => None,
+            }
+        })
+        .ok_or_else(|| {
+            AppError::Validation(format!("OID {:?} did not return a numeric value", oid))
+        })
 }
 
 fn query_string(session: &mut SyncSession, oid: &[u32]) -> Result<String, AppError> {
@@ -1013,75 +1189,6 @@ fn query_rx_optical_power_dbm(
     dbm.is_finite().then_some(dbm)
 }
 
-fn query_cpu_usage(
-    session: &mut SyncSession,
-    vendor_enterprise_id: Option<u32>,
-) -> Result<Option<u32>, AppError> {
-    if vendor_enterprise_id == Some(9) {
-        let (usage, _) = query_cisco_cpu_candidates(session, Some("Cisco"))?;
-        if usage.is_some() {
-            return Ok(usage);
-        }
-    }
-
-    let standard =
-        query_table_average_u32(session, &[1, 3, 6, 1, 2, 1, 25, 3, 3, 1, 2]).unwrap_or(None);
-    if let Some(value) = standard.filter(|value| *value > 0) {
-        return Ok(Some(value));
-    }
-
-    if let Some(vendor_oid) = vendor_cpu_oid(vendor_enterprise_id) {
-        let vendor_value = query_u32(session, vendor_oid).ok().filter(|v| *v > 0);
-        if vendor_value.is_some() {
-            return Ok(vendor_value);
-        }
-    }
-
-    Ok(None)
-}
-
-fn query_cisco_cpu_candidates(
-    session: &mut SyncSession,
-    vendor_name: Option<&str>,
-) -> Result<(Option<u32>, Vec<SnmpOidProbe>), AppError> {
-    let mut probes = Vec::new();
-    let cpu_1m_oid = [1, 3, 6, 1, 4, 1, 9, 2, 1, 57, 0];
-    let cpu_5m_oid = [1, 3, 6, 1, 4, 1, 9, 2, 1, 56, 0];
-    let cpm_oid = [1, 3, 6, 1, 4, 1, 9, 9, 109, 1, 1, 1, 1, 5];
-
-    let cpu_1m = query_u32(session, &cpu_1m_oid).ok().filter(|v| *v > 0);
-    let cpu_5m = query_u32(session, &cpu_5m_oid).ok().filter(|v| *v > 0);
-    let cpm = query_u32_with_table_fallback(session, &cpm_oid)
-        .ok()
-        .flatten()
-        .filter(|v| *v > 0);
-    let selected = cpu_1m.or(cpu_5m).or(cpm);
-
-    probes.push(SnmpOidProbe {
-        label: format!("{} avgBusy1", vendor_name.unwrap_or("Cisco")),
-        oid: oid_to_string(&cpu_1m_oid),
-        value: cpu_1m,
-        selected: selected == cpu_1m,
-        status: if cpu_1m.is_some() { "ok" } else { "n/a" }.to_string(),
-    });
-    probes.push(SnmpOidProbe {
-        label: format!("{} avgBusy5", vendor_name.unwrap_or("Cisco")),
-        oid: oid_to_string(&cpu_5m_oid),
-        value: cpu_5m,
-        selected: selected.is_none() && cpu_5m.is_some(),
-        status: if cpu_5m.is_some() { "ok" } else { "n/a" }.to_string(),
-    });
-    probes.push(SnmpOidProbe {
-        label: format!("{} cpmCPUTotal", vendor_name.unwrap_or("Cisco")),
-        oid: oid_to_string(&cpm_oid),
-        value: cpm,
-        selected: selected.is_none() && cpm.is_some(),
-        status: if cpm.is_some() { "ok" } else { "n/a" }.to_string(),
-    });
-
-    Ok((selected, probes))
-}
-
 fn query_table_average_u32(
     session: &mut SyncSession,
     prefix: &[u32],
@@ -1133,10 +1240,7 @@ fn query_table_average_u32(
 }
 
 fn parse_enterprise_id_from_sys_object_id(sys_object_id: &str) -> Option<u32> {
-    let parts: Vec<u32> = sys_object_id
-        .split('.')
-        .filter_map(|part| part.parse::<u32>().ok())
-        .collect();
+    let parts = parse_oid_string(sys_object_id)?;
 
     if parts.len() >= 7 && parts[..6] == [1, 3, 6, 1, 4, 1] {
         parts.get(6).copied()
@@ -1145,38 +1249,29 @@ fn parse_enterprise_id_from_sys_object_id(sys_object_id: &str) -> Option<u32> {
     }
 }
 
-fn vendor_cpu_oid(enterprise_id: Option<u32>) -> Option<&'static [u32]> {
-    match enterprise_id {
-        Some(9) => Some(&[1, 3, 6, 1, 4, 1, 9, 9, 109, 1, 1, 1, 1, 5][..]), // Cisco
-        Some(1182) => Some(&[1, 3, 6, 1, 4, 1, 1182, 2, 1, 4][..]),         // Yamaha
-        Some(2078) => Some(&[1, 3, 6, 1, 4, 1, 2078, 4, 4, 3, 3, 2][..]),   // Allied Telesis
-        _ => None,
-    }
-}
-
 impl SnmpClient {
     fn query_cpu_usage(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
     ) -> Result<Option<u32>, AppError> {
         if let Some(overrides) = &self.overrides
             && let Some(cpu_oid) = parse_oid_string(&overrides.cpu_oid_override)
             && let Ok(value) = query_u32(session, &cpu_oid)
-            && value > 0
+            && value <= 100
         {
             return Ok(Some(value));
         }
-        if let Some(value) = self.query_cpu_from_template(session, vendor_enterprise_id) {
+        if let Some(value) = self.query_cpu_from_template(session, sys_object_id) {
             return Ok(Some(value));
         }
-        query_cpu_usage(session, vendor_enterprise_id)
+        query_table_average_u32(session, &[1, 3, 6, 1, 2, 1, 25, 3, 3, 1, 2])
     }
 
     fn query_memory_usage(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
     ) -> Result<Option<u32>, AppError> {
         if let Some(overrides) = &self.overrides
             && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
@@ -1187,7 +1282,8 @@ impl SnmpClient {
             return Ok(Some(v));
         }
 
-        if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id) {
+        {
+            let template = self.templates.select(sys_object_id);
             let mem_tmpl = &template.memory;
             let mode = mem_tmpl.mode.trim().to_lowercase();
 
@@ -1218,17 +1314,6 @@ impl SnmpClient {
             }
         }
 
-        if vendor_enterprise_id == Some(9) {
-            let (used, free) = query_cisco_memory_pool_bytes(session)?;
-            if let (Some(u), Some(f)) = (used, free) {
-                let sum = u + f;
-                if sum > 0 {
-                    let util = ((u as f64 / sum as f64) * 100.0).round() as u32;
-                    return Ok(Some(util.min(100)));
-                }
-            }
-        }
-
         if let Ok((Some(used), Some(total))) = query_hr_storage_memory_used_and_total(session)
             && total > 0
         {
@@ -1242,7 +1327,7 @@ impl SnmpClient {
     fn query_memory_used_bytes(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
+        _vendor_enterprise_id: Option<u32>,
     ) -> Result<Option<u64>, AppError> {
         if let Some(overrides) = &self.overrides
             && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
@@ -1252,13 +1337,6 @@ impl SnmpClient {
             return Ok(Some(value as u64));
         }
 
-        if vendor_enterprise_id == Some(9) {
-            let (used, _) = query_cisco_memory_used_bytes_candidates(session, Some("Cisco"))?;
-            if used.is_some() {
-                return Ok(used);
-            }
-        }
-
         let (used, _) = query_hr_storage_memory_used_bytes(session)?;
         Ok(used)
     }
@@ -1266,37 +1344,37 @@ impl SnmpClient {
     fn diagnose_cpu_vendor_candidates(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
-        vendor_name: Option<&str>,
+        sys_object_id: Option<&str>,
+        _vendor_name: Option<&str>,
     ) -> Result<(Option<u32>, Vec<SnmpOidProbe>), AppError> {
-        if vendor_enterprise_id == Some(9) {
-            return query_cisco_cpu_candidates(session, vendor_name);
-        }
-
         let mut probes = Vec::new();
-        if let Some(vendor_oid) = vendor_cpu_oid(vendor_enterprise_id) {
-            let vendor_value = query_u32_with_table_fallback(session, vendor_oid)
+        let template = self.templates.select(sys_object_id);
+        let mut selected = None;
+        for candidate in &template.cpu.candidates {
+            let vendor_oid = parse_oid_string(candidate)
+                .ok_or_else(|| AppError::Validation(format!("invalid CPU OID '{candidate}'")))?;
+            let vendor_value = query_u32_with_table_fallback(session, &vendor_oid)
                 .ok()
                 .flatten()
-                .filter(|v| *v > 0);
+                .filter(|v| *v <= 100);
             probes.push(SnmpOidProbe {
-                label: format!("{} preset", vendor_name.unwrap_or("Vendor")),
-                oid: oid_to_string(vendor_oid),
+                label: template.name.clone(),
+                oid: oid_to_string(&vendor_oid),
                 value: vendor_value,
-                selected: vendor_value.is_some(),
+                selected: selected.is_none() && vendor_value.is_some(),
                 status: if vendor_value.is_some() { "ok" } else { "n/a" }.to_string(),
             });
-            return Ok((vendor_value, probes));
+            selected = selected.or(vendor_value);
         }
 
-        Ok((None, probes))
+        Ok((selected, probes))
     }
 
     fn diagnose_memory_bytes_candidates(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
-        vendor_name: Option<&str>,
+        _vendor_enterprise_id: Option<u32>,
+        _vendor_name: Option<&str>,
     ) -> Result<(Option<u64>, Vec<SnmpMemoryProbe>), AppError> {
         let mut probes = Vec::new();
         let mut selected = None;
@@ -1319,13 +1397,6 @@ impl SnmpClient {
             selected = selected.or(value);
         }
 
-        if vendor_enterprise_id == Some(9) {
-            let (cisco_used, cisco_probes) =
-                query_cisco_memory_used_bytes_candidates(session, vendor_name)?;
-            selected = selected.or(cisco_used);
-            probes.extend(cisco_probes);
-        }
-
         let (hr_used, hr_probes) = query_hr_storage_memory_used_bytes(session)?;
         selected = selected.or(hr_used);
         probes.extend(hr_probes);
@@ -1335,20 +1406,22 @@ impl SnmpClient {
 }
 
 fn parse_oid_string(input: &str) -> Option<Vec<u32>> {
-    let oid: Vec<u32> = input
+    if !crate::snmp::template::is_valid_oid(input) {
+        return None;
+    }
+    input
+        .trim_start_matches('.')
         .split('.')
-        .filter_map(|part| part.trim().parse::<u32>().ok())
-        .collect();
-    if oid.is_empty() { None } else { Some(oid) }
+        .map(str::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
 }
 
 fn query_u32_with_table_fallback(
     session: &mut SyncSession,
     oid: &[u32],
 ) -> Result<Option<u32>, AppError> {
-    if let Ok(value) = query_u32(session, oid)
-        && value > 0
-    {
+    if let Ok(value) = query_u32(session, oid) {
         return Ok(Some(value));
     }
     query_table_first_u32(session, oid)
@@ -1456,77 +1529,6 @@ fn query_memory_pair_from_prefixes(
     (best_used, best_free, best_total)
 }
 
-fn query_cisco_memory_pool_bytes(
-    session: &mut SyncSession,
-) -> Result<(Option<u64>, Option<u64>), AppError> {
-    let used_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 5];
-    let free_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 6];
-    let name_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 2];
-
-    let names: HashMap<u32, String> = query_table_strings(session, &name_prefix)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let used_rows: HashMap<u32, i64> = query_table_i64_values(session, &used_prefix)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-    let free_rows: HashMap<u32, i64> = query_table_i64_values(session, &free_prefix)
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let mut best_used = None;
-    let mut best_free = None;
-    let mut best_score = -1i128;
-
-    let mut all_indices: Vec<u32> = used_rows.keys().chain(free_rows.keys()).copied().collect();
-    all_indices.sort();
-    all_indices.dedup();
-
-    for index in all_indices {
-        let u = used_rows
-            .get(&index)
-            .copied()
-            .filter(|&v| v >= 0)
-            .map(|v| v as u64);
-        let f = free_rows
-            .get(&index)
-            .copied()
-            .filter(|&v| v >= 0)
-            .map(|v| v as u64);
-
-        if u.is_none() && f.is_none() {
-            continue;
-        }
-
-        let name = names
-            .get(&index)
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
-        let name_bonus: i128 = if name.contains("processor") {
-            1_000_000_000_000_000
-        } else if name.contains("main") {
-            500_000_000_000_000
-        } else if name.contains("io") || name.contains("i/o") {
-            100_000_000_000_000
-        } else {
-            0
-        };
-
-        let cap = u.unwrap_or(0) as i128 + f.unwrap_or(0) as i128;
-        let score = name_bonus + cap;
-
-        if score > best_score {
-            best_score = score;
-            best_used = u;
-            best_free = f;
-        }
-    }
-
-    Ok((best_used, best_free))
-}
-
 fn query_hr_storage_memory_used_and_total(
     session: &mut SyncSession,
 ) -> Result<(Option<u64>, Option<u64>), AppError> {
@@ -1564,78 +1566,6 @@ fn query_hr_storage_memory_used_and_total(
         }
     }
     Ok((None, None))
-}
-
-fn query_cisco_memory_used_bytes_candidates(
-    session: &mut SyncSession,
-    vendor_name: Option<&str>,
-) -> Result<(Option<u64>, Vec<SnmpMemoryProbe>), AppError> {
-    let used_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 5];
-    let name_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 48, 1, 1, 1, 2];
-    let old_free_oid = [1, 3, 6, 1, 4, 1, 9, 2, 1, 8, 0];
-
-    let names: HashMap<u32, String> = query_table_strings(session, &name_prefix)?
-        .into_iter()
-        .collect();
-    let used_rows = query_table_i64_values(session, &used_prefix)?;
-
-    let selected = used_rows
-        .iter()
-        .filter(|(_, used)| *used > 0)
-        .max_by_key(|(index, used)| {
-            let name = names
-                .get(index)
-                .map(|s| s.to_lowercase())
-                .unwrap_or_default();
-            let priority: i128 = if name.contains("processor") {
-                300
-            } else if name.contains("main") {
-                200
-            } else if name.contains("io") || name.contains("i/o") {
-                100
-            } else {
-                0
-            };
-            priority + (*used as i128)
-        })
-        .map(|(_, used)| *used as u64);
-
-    let mut probes = Vec::new();
-    if used_rows.is_empty() {
-        probes.push(SnmpMemoryProbe {
-            label: format!("{} ciscoMemoryPoolUsed", vendor_name.unwrap_or("Cisco")),
-            oid: oid_to_string(&used_prefix),
-            value: None,
-            selected: false,
-            status: "n/a".to_string(),
-        });
-    } else {
-        for (index, used) in used_rows {
-            let name = names
-                .get(&index)
-                .cloned()
-                .unwrap_or_else(|| format!("pool {}", index));
-            let value = if used > 0 { Some(used as u64) } else { None };
-            probes.push(SnmpMemoryProbe {
-                label: format!("{} {} used bytes", vendor_name.unwrap_or("Cisco"), name),
-                oid: format!("{}.{}", oid_to_string(&used_prefix), index),
-                value,
-                selected: selected == value,
-                status: if value.is_some() { "ok" } else { "n/a" }.to_string(),
-            });
-        }
-    }
-
-    let old_free = query_u64(session, &old_free_oid).ok().filter(|v| *v > 0);
-    probes.push(SnmpMemoryProbe {
-        label: format!("{} freeMem old scalar", vendor_name.unwrap_or("Cisco")),
-        oid: oid_to_string(&old_free_oid),
-        value: old_free,
-        selected: false,
-        status: if old_free.is_some() { "ok" } else { "n/a" }.to_string(),
-    });
-
-    Ok((selected, probes))
 }
 
 fn query_table_strings(
@@ -1878,44 +1808,14 @@ impl SnmpClient {
     fn query_hardware_inventory_with_session(
         &self,
         session: &mut SyncSession,
-        vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
     ) -> Result<HardwareInventory, AppError> {
-        let mut inventory = query_hardware_inventory_with_session(session, vendor_enterprise_id)?;
+        let mut inventory = query_hardware_inventory_with_session(session, None)?;
 
-        if let Some(template) = self.template_for_enterprise_id(vendor_enterprise_id)
-            && let Ok(template_sensors) = self.query_sensors_from_template(session, template)
-        {
-            inventory.sensors.extend(template_sensors);
-        }
-
-        // Cisco 機器向けハードウェアセンサー直接フォールバック
-        if inventory.sensors.is_empty()
-            && (vendor_enterprise_id == Some(9) || vendor_enterprise_id.is_none())
-        {
-            if let Ok(temp_sensors) = query_cisco_envmon_temperature_sensors(session) {
-                inventory.sensors.extend(temp_sensors);
-            }
-            if let Ok(fan_sensors) = query_cisco_envmon_fan_sensors(session) {
-                inventory.sensors.extend(fan_sensors);
-            }
-            let power_sensors = query_cisco_envmon_power_sensors(session).unwrap_or_default();
-            if power_sensors.is_empty() {
-                inventory.sensors.push(SnmpHardwareSensor {
-                    index: 1006,
-                    name: "Built-in Power Supply".to_string(),
-                    sensor_type: "power".to_string(),
-                    source: "cisco-envmon".to_string(),
-                    oid: "1.3.6.1.4.1.9.9.13.1.1.1.3.1006".to_string(),
-                    value: Some(1),
-                    unit: None,
-                    status: Some(1),
-                    status_text: Some("Normal".to_string()),
-                    is_alarm: false,
-                });
-            } else {
-                inventory.sensors.extend(power_sensors);
-            }
-        }
+        let template = self.templates.select(sys_object_id);
+        inventory
+            .sensors
+            .extend(self.query_sensors_from_template(session, template)?);
 
         if let Some(overrides) = &self.overrides {
             merge_manual_hardware_overrides(
@@ -1930,11 +1830,11 @@ impl SnmpClient {
     fn query_hardware_inventory(
         &self,
         device: &DeviceConfig,
-        vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
     ) -> Result<HardwareInventory, AppError> {
         let mut session = self.open_session(device)?;
         let mut inventory =
-            self.query_hardware_inventory_with_session(&mut session, vendor_enterprise_id)?;
+            self.query_hardware_inventory_with_session(&mut session, sys_object_id)?;
         if let Some(overrides) = &self.overrides {
             merge_manual_hardware_overrides(
                 &mut session,
@@ -2095,128 +1995,6 @@ fn query_hardware_inventory_with_session(
     Ok(HardwareInventory { sensors, probes })
 }
 
-/// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) の電源テーブルを取得する。
-fn query_cisco_envmon_power_sensors(
-    session: &mut SyncSession,
-) -> Result<Vec<SnmpHardwareSensor>, AppError> {
-    let descr_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 1, 1, 2];
-    let state_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 1, 1, 3];
-
-    let descr_map: HashMap<u32, String> = query_table_strings(session, &descr_prefix)?
-        .into_iter()
-        .collect();
-    let state_map: HashMap<u32, i64> = query_table_i64_values(session, &state_prefix)?
-        .into_iter()
-        .collect();
-
-    let mut sensors = Vec::new();
-    for (index, state) in &state_map {
-        let name = descr_map
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("Power Supply {}", index));
-        let is_alarm = matches!(state, 2 | 3 | 4 | 6);
-        sensors.push(SnmpHardwareSensor {
-            index: *index,
-            name,
-            sensor_type: "power".to_string(),
-            source: "cisco-envmon".to_string(),
-            oid: format!("{}.{}", oid_to_string(&state_prefix), index),
-            value: Some(*state),
-            unit: None,
-            status: Some(*state),
-            status_text: Some(format_envmon_status(*state)),
-            is_alarm,
-        });
-    }
-
-    Ok(sensors)
-}
-
-/// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) のファンテーブルを取得する。
-fn query_cisco_envmon_fan_sensors(
-    session: &mut SyncSession,
-) -> Result<Vec<SnmpHardwareSensor>, AppError> {
-    let descr_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 4, 1, 2];
-    let state_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 4, 1, 3];
-
-    let descr_map: HashMap<u32, String> = query_table_strings(session, &descr_prefix)?
-        .into_iter()
-        .collect();
-    let state_map: HashMap<u32, i64> = query_table_i64_values(session, &state_prefix)?
-        .into_iter()
-        .collect();
-
-    let mut sensors = Vec::new();
-    for (index, state) in &state_map {
-        let name = descr_map
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("Fan Sensor {}", index));
-        // ciscoEnvMonState: 1=normal, 2=warning, 3=critical, 4=shutdown, 5=notPresent, 6=notFunctioning
-        let is_alarm = matches!(state, 2 | 3 | 4 | 6);
-        sensors.push(SnmpHardwareSensor {
-            index: *index,
-            name,
-            sensor_type: "fan".to_string(),
-            source: "cisco-envmon".to_string(),
-            oid: format!("{}.{}", oid_to_string(&state_prefix), index),
-            value: Some(*state),
-            unit: None,
-            status: Some(*state),
-            status_text: Some(format_envmon_status(*state)),
-            is_alarm,
-        });
-    }
-
-    Ok(sensors)
-}
-
-/// CISCO-ENVMON-MIB (1.3.6.1.4.1.9.9.13) の温度テーブルを取得する。
-/// C2960X などは温度情報を ENTITY-SENSOR-MIB ではなくこちらでのみ公開している。
-fn query_cisco_envmon_temperature_sensors(
-    session: &mut SyncSession,
-) -> Result<Vec<SnmpHardwareSensor>, AppError> {
-    let descr_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 3, 1, 2];
-    let value_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 3, 1, 3];
-    let state_prefix = [1, 3, 6, 1, 4, 1, 9, 9, 13, 1, 3, 1, 6];
-
-    let descr_map: HashMap<u32, String> = query_table_strings(session, &descr_prefix)?
-        .into_iter()
-        .collect();
-    let value_map: HashMap<u32, i64> = query_table_i64_values(session, &value_prefix)?
-        .into_iter()
-        .collect();
-    let state_map: HashMap<u32, i64> = query_table_i64_values(session, &state_prefix)?
-        .into_iter()
-        .collect();
-
-    let mut sensors = Vec::new();
-    for (index, value) in &value_map {
-        let name = descr_map
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("Temperature Sensor {}", index));
-        let state = state_map.get(index).copied();
-        // ciscoEnvMonState: 1=normal, 2=warning, 3=critical, 4=shutdown, 5=notPresent, 6=notFunctioning
-        let is_alarm = matches!(state, Some(2) | Some(3) | Some(4) | Some(6));
-        sensors.push(SnmpHardwareSensor {
-            index: *index,
-            name,
-            sensor_type: "temperature".to_string(),
-            source: "cisco-envmon".to_string(),
-            oid: format!("{}.{}", oid_to_string(&value_prefix), index),
-            value: Some(*value),
-            unit: sensor_unit_for_type("temperature"),
-            status: state,
-            status_text: state.map(format_envmon_status),
-            is_alarm,
-        });
-    }
-
-    Ok(sensors)
-}
-
 /// Hardware OID Override の種別を temperature / power / fan に正規化する。不明な値は fan 扱いにせず sensor とする。
 fn normalize_manual_hardware_sensor_type(raw: &str) -> String {
     match raw.trim().to_lowercase().as_str() {
@@ -2346,4 +2124,245 @@ pub struct SnmpDiagnostics {
     pub interfaces: Vec<SnmpInterfaceDiagnostic>,
     pub hardware_sensors: Vec<SnmpHardwareSensor>,
     pub hardware_probes: Vec<SnmpOidProbe>,
+}
+
+#[cfg(test)]
+mod template_collection_tests {
+    use super::*;
+    use std::net::UdpSocket;
+
+    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+        assert!(body.len() < 128);
+        [vec![tag, body.len() as u8], body.to_vec()].concat()
+    }
+
+    fn take_tlv(bytes: &[u8]) -> (&[u8], &[u8]) {
+        assert!(bytes.len() >= 2 && bytes[1] < 128);
+        let end = 2 + usize::from(bytes[1]);
+        (&bytes[..end], &bytes[end..])
+    }
+
+    fn encoded_oid(oid: &str) -> Vec<u8> {
+        let parts = parse_oid_string(oid).unwrap();
+        let mut result = vec![(parts[0] * 40 + parts[1]) as u8];
+        for part in &parts[2..] {
+            let mut value = *part;
+            let mut bytes = vec![(value & 0x7f) as u8];
+            value >>= 7;
+            while value > 0 {
+                bytes.push((value as u8 & 0x7f) | 0x80);
+                value >>= 7;
+            }
+            result.extend(bytes.into_iter().rev());
+        }
+        tlv(0x06, &result)
+    }
+
+    fn mock_session(
+        replies: Vec<(&'static str, Vec<u8>)>,
+    ) -> (SyncSession, std::thread::JoinHandle<()>) {
+        mock_session_with_status(replies, 0)
+    }
+
+    fn mock_session_with_status(
+        replies: Vec<(&'static str, Vec<u8>)>,
+        error_status: u8,
+    ) -> (SyncSession, std::thread::JoinHandle<()>) {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (expected_oid, value) in replies {
+                let mut buffer = [0u8; 1024];
+                let (size, peer) = socket.recv_from(&mut buffer).unwrap();
+                let (message, _) = take_tlv(&buffer[..size]);
+                let (version, rest) = take_tlv(&message[2..]);
+                let (community, rest) = take_tlv(rest);
+                let (request, _) = take_tlv(rest);
+                assert!(matches!(request[0], 0xa0 | 0xa1));
+                let (request_id, rest) = take_tlv(&request[2..]);
+                let (_, rest) = take_tlv(rest);
+                let (_, rest) = take_tlv(rest);
+                let (bindings, _) = take_tlv(rest);
+                let (binding, _) = take_tlv(&bindings[2..]);
+                let (oid, _) = take_tlv(&binding[2..]);
+                assert_eq!(oid, encoded_oid(expected_oid));
+                let returned_oid = if request[0] == 0xa1 {
+                    let mut next = parse_oid_string(expected_oid).unwrap();
+                    *next.last_mut().unwrap() += 1;
+                    encoded_oid(&oid_to_string(&next))
+                } else {
+                    oid.to_vec()
+                };
+                let bindings = tlv(
+                    0x30,
+                    &tlv(0x30, &[returned_oid.as_slice(), &value].concat()),
+                );
+                let pdu = tlv(
+                    0xa2,
+                    &[request_id, &[2, 1, error_status, 2, 1, 0], &bindings].concat(),
+                );
+                let response = tlv(0x30, &[version, community, &pdu].concat());
+                socket.send_to(&response, peer).unwrap();
+            }
+        });
+        let session = SyncSession::new(
+            address.to_string().as_str(),
+            b"public",
+            Some(Duration::from_secs(2)),
+            1,
+        )
+        .unwrap();
+        (session, server)
+    }
+
+    #[test]
+    fn collects_custom_toml_metrics_via_numeric_snmp_get() {
+        let registry = TemplateRegistry::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("custom_templates"),
+        );
+        let client = SnmpClient {
+            community: "public".into(),
+            overrides: None,
+            templates: std::sync::Arc::new(registry),
+        };
+        let (mut session, server) = mock_session(vec![
+            ("1.3.6.1.2.1.1.2.0", encoded_oid("1.3.6.1.4.1.65000.1")),
+            ("1.3.6.1.2.1.1.3.0", tlv(0x43, &[0])),
+            ("1.3.6.1.2.1.25.3.3.1.2.1", tlv(0x02, &[25])),
+        ]);
+        let readings = client
+            .query_template_metrics_with_session(&mut session, "mock")
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(readings.len(), 2);
+        assert_eq!(readings[0].key, "uptime");
+        assert_eq!(readings[0].value.as_ref().unwrap().as_u64(), Some(0));
+        assert_eq!(readings[1].value.as_ref().unwrap().as_u64(), Some(25));
+        assert_eq!(readings[1].unit, "percent");
+        assert!(readings.iter().all(|reading| reading.error.is_none()));
+    }
+
+    #[test]
+    fn preserves_signed_gauges_large_counter64_and_missing_values() {
+        let oid = "1.3.6.1.2.1.1.3.0";
+        let (mut session, server) = mock_session(vec![
+            (oid, tlv(0x02, &[0xfb])),
+            (oid, tlv(0x46, &[0x20, 0, 0, 0, 0, 0, 1])),
+            (oid, tlv(0x80, &[])),
+        ]);
+        let parsed = parse_oid_string(oid).unwrap();
+        assert_eq!(
+            query_numeric_value(&mut session, &parsed).unwrap().as_i64(),
+            Some(-5)
+        );
+        assert_eq!(
+            query_numeric_value(&mut session, &parsed).unwrap().as_u64(),
+            Some(9_007_199_254_740_993)
+        );
+        assert!(query_numeric_value(&mut session, &parsed).is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn reports_agent_errors_instead_of_accepting_returned_numbers() {
+        let oid = "1.3.6.1.2.1.1.3.0";
+        let (mut session, server) = mock_session_with_status(vec![(oid, tlv(0x02, &[42]))], 16);
+        let error = query_numeric_value(&mut session, &parse_oid_string(oid).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("SNMP agent error 16"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn rfc_and_custom_interface_templates_preserve_traffic_and_link_status() {
+        for (sys_object_id, name_oid, status, expected_status) in [
+            ("1.3.6.1.4.1.65001.1", "1.3.6.1.2.1.2.2.1.2.7", 1, "up"),
+            ("1.3.6.1.4.1.65000.1", "1.3.6.1.2.1.31.1.1.1.1.7", 2, "down"),
+        ] {
+            let registry = TemplateRegistry::load(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("examples")
+                    .join("custom_templates"),
+            );
+            let client = SnmpClient {
+                community: "public".into(),
+                overrides: None,
+                templates: std::sync::Arc::new(registry),
+            };
+            let (session, server) = mock_session(vec![
+                ("1.3.6.1.2.1.1.2.0", encoded_oid(sys_object_id)),
+                ("1.3.6.1.2.1.2.2.1.8.7", tlv(0x02, &[status])),
+                ("1.3.6.1.2.1.2.2.1.14.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.2.2.1.20.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.2.2.1.11.7", tlv(0x41, &[10])),
+                ("1.3.6.1.2.1.2.2.1.17.7", tlv(0x41, &[20])),
+                ("1.3.6.1.2.1.2.2.1.13.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.2.2.1.19.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.10.7.2.1.8.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.10.7.2.1.3.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.10.7.2.1.2.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.10.7.2.1.13.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.10.7.2.1.16.7", tlv(0x41, &[0])),
+                ("1.3.6.1.2.1.2.2.1.10.7", tlv(0x41, &[100])),
+                ("1.3.6.1.2.1.2.2.1.16.7", tlv(0x41, &[0, 200])),
+                (name_oid, tlv(0x04, b"Ethernet7")),
+                ("1.3.6.1.2.1.99.1.1.1.2", tlv(0x80, &[])),
+            ]);
+            let interface = client
+                .query_interface_with_session(session, 7, None)
+                .unwrap();
+            server.join().unwrap();
+            assert_eq!(interface.if_name, "Ethernet7");
+            assert_eq!(interface.link_status, expected_status);
+            assert_eq!(interface.in_octets, 100);
+            assert_eq!(interface.out_octets, 200);
+            assert_eq!(interface.in_errors, 0);
+            let sample = interface.into_sample(1);
+            assert_eq!(sample.if_index, 7);
+            assert_eq!(sample.in_octets, 100);
+        }
+    }
+
+    #[test]
+    fn keeps_unavailable_custom_metric_as_null_with_error() {
+        let registry = TemplateRegistry::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("examples")
+                .join("custom_templates"),
+        );
+        let client = SnmpClient {
+            community: "public".into(),
+            overrides: None,
+            templates: std::sync::Arc::new(registry),
+        };
+        let (mut session, server) = mock_session(vec![
+            ("1.3.6.1.2.1.1.2.0", encoded_oid("1.3.6.1.4.1.65000.1")),
+            ("1.3.6.1.2.1.1.3.0", tlv(0x43, &[0])),
+            ("1.3.6.1.2.1.25.3.3.1.2.1", tlv(0x80, &[])),
+        ]);
+        let readings = client
+            .query_template_metrics_with_session(&mut session, "mock")
+            .unwrap();
+        server.join().unwrap();
+        assert_eq!(readings[0].value_text.as_deref(), Some("0"));
+        assert!(readings[0].error.is_none());
+        assert!(readings[1].value.is_none());
+        assert!(readings[1].value_text.is_none());
+        assert!(readings[1].error.is_some());
+    }
+
+    #[test]
+    fn rejects_malformed_oids_instead_of_dropping_invalid_arcs() {
+        for oid in ["1.3.x.6", "1..3", "1.3.", "1.+3", "9.1.2"] {
+            assert!(parse_oid_string(oid).is_none(), "{oid}");
+        }
+        assert_eq!(
+            indexed_oid(".1.3.6.1.2.1.2.2.1.10", 7).unwrap(),
+            vec![1, 3, 6, 1, 2, 1, 2, 2, 1, 10, 7]
+        );
+    }
 }

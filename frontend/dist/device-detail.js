@@ -36,6 +36,7 @@ var TracePulseDeviceDetail = (() => {
     renderMemoryChart: () => renderMemoryChart,
     renderSpikes: () => renderSpikes,
     renderSysChart: () => renderSysChart,
+    renderTemplateMetrics: () => renderTemplateMetrics,
     renderTrafficProtocols: () => renderTrafficProtocols,
     selectAllInterfaces: () => selectAllInterfaces,
     sparkline: () => sparkline,
@@ -359,6 +360,23 @@ var TracePulseDeviceDetail = (() => {
       return `<div class='${cls}'><div class='label'>${esc(label)}</div><div class='value'>${esc(displayValue)}</div></div>`;
     }).join("");
   }
+  function renderTemplateMetrics(metrics = [], error) {
+    const box = document.getElementById("template-metrics");
+    if (!box) return;
+    if (error) {
+      box.innerHTML = `<span class='no-data' role='alert'>${esc(error)}</span>`;
+      return;
+    }
+    if (metrics.length === 0) {
+      box.innerHTML = `<span class='no-data'>${t("template_metrics_empty")}</span>`;
+      return;
+    }
+    box.innerHTML = metrics.map((metric) => {
+      const value = metric.value === null ? "N/A" : `${metric.value_text ?? metric.value} ${metric.unit}`.trim();
+      const note = metric.error ? `<div role='alert'>${esc(metric.error)}</div>` : "";
+      return `<div class='hardware-card' data-metric-key='${esc(metric.key)}'><div class='label'>${esc(metric.label)}</div><div class='value'>${esc(value)}</div>${note}</div>`;
+    }).join("");
+  }
   function renderErrorBreakdownCard(ifaces = []) {
     const box = document.getElementById("error-breakdown");
     if (!box) return;
@@ -594,6 +612,7 @@ var TracePulseDeviceDetail = (() => {
     renderErrChart(device.if_series || []);
     renderSysChart(device.metrics || []);
     renderHardwareStatus(device.hardware_sensors || []);
+    renderTemplateMetrics(device.template_metrics || [], device.template_metrics_error);
     renderSpikes(device.spikes || []);
     renderAlerts(device.alerts || []);
     updateLastRefreshed();

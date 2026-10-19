@@ -26,6 +26,7 @@ pub fn run() -> Result<(), AppError> {
 
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
+    crate::snmp::client::initialize_templates();
     let config_path = config_path();
     let mut config = AppConfig::load(&config_path)?;
     config.web.port = parse_web_port(&args, config.web.port)?;

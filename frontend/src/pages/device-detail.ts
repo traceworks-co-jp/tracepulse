@@ -68,6 +68,8 @@ interface DeviceDetail {
     if_series?: InterfaceSeries[];
     metrics?: SystemMetric[];
     hardware_sensors?: HardwareSensor[];
+    template_metrics?: TemplateMetric[];
+    template_metrics_error?: string | null;
     spikes?: InterfaceSpike[];
     alerts?: AlertRow[];
 }
@@ -114,6 +116,17 @@ interface HardwareSensor {
     source?: string | null;
     index?: string | number | null;
     is_alarm?: boolean;
+}
+
+interface TemplateMetric {
+    key: string;
+    label: string;
+    unit: string;
+    data_type: "gauge" | "counter";
+    oid: string;
+    value: number | null;
+    value_text?: string | null;
+    error?: string | null;
 }
 
 interface InterfaceSpike {
@@ -480,6 +493,26 @@ export function renderHardwareStatus(sensors: HardwareSensor[] = []): void {
         .join("");
 }
 
+export function renderTemplateMetrics(metrics: TemplateMetric[] = [], error?: string | null): void {
+    const box = document.getElementById("template-metrics");
+    if (!box) return;
+    if (error) {
+        box.innerHTML = `<span class='no-data' role='alert'>${escapeHtml(error)}</span>`;
+        return;
+    }
+    if (metrics.length === 0) {
+        box.innerHTML = `<span class='no-data'>${t("template_metrics_empty")}</span>`;
+        return;
+    }
+    box.innerHTML = metrics.map((metric) => {
+        const value = metric.value === null ? "N/A" : `${metric.value_text ?? metric.value} ${metric.unit}`.trim();
+        const note = metric.error ? `<div role='alert'>${escapeHtml(metric.error)}</div>` : "";
+        return `<div class='hardware-card' data-metric-key='${escapeHtml(metric.key)}'>` +
+            `<div class='label'>${escapeHtml(metric.label)}</div>` +
+            `<div class='value'>${escapeHtml(value)}</div>${note}</div>`;
+    }).join("");
+}
+
 export function renderErrorBreakdownCard(ifaces: DeviceInterface[] = []): void {
     const box = document.getElementById("error-breakdown");
     if (!box) return;
@@ -786,6 +819,7 @@ export function renderDetail(device: DeviceDetail): void {
     renderErrChart(device.if_series || []);
     renderSysChart(device.metrics || []);
     renderHardwareStatus(device.hardware_sensors || []);
+    renderTemplateMetrics(device.template_metrics || [], device.template_metrics_error);
     renderSpikes(device.spikes || []);
     renderAlerts(device.alerts || []);
     updateLastRefreshed();

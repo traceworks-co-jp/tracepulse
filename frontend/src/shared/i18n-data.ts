@@ -32,6 +32,9 @@ export const translations = {
         alert_history: "Alert History",
         polling: "Polling",
         snmp: "SNMP",
+        template_metrics_title: "Template Metrics",
+        template_metrics_empty: "No numeric metrics configured for this device.",
+        snmp_template_disclaimer: "TracePulse monitors standard RFC-compliant metrics by default. When configuring proprietary vendor OIDs or importing third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.",
         display: "Display",
         time_zone: "Time Zone",
         time_zone_hint: "Controls how timestamps are shown in the web UI",
@@ -232,6 +235,9 @@ export const translations = {
         traffic_protocols_top_talkers: "Top Talkers"
     },
     ja: {
+        template_metrics_title: "テンプレートメトリクス",
+        template_metrics_empty: "この機器の独自数値メトリクスは設定されていません。",
+        snmp_template_disclaimer: "TracePulse は既定で RFC 標準準拠のメトリクスを監視します。ベンダー独自 OID の設定や第三者テンプレートの利用時は、各ハードウェアベンダーの EULA およびサポート契約への準拠をご確認ください。TraceWorks は、ベンダー独自メトリクスへの無許可アクセスについて責任を負いません。",
         nav_dashboard: "ダッシュボード",
         nav_discovery: "探索",
         nav_diagnostics: "診断",
@@ -464,5 +470,4 @@ export const translations = {
         traffic_protocols_top_talkers: "Top Talkers"
     }
 };
-
 

@@ -68,7 +68,7 @@ the release assets once a representative monitoring dataset is available.
 - **Embedded WebGUI**
   - Web dashboard featuring multi-device monitoring, real-time charts for bandwidth, error counters, and CPU/memory utilization, as well as auto-generated topology maps via LLDP/CDP.
 - **Template-Driven Multi-Vendor Support**
-  - Easily extend OIDs for Cisco, Fortinet, Yamaha, etc., using TOML templates (`templates/*.toml`). Supports both direct (`mode = "direct"`) and calculated (`mode = "calculated"`) memory metrics.
+  - RFC-standard defaults are embedded in the binary. Add your own numeric-OID TOML definitions under `custom_templates/`; raw MIB files are never parsed. See [SNMP template specification](docs/design/03-snmp-collection.md).
 - **Network Discovery & Topology Detection**
   - Parallel CIDR host scanning and automated neighbor port discovery via LLDP and CDP.
 - **Health Scoring & Anomaly Detection**
@@ -105,9 +105,13 @@ separate TracePulse Enterprise package through the notification provider API.
 
 ### Supported vendors (OID templates)
 
-TracePulse ships with OID templates (`templates/*.toml`) for the following vendors: Alcatel, Arista, Aruba, F5 (BIG-IP), Brocade, Brocade/Foundry, Check Point, Ciena, Cisco, Cradlepoint, Dell, D-Link, Extreme, Fortinet, Generic (standard RFC MIBs), HP, Huawei, Intel/QLogic, Juniper, Mellanox, Meraki, MikroTik, Morningstar, Netgear, Palo Alto, Qtech, Ribbon, Stormshield, TP-Link, Ubiquiti, VeloCloud, Vyatta, and Zyxel.
+TracePulse bundles only RFC-standard numeric OID definitions. Vendor-specific definitions are user-supplied (BYO), not distributed in the repository, release archives, or Docker image. Place legally obtained TOML templates in `TRACEPULSE_DATA_DIR/custom_templates` (beside the executable when the variable is unset), then restart.
 
 Devices without a dedicated template can still be monitored through the `generic.toml` template, which relies on standard MIBs (IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB, etc.).
+
+> TracePulse monitors standard RFC-compliant metrics by default. When configuring proprietary vendor OIDs or importing third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.
+
+See the [template schema, Docker mount example, and migration guide](docs/design/03-snmp-collection.md). Legacy vendor metric auto-probes are disabled; LLDP/CDP topology discovery is retained separately.
 
 ### Verified hardware
 
@@ -119,7 +123,7 @@ Devices outside this list are expected to work as long as they expose the releva
 
 ### 1. First launch
 
-1. Download the archive for your platform from the [latest release](https://github.com/traceworks-co-jp/trace-pulse/releases/latest), then extract it. Keep the executable, `config.toml`, and the `templates/` directory in the same folder.
+1. Download the archive for your platform from the [latest release](https://github.com/traceworks-co-jp/trace-pulse/releases/latest), then extract it. RFC templates are embedded; `config.toml`, `data.db`, and optional `custom_templates/` live in the data directory (beside the executable by default).
 2. Edit `config.toml`, at minimum `[snmp] default_community` and `[polling] interval_seconds`.
 3. Start the application in TUI or Web UI mode:
 
@@ -178,7 +182,7 @@ docker compose up -d
 
 Images are published to `ghcr.io/traceworks-co-jp/tracepulse` for `linux/amd64`
 and `linux/arm64`. Use `:latest` for the most recently published `v*` tag or pin
-a release such as `:v0.1.0`. The image contains only the runtime, vendor
+a release such as `:v0.1.0`. The image contains only the runtime with embedded RFC
 templates, service definitions, licenses, and a default configuration; Node.js
 and the Rust toolchain are not shipped.
 
@@ -188,7 +192,7 @@ and the Rust toolchain are not shipped.
 | --- | --- | --- |
 | `TRACEPULSE_DATA_DIR` | `/data` | Writable directory for `data.db`, SQLite sidecars, and `config.toml` |
 | `TRACEPULSE_WEB_HOST` | `0.0.0.0` | Web UI bind address inside the container |
-| `/opt/tracepulse/templates` | Bundled templates | Optional directory mount for custom vendor templates |
+| `/data/custom_templates` | User TOML templates | Optional directory mount; loaded in addition to embedded RFC defaults at startup |
 | `/opt/tracepulse/config/services.toml` | Bundled service definitions | Optional file mount for custom service names |
 
 On first container startup, a default `config.toml` is copied into the data
@@ -330,7 +334,7 @@ Configuration files and database are created and referenced in the same director
 - `tracepulse` (Executable)
 - `config.toml` (Configuration File)
 - `data.db` (SQLite Database)
-- `templates/*.toml` (Vendor OID Templates)
+- `custom_templates/*.toml` (Optional user-supplied numeric OID templates)
 
 ### Example `config.toml`:
 
@@ -439,7 +443,7 @@ TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検�
 - **直感的な WebGUI**
   - ブラウザから複数台の監視、帯域・エラー・CPU/メモリ使用率のリアルタイムグラフ、LLDP/CDP による自動トポロジー描画が可能。
 - **テンプレート駆動マルチベンダー対応**
-  - TOML テンプレート (`templates/*.toml`) による Cisco, Fortinet, Yamaha 等の OID 拡張や、メモリ取得方式 (直接 `%` 取得、`Used/Free` からの自動計算) に対応。
+  - RFC 標準定義をバイナリに内蔵。独自の数値 OID 定義は `custom_templates/*.toml` で追加できます。生 MIB の解析は行いません。[SNMP テンプレート仕様](docs/design/03-snmp-collection.md)を参照してください。
 - **自動探索＆トポロジー認識 (Discovery)**
   - CIDR 並列スキャンと LLDP / CDP 隣接情報取得による対向機器・対向ポートの自動マッピング。
 - **障害予兆＆健全度スコアリング**
@@ -462,7 +466,7 @@ Community 版はアラートを記録・表示しますが、外部への通知�
 
 ### 対応ベンダー（OID テンプレート提供）
 
-`templates/*.toml` として、以下のベンダー向け OID テンプレートを同梱しています: Alcatel, Arista, Aruba, F5 (BIG-IP), Brocade, Brocade/Foundry, Check Point, Ciena, Cisco, Cradlepoint, Dell, D-Link, Extreme, Fortinet, Generic（標準 RFC MIB）, HP, Huawei, Intel/QLogic, Juniper, Mellanox, Meraki, MikroTik, Morningstar, Netgear, Palo Alto, Qtech, Ribbon, Stormshield, TP-Link, Ubiquiti, VeloCloud, Vyatta, Zyxel。
+公式同梱は RFC 標準の数値 OID 定義のみです。ベンダー固有定義は公式リポジトリ・配布アーカイブ・Docker イメージに含めません。利用者が適法に用意した TOML を `TRACEPULSE_DATA_DIR/custom_templates`（環境変数未指定時は実行ファイルと同じ場所の `custom_templates`）に配置して再起動してください。
 
 専用テンプレートがない機器でも、標準 MIB（IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB 等）に対応していれば `generic.toml` テンプレートで監視できます。
 
@@ -476,7 +480,7 @@ Community 版はアラートを記録・表示しますが、外部への通知�
 
 ### 1. 初回起動
 
-1. [GitHub Releases の最新版](https://github.com/traceworks-co-jp/trace-pulse/releases/latest) から利用環境向けのアーカイブをダウンロードして展開します。実行ファイル・`config.toml`・`templates/` ディレクトリは同じフォルダーに配置してください。
+1. [GitHub Releases の最新版](https://github.com/traceworks-co-jp/trace-pulse/releases/latest) から利用環境向けのアーカイブをダウンロードして展開します。RFC 定義はバイナリ内蔵です。`config.toml`・`data.db`・任意の `custom_templates/` はデータディレクトリ（既定は実行ファイルと同じ場所）に配置してください。
 2. `config.toml` を編集します。最低限 `[snmp] default_community` と `[polling] interval_seconds` を設定してください。
 3. TUI または WebGUI モードで起動します。
 
@@ -605,7 +609,7 @@ TUI モードでは、キーボードのみで直感的に全操作を行えま�
 - `tracepulse` (実行バイナリ)
 - `config.toml` (設定ファイル)
 - `data.db` (SQLite データベース)
-- `templates/*.toml` (ベンダー別 OID テンプレート)
+- `custom_templates/*.toml` (任意のユーザー独自数値 OID テンプレート)
 
 ### `config.toml` 設定例:
 
