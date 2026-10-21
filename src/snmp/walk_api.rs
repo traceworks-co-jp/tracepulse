@@ -207,13 +207,6 @@ where
                 return finish(status, reason, varbinds);
             }
             WalkStep::VarBind(varbind) => {
-                if !varbind.oid.starts_with(prefix) {
-                    return finish(
-                        ReliableWalkStatus::Complete,
-                        WalkReason::OutsidePrefix,
-                        varbinds,
-                    );
-                }
                 if varbind.oid <= current {
                     return finish(
                         if varbinds.is_empty() {
@@ -222,6 +215,13 @@ where
                             ReliableWalkStatus::Partial
                         },
                         WalkReason::NonIncreasingOid,
+                        varbinds,
+                    );
+                }
+                if !varbind.oid.starts_with(prefix) {
+                    return finish(
+                        ReliableWalkStatus::Complete,
+                        WalkReason::OutsidePrefix,
                         varbinds,
                     );
                 }
