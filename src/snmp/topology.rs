@@ -276,7 +276,8 @@ fn interface_map(varbinds: &[SnmpVarBind]) -> HashMap<u32, Interface> {
 }
 
 fn resolve_local_port(port: &LocalPort, interfaces: &HashMap<u32, Interface>) -> Option<u32> {
-    let mut candidates = BTreeSet::new();
+    let mut identity_candidates = BTreeSet::new();
+    let mut description_candidates = BTreeSet::new();
     for (index, interface) in interfaces {
         let matches = match port.subtype {
             Some(1) => equal_bytes(port.id.as_deref(), interface.alias.as_deref()),
@@ -290,10 +291,18 @@ fn resolve_local_port(port: &LocalPort, interfaces: &HashMap<u32, Interface>) ->
                     port.description.as_deref(),
                     interface.description.as_deref(),
                 );
-        if matches || description_matches {
-            candidates.insert(*index);
+        if matches {
+            identity_candidates.insert(*index);
+        }
+        if description_matches {
+            description_candidates.insert(*index);
         }
     }
+    let candidates = if identity_candidates.is_empty() {
+        description_candidates
+    } else {
+        identity_candidates
+    };
     (candidates.len() == 1).then(|| *candidates.first().unwrap())
 }
 
