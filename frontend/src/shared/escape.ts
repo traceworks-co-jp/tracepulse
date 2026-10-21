@@ -3,5 +3,6 @@ export function esc(value: unknown): string {
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
-        .replace(/\x22/g, "&quot;");
+        .replace(/\x22/g, "&quot;")
+        .replace(/\x27/g, "&#39;");
 }
