@@ -1,5 +1,31 @@
 import { expect, test } from "@playwright/test";
 
+test("vendor hardware states render normal power and critical failures correctly", async ({ page }) => {
+    await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
+    await page.goto("/");
+    await page.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", "<div id='hardware-status'></div>");
+    });
+    await page.addScriptTag({ url: "/static/js/device-detail.js" });
+    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderHardwareStatus([
+        {name:"Cisco PSU 1",sensor_type:"power",status:2,status_text:"On",status_kind:"normal",is_alarm:false},
+        {name:"Cisco PSU 2",sensor_type:"power",status:8,status_text:"Failed",status_kind:"critical",is_alarm:true},
+        {name:"Juniper Fan",sensor_type:"fan",status:6,status_text:"Online",status_kind:"normal",is_alarm:false},
+        {name:"Unknown FRU",sensor_type:"power",status:1,status_text:"Unknown",status_kind:"warning",is_alarm:false},
+        {name:"RE Temperature",sensor_type:"temperature",value:42,unit:"C",status:null,is_alarm:false}
+    ]);` });
+    const cards = page.locator("#hardware-status .hardware-card");
+    await expect(cards).toHaveCount(5);
+    await expect(cards.nth(0)).toHaveClass("hardware-card");
+    await expect(cards.nth(0)).toContainText("On");
+    await expect(cards.nth(1)).toHaveClass("hardware-card crit");
+    await expect(cards.nth(1)).toContainText("Failed");
+    await expect(cards.nth(2)).toHaveClass("hardware-card");
+    await expect(cards.nth(3)).toHaveClass("hardware-card warn");
+    await expect(cards.nth(4)).toHaveClass("hardware-card");
+    await expect(cards.nth(4)).toContainText("42 C");
+});
+
 test("numeric template metrics render exact values and explicit errors safely", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.route("**/api/device/*", (route) => route.fulfill({ json: { interfaces: [], metrics: [] } }));

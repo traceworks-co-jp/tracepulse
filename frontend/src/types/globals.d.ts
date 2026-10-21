@@ -176,6 +176,7 @@ declare global {
         source?: string | null;
         index?: string | number | null;
         is_alarm?: boolean;
+        status_kind?: "normal" | "warning" | "critical" | "";
     }
 
     interface InterfaceSpike {

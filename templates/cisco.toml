@@ -1,0 +1,31 @@
+name = "Cisco Network Device"
+description = "CPU percentage, enhanced/legacy memory pools, and FRU power state"
+enterprise_id = 9
+
+# Sources and selection semantics: docs/design/03-snmp-collection.md
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.9.9.109.1.1.1.1.7", # cpmCPUTotal1minRev
+    "1.3.6.1.4.1.9.9.109.1.1.2.1.4", # cpmCore1min
+    "1.3.6.1.4.1.9.2.1.57.0",        # avgBusy1
+]
+aggregation = "max"
+
+[memory]
+mode = "calculated"
+used_prefix = "1.3.6.1.4.1.9.9.221.1.1.1.1.7"
+free_prefix = "1.3.6.1.4.1.9.9.221.1.1.1.1.8"
+used_is_bytes = true
+
+[[memory.fallbacks]]
+mode = "calculated"
+used_prefix = "1.3.6.1.4.1.9.9.48.1.1.1.5"
+free_prefix = "1.3.6.1.4.1.9.9.48.1.1.1.6"
+used_is_bytes = true
+
+[[sensors.power]]
+descr_prefix = "1.3.6.1.2.1.47.1.1.1.1.7"
+state_prefix = "1.3.6.1.4.1.9.9.117.1.1.2.1.2"
+normal_states = [2]
+alarm_states = [4, 5, 6, 7, 8, 9, 10, 11, 12]
+state_labels = { "1" = "Off (other)", "2" = "On", "3" = "Administratively off", "4" = "Power denied", "5" = "Off (power)", "6" = "Off (temperature)", "7" = "Off (fan)", "8" = "Failed", "9" = "On (fan failure)", "10" = "Off (cooling)", "11" = "Off (connector rating)", "12" = "On (inline power failure)" }

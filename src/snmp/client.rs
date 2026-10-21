@@ -2,7 +2,9 @@ use crate::config::SnmpConfig;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::monitor::interface::InterfaceMonitor;
-use crate::snmp::template::{InterfaceTableTemplate, TemplateRegistry, VendorOidTemplate};
+use crate::snmp::template::{
+    InterfaceTableTemplate, PercentageAggregation, TemplateRegistry, VendorOidTemplate,
+};
 use crate::snmp::walk::{SnmpValue, SnmpVarBind};
 use crate::snmp::walk_api::{WalkStep, walk_with};
 use crate::snmp::{ReliableWalkOutcome, WalkOptions, WalkReason};
@@ -78,112 +80,180 @@ impl SnmpClient {
         session: &mut SyncSession,
         sys_object_id: Option<&str>,
     ) -> Option<u32> {
-        self.templates
-            .select(sys_object_id)
-            .cpu
-            .candidates
-            .iter()
-            .filter_map(|candidate| parse_oid_string(candidate))
-            .find_map(|oid| {
-                query_u32_with_table_fallback(session, &oid)
-                    .ok()
-                    .flatten()
-                    .filter(|value| *value <= 100)
-            })
+        let cpu = &self.templates.select(sys_object_id).cpu;
+        cpu.candidates.iter().find_map(|candidate| {
+            match query_template_percentage(session, candidate, cpu.aggregation) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(oid = %candidate, %error, "CPU template candidate unavailable");
+                    None
+                }
+            }
+        })
     }
 
     fn query_sensors_from_template(
         &self,
         session: &mut SyncSession,
         template: &VendorOidTemplate,
-    ) -> Result<Vec<SnmpHardwareSensor>, AppError> {
-        let mut sensors = Vec::new();
+    ) -> HardwareInventory {
+        let mut inventory = HardwareInventory {
+            sensors: Vec::new(),
+            probes: Vec::new(),
+        };
 
         for (sensor_type, group_list) in &template.sensors {
             for group in group_list {
-                let descr_map: HashMap<u32, String> =
-                    if let Some(descr_prefix) = parse_oid_string(&group.descr_prefix) {
-                        query_table_strings(session, &descr_prefix)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    };
+                let result = (|| -> Result<Vec<SnmpHardwareSensor>, AppError> {
+                    let mut sensors = Vec::new();
+                    let value_map: std::collections::BTreeMap<Vec<u32>, i64> =
+                        if let Some(value_prefix) = parse_oid_string(&group.value_prefix) {
+                            template_i64_column(session, &value_prefix)?
+                        } else {
+                            std::collections::BTreeMap::new()
+                        };
 
-                let value_map: HashMap<u32, i64> =
-                    if let Some(value_prefix) = parse_oid_string(&group.value_prefix) {
-                        query_table_i64_values(session, &value_prefix)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    };
+                    let state_map: std::collections::BTreeMap<Vec<u32>, i64> =
+                        if let Some(state_prefix) = parse_oid_string(&group.state_prefix) {
+                            template_i64_column(session, &state_prefix)?
+                        } else {
+                            std::collections::BTreeMap::new()
+                        };
 
-                let state_map: HashMap<u32, i64> =
-                    if let Some(state_prefix) = parse_oid_string(&group.state_prefix) {
-                        query_table_i64_values(session, &state_prefix)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .collect()
-                    } else {
-                        HashMap::new()
-                    };
+                    let mut all_indices: Vec<Vec<u32>> =
+                        value_map.keys().chain(state_map.keys()).cloned().collect();
+                    all_indices.sort();
+                    all_indices.dedup();
 
-                let mut all_indices: Vec<u32> = value_map
-                    .keys()
-                    .chain(state_map.keys())
-                    .chain(descr_map.keys())
-                    .copied()
-                    .collect();
-                all_indices.sort();
-                all_indices.dedup();
-
-                for index in all_indices {
-                    let name = descr_map.get(&index).cloned().unwrap_or_else(|| {
-                        format!("{} Sensor {}", sensor_type.to_uppercase(), index)
-                    });
-                    let value = value_map.get(&index).copied();
-                    let state = state_map.get(&index).copied();
-                    let status_val = state.or(value);
-                    let is_alarm = matches!(state, Some(2) | Some(3) | Some(4) | Some(6));
-
-                    let oid_str = if !group.state_prefix.is_empty() {
-                        format!("{}.{}", group.state_prefix, index)
-                    } else if !group.value_prefix.is_empty() {
-                        format!("{}.{}", group.value_prefix, index)
-                    } else {
-                        format!("{}.{}", group.descr_prefix, index)
-                    };
-
-                    let status_text = if sensor_type == "temperature" {
-                        None
-                    } else {
-                        status_val.map(format_envmon_status)
-                    };
-
-                    sensors.push(SnmpHardwareSensor {
-                        index,
-                        name,
-                        sensor_type: sensor_type.clone(),
-                        source: format!("{}-template", template.name.to_lowercase()),
-                        oid: oid_str,
-                        value,
-                        unit: if sensor_type == "temperature" {
-                            sensor_unit_for_type(sensor_type)
+                    for (position, index) in all_indices.into_iter().enumerate() {
+                        let suffix = oid_to_string(&index);
+                        let name = if let Some(mut oid) = parse_oid_string(&group.descr_prefix) {
+                            oid.extend(&index);
+                            match query_string(session, &oid) {
+                                Ok(name) => Some(name),
+                                Err(error) => {
+                                    tracing::warn!(oid = %oid_to_string(&oid), %error, "Template sensor name unavailable");
+                                    None
+                                }
+                            }
                         } else {
                             None
-                        },
-                        status: status_val,
-                        status_text,
-                        is_alarm,
-                    });
-                }
+                        };
+                        if !group.match_names.is_empty()
+                            && name.as_ref().is_none_or(|name| {
+                                !group.match_names.iter().any(|pattern| {
+                                    name.to_lowercase().contains(&pattern.to_lowercase())
+                                })
+                            })
+                        {
+                            continue;
+                        }
+                        let name = name.unwrap_or_else(|| {
+                            format!("{} Sensor {}", sensor_type.to_uppercase(), suffix)
+                        });
+                        let value = value_map.get(&index).copied();
+                        let state = state_map.get(&index).copied();
+                        let status_val = state.or(value);
+                        let is_alarm = state.is_some_and(|state| {
+                            group
+                                .alarm_states
+                                .as_deref()
+                                .unwrap_or(&[2, 3, 4, 6])
+                                .contains(&state)
+                        });
+
+                        let oid_str = if !group.state_prefix.is_empty() {
+                            format!("{}.{}", group.state_prefix.trim_start_matches('.'), suffix)
+                        } else if !group.value_prefix.is_empty() {
+                            format!("{}.{}", group.value_prefix.trim_start_matches('.'), suffix)
+                        } else {
+                            format!("{}.{}", group.descr_prefix.trim_start_matches('.'), suffix)
+                        };
+
+                        let status_text = if sensor_type == "temperature" {
+                            None
+                        } else {
+                            status_val.map(|value| {
+                                group
+                                    .state_labels
+                                    .get(&value.to_string())
+                                    .cloned()
+                                    .unwrap_or_else(|| {
+                                        if group.state_labels.is_empty() {
+                                            format_envmon_status(value)
+                                        } else {
+                                            format!("Unknown ({value})")
+                                        }
+                                    })
+                            })
+                        };
+
+                        sensors.push(SnmpHardwareSensor {
+                            index: if index.len() == 1 {
+                                index[0]
+                            } else {
+                                position as u32
+                            },
+                            name,
+                            sensor_type: sensor_type.clone(),
+                            source: format!("{}-template", template.name.to_lowercase()),
+                            oid: oid_str,
+                            value,
+                            unit: if sensor_type == "temperature" {
+                                sensor_unit_for_type(sensor_type)
+                            } else {
+                                None
+                            },
+                            status: if sensor_type == "temperature" {
+                                state
+                            } else {
+                                status_val
+                            },
+                            status_text,
+                            is_alarm,
+                            status_kind: state
+                                .map(|state| {
+                                    if is_alarm {
+                                        "critical"
+                                    } else if group.normal_states.contains(&state) {
+                                        "normal"
+                                    } else {
+                                        "warning"
+                                    }
+                                    .to_string()
+                                })
+                                .filter(|_| !group.normal_states.is_empty()),
+                        });
+                    }
+                    Ok(sensors)
+                })();
+                let (sensors, status) = match result {
+                    Ok(sensors) => (sensors, "ok".to_string()),
+                    Err(error) => {
+                        tracing::warn!(template = %template.name, %sensor_type, %error, "Template sensor group unavailable");
+                        (Vec::new(), error.to_string())
+                    }
+                };
+                inventory.probes.push(SnmpOidProbe {
+                    label: format!("{} {}", template.name, sensor_type),
+                    oid: if group.state_prefix.is_empty() {
+                        group.value_prefix.clone()
+                    } else {
+                        group.state_prefix.clone()
+                    },
+                    value: (status == "ok").then_some(sensors.len() as u32),
+                    selected: !sensors.is_empty(),
+                    status: if status == "ok" && sensors.is_empty() {
+                        "n/a".into()
+                    } else {
+                        status
+                    },
+                });
+                inventory.sensors.extend(sensors);
             }
         }
 
-        Ok(sensors)
+        inventory
     }
 }
 
@@ -254,7 +324,7 @@ impl SnmpClient {
             .query_memory_usage(&mut session, sys_object_id.as_deref())
             .unwrap_or(None);
         let memory_used_bytes = self
-            .query_memory_used_bytes(&mut session, None)
+            .query_memory_used_bytes(&mut session, sys_object_id.as_deref())
             .unwrap_or(None);
         let hardware =
             self.query_hardware_inventory_with_session(&mut session, sys_object_id.as_deref())?;
@@ -381,13 +451,13 @@ impl SnmpClient {
             .or(vendor_cpu_value)
             .or(cpu_standard.filter(|v| *v <= 100));
 
-        let memory_usage = self.query_memory_usage(&mut session, sys_object_id.as_deref())?;
+        let (memory_usage, memory_probes) =
+            self.diagnose_memory_candidates(&mut session, sys_object_id.as_deref())?;
         let (memory_used_bytes, memory_byte_probes) = self.diagnose_memory_bytes_candidates(
             &mut session,
-            vendor_enterprise_id,
+            sys_object_id.as_deref(),
             vendor_name.as_deref(),
         )?;
-        let memory_probes = Vec::new();
 
         let interface_indexes = self.discover_interface_indexes(device)?;
         let mut interfaces = Vec::new();
@@ -1273,44 +1343,64 @@ impl SnmpClient {
         session: &mut SyncSession,
         sys_object_id: Option<&str>,
     ) -> Result<Option<u32>, AppError> {
+        Ok(self.diagnose_memory_candidates(session, sys_object_id)?.0)
+    }
+
+    fn diagnose_memory_candidates(
+        &self,
+        session: &mut SyncSession,
+        sys_object_id: Option<&str>,
+    ) -> Result<(Option<u32>, Vec<SnmpOidProbe>), AppError> {
+        let mut probes = Vec::new();
         if let Some(overrides) = &self.overrides
             && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
             && let Ok(value) = query_u32_with_table_fallback(session, &memory_oid)
             && let Some(v) = value
             && v <= 100
         {
-            return Ok(Some(v));
+            probes.push(SnmpOidProbe {
+                label: "Manual Memory Override".into(),
+                oid: oid_to_string(&memory_oid),
+                value: Some(v),
+                selected: true,
+                status: "ok".into(),
+            });
+            return Ok((Some(v), probes));
         }
 
+        let template = self.templates.select(sys_object_id);
+        for source in template
+            .memory
+            .sources()
+            .filter(|source| !source.mode.is_empty() || !source.used_prefix.is_empty())
         {
-            let template = self.templates.select(sys_object_id);
-            let mem_tmpl = &template.memory;
-            let mode = mem_tmpl.mode.trim().to_lowercase();
-
-            if mode == "direct" && !mem_tmpl.oid.is_empty() {
-                if let Some(oid) = parse_oid_string(&mem_tmpl.oid)
-                    && let Ok(value) = query_u32_with_table_fallback(session, &oid)
-                    && let Some(v) = value
-                {
-                    return Ok(Some(v.min(100)));
+            let (value, status) = match query_template_memory_source(session, source) {
+                Ok(value) => (
+                    value.map(|(percent, _)| percent),
+                    if value.is_some() {
+                        "ok".into()
+                    } else {
+                        "n/a".into()
+                    },
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, template = %template.name, "Memory template source unavailable");
+                    (None, error.to_string())
                 }
-            } else {
-                let (used_val, free_val, total_val) = query_memory_pair_from_prefixes(
-                    session,
-                    &mem_tmpl.used_prefix,
-                    &mem_tmpl.free_prefix,
-                    &mem_tmpl.total_prefix,
-                );
-
-                if let Some(util) = crate::snmp::template::MemoryTemplate::calculate_utilization(
-                    &mem_tmpl.mode,
-                    None,
-                    used_val,
-                    free_val,
-                    total_val,
-                ) {
-                    return Ok(Some(util.round() as u32));
-                }
+            };
+            probes.push(SnmpOidProbe {
+                label: template.name.clone(),
+                oid: if source.mode == "direct" {
+                    source.oid.clone()
+                } else {
+                    source.used_prefix.clone()
+                },
+                value,
+                selected: value.is_some(),
+                status,
+            });
+            if value.is_some() {
+                return Ok((value, probes));
             }
         }
 
@@ -1318,27 +1408,27 @@ impl SnmpClient {
             && total > 0
         {
             let util = ((used as f64 / total as f64) * 100.0).round() as u32;
-            return Ok(Some(util.min(100)));
+            probes.push(SnmpOidProbe {
+                label: "Standard hrStorage".into(),
+                oid: "1.3.6.1.2.1.25.2.3.1.6".into(),
+                value: Some(util.min(100)),
+                selected: true,
+                status: "ok".into(),
+            });
+            return Ok((Some(util.min(100)), probes));
         }
 
-        Ok(None)
+        Ok((None, probes))
     }
 
     fn query_memory_used_bytes(
         &self,
         session: &mut SyncSession,
-        _vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
     ) -> Result<Option<u64>, AppError> {
-        if let Some(overrides) = &self.overrides
-            && let Some(memory_oid) = parse_oid_string(&overrides.memory_oid_override)
-            && let Ok(value) = query_u32_with_table_fallback(session, &memory_oid)
-            && let Some(value) = value.filter(|v| *v > 0)
-        {
-            return Ok(Some(value as u64));
-        }
-
-        let (used, _) = query_hr_storage_memory_used_bytes(session)?;
-        Ok(used)
+        Ok(self
+            .diagnose_memory_bytes_candidates(session, sys_object_id, None)?
+            .0)
     }
 
     fn diagnose_cpu_vendor_candidates(
@@ -1353,16 +1443,30 @@ impl SnmpClient {
         for candidate in &template.cpu.candidates {
             let vendor_oid = parse_oid_string(candidate)
                 .ok_or_else(|| AppError::Validation(format!("invalid CPU OID '{candidate}'")))?;
-            let vendor_value = query_u32_with_table_fallback(session, &vendor_oid)
-                .ok()
-                .flatten()
-                .filter(|v| *v <= 100);
+            let (vendor_value, status) = match query_template_percentage(
+                session,
+                candidate,
+                template.cpu.aggregation,
+            ) {
+                Ok(value) => (
+                    value,
+                    if value.is_some() {
+                        "ok".into()
+                    } else {
+                        "n/a".into()
+                    },
+                ),
+                Err(error) => {
+                    tracing::warn!(oid = %candidate, %error, "CPU template candidate unavailable");
+                    (None, error.to_string())
+                }
+            };
             probes.push(SnmpOidProbe {
                 label: template.name.clone(),
                 oid: oid_to_string(&vendor_oid),
                 value: vendor_value,
                 selected: selected.is_none() && vendor_value.is_some(),
-                status: if vendor_value.is_some() { "ok" } else { "n/a" }.to_string(),
+                status,
             });
             selected = selected.or(vendor_value);
         }
@@ -1373,7 +1477,7 @@ impl SnmpClient {
     fn diagnose_memory_bytes_candidates(
         &self,
         session: &mut SyncSession,
-        _vendor_enterprise_id: Option<u32>,
+        sys_object_id: Option<&str>,
         _vendor_name: Option<&str>,
     ) -> Result<(Option<u64>, Vec<SnmpMemoryProbe>), AppError> {
         let mut probes = Vec::new();
@@ -1397,9 +1501,48 @@ impl SnmpClient {
             selected = selected.or(value);
         }
 
-        let (hr_used, hr_probes) = query_hr_storage_memory_used_bytes(session)?;
-        selected = selected.or(hr_used);
-        probes.extend(hr_probes);
+        if selected.is_none() {
+            let template = self.templates.select(sys_object_id);
+            for source in template
+                .memory
+                .sources()
+                .filter(|source| source.used_is_bytes)
+            {
+                let (value, status) = match query_template_memory_source(session, source) {
+                    Ok(value) => {
+                        let bytes = value.and_then(|(_, bytes)| bytes);
+                        (
+                            bytes,
+                            if bytes.is_some() {
+                                "ok".into()
+                            } else {
+                                "n/a".into()
+                            },
+                        )
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, template = %template.name, "Memory byte source unavailable");
+                        (None, error.to_string())
+                    }
+                };
+                probes.push(SnmpMemoryProbe {
+                    label: template.name.clone(),
+                    oid: source.used_prefix.clone(),
+                    value,
+                    selected: value.is_some(),
+                    status,
+                });
+                if value.is_some() {
+                    selected = value;
+                    break;
+                }
+            }
+        }
+        if selected.is_none() {
+            let (hr_used, hr_probes) = query_hr_storage_memory_used_bytes(session)?;
+            selected = hr_used;
+            probes.extend(hr_probes);
+        }
 
         Ok((selected, probes))
     }
@@ -1427,106 +1570,152 @@ fn query_u32_with_table_fallback(
     query_table_first_u32(session, oid)
 }
 
-fn query_memory_pair_from_prefixes(
+fn query_template_column(
     session: &mut SyncSession,
-    used_prefix_str: &str,
-    free_prefix_str: &str,
-    total_prefix_str: &str,
-) -> (Option<f64>, Option<f64>, Option<f64>) {
-    let used_oid = parse_oid_string(used_prefix_str);
-    let free_oid = parse_oid_string(free_prefix_str);
-    let total_oid = parse_oid_string(total_prefix_str);
-
-    // 1. スカラー (GET 応答) を試みる
-    let used_scalar = used_oid
-        .as_ref()
-        .and_then(|oid| query_u32(session, oid).ok())
-        .map(|v| v as f64);
-    let free_scalar = free_oid
-        .as_ref()
-        .and_then(|oid| query_u32(session, oid).ok())
-        .map(|v| v as f64);
-    let total_scalar = total_oid
-        .as_ref()
-        .and_then(|oid| query_u32(session, oid).ok())
-        .map(|v| v as f64);
-
-    if used_scalar.is_some() || free_scalar.is_some() || total_scalar.is_some() {
-        return (used_scalar, free_scalar, total_scalar);
-    }
-
-    // 2. テーブル (GETNEXT) から全行を取得してインデックスごとにつなぐ
-    let used_rows: HashMap<u32, i64> = used_oid
-        .as_ref()
-        .and_then(|oid| query_table_i64_values(session, oid).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let free_rows: HashMap<u32, i64> = free_oid
-        .as_ref()
-        .and_then(|oid| query_table_i64_values(session, oid).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let total_rows: HashMap<u32, i64> = total_oid
-        .as_ref()
-        .and_then(|oid| query_table_i64_values(session, oid).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    if used_rows.is_empty() && free_rows.is_empty() && total_rows.is_empty() {
-        return (None, None, None);
-    }
-
-    let mut all_indices: Vec<u32> = used_rows
-        .keys()
-        .chain(free_rows.keys())
-        .chain(total_rows.keys())
-        .copied()
-        .collect();
-    all_indices.sort();
-    all_indices.dedup();
-
-    let mut best_used = None;
-    let mut best_free = None;
-    let mut best_total = None;
-    let mut max_capacity = 0i128;
-
-    for idx in all_indices {
-        let u = used_rows
-            .get(&idx)
-            .copied()
-            .filter(|&v| v >= 0)
-            .map(|v| v as f64);
-        let f = free_rows
-            .get(&idx)
-            .copied()
-            .filter(|&v| v >= 0)
-            .map(|v| v as f64);
-        let t = total_rows
-            .get(&idx)
-            .copied()
-            .filter(|&v| v >= 0)
-            .map(|v| v as f64);
-
-        let capacity = match (u, f, t) {
-            (Some(uv), Some(fv), _) => (uv + fv) as i128,
-            (Some(_), _, Some(tv)) => tv as i128,
-            _ => 0,
-        };
-
-        if capacity > max_capacity {
-            max_capacity = capacity;
-            best_used = u;
-            best_free = f;
-            best_total = t;
+    prefix: &[u32],
+) -> Result<std::collections::BTreeMap<Vec<u32>, SnmpValue>, AppError> {
+    let mut rows = std::collections::BTreeMap::new();
+    let mut current = prefix.to_vec();
+    for _ in 0..DEFAULT_WALK_MAX_VARBINDS {
+        let response = session.getnext(&current).map_err(|error| {
+            AppError::Io(format!(
+                "template walk {}: {error:?}",
+                oid_to_string(prefix)
+            ))
+        })?;
+        if response.error_status != 0 {
+            return Err(AppError::Io(format!(
+                "template walk {}: agent error {}",
+                oid_to_string(prefix),
+                response.error_status
+            )));
+        }
+        let mut advanced = false;
+        for (oid, value) in response.varbinds {
+            let mut buffer = [0u32; 128];
+            let oid = oid
+                .read_name(&mut buffer)
+                .map_err(|error| AppError::Io(format!("invalid template row OID: {error:?}")))?;
+            if matches!(value, Value::Null | Value::Constructed(0x82, _))
+                || !oid.starts_with(prefix)
+            {
+                return Ok(rows);
+            }
+            if oid <= current.as_slice() {
+                return Err(AppError::Io(format!(
+                    "non-increasing template row OID: {}",
+                    oid_to_string(oid)
+                )));
+            }
+            rows.insert(oid[prefix.len()..].to_vec(), SnmpValue::from_raw(&value));
+            current = oid.to_vec();
+            advanced = true;
+        }
+        if !advanced {
+            // snmp 0.2.2 exhausts the iterator for primitive endOfMibView values.
+            tracing::debug!(oid = %oid_to_string(prefix), rows = rows.len(), "Template walk has no further decodable varbinds");
+            return Ok(rows);
         }
     }
+    Err(AppError::Io(format!(
+        "template column {} exceeds {} rows",
+        oid_to_string(prefix),
+        DEFAULT_WALK_MAX_VARBINDS
+    )))
+}
 
-    (best_used, best_free, best_total)
+fn template_i64_column(
+    session: &mut SyncSession,
+    prefix: &[u32],
+) -> Result<std::collections::BTreeMap<Vec<u32>, i64>, AppError> {
+    Ok(query_template_column(session, prefix)?
+        .into_iter()
+        .filter_map(|(index, value)| {
+            let number = match value {
+                SnmpValue::Integer(value) => Some(value),
+                other => other.as_u64().and_then(|value| i64::try_from(value).ok()),
+            };
+            number.map(|value| (index, value))
+        })
+        .collect())
+}
+
+fn template_percentage(value: f64) -> Option<u32> {
+    (value.is_finite() && (0.0..=100.0).contains(&value)).then(|| value.round() as u32)
+}
+
+fn query_template_percentage(
+    session: &mut SyncSession,
+    oid: &str,
+    aggregation: PercentageAggregation,
+) -> Result<Option<u32>, AppError> {
+    let oid = parse_oid_string(oid)
+        .ok_or_else(|| AppError::Validation("invalid template percentage OID".into()))?;
+    if let Ok(value) = query_numeric_value(session, &oid) {
+        return Ok(value.as_f64().and_then(template_percentage));
+    }
+    let rows = query_template_column(session, &oid)?;
+    let mut values = rows
+        .values()
+        .filter_map(|value| value.as_u64())
+        .filter_map(|value| template_percentage(value as f64));
+    Ok(match aggregation {
+        PercentageAggregation::First => values.next(),
+        PercentageAggregation::Max => values.max(),
+    })
+}
+
+fn query_template_memory_source(
+    session: &mut SyncSession,
+    source: &crate::snmp::template::MemorySource,
+) -> Result<Option<(u32, Option<u64>)>, AppError> {
+    if source.mode == "direct" {
+        return Ok(
+            query_template_percentage(session, &source.oid, source.aggregation)?
+                .map(|value| (value, None)),
+        );
+    }
+    let column = |session: &mut SyncSession,
+                  raw: &str|
+     -> Result<std::collections::BTreeMap<Vec<u32>, u64>, AppError> {
+        if raw.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let oid = parse_oid_string(raw)
+            .ok_or_else(|| AppError::Validation("invalid memory column OID".into()))?;
+        if let Ok(value) = query_numeric_value(session, &oid) {
+            return Ok(value
+                .as_u64()
+                .map(|value| [(Vec::new(), value)].into_iter().collect())
+                .unwrap_or_default());
+        }
+        Ok(query_template_column(session, &oid)?
+            .into_iter()
+            .filter_map(|(index, value)| value.as_u64().map(|value| (index, value)))
+            .collect())
+    };
+    let used = column(session, &source.used_prefix)?;
+    let free = column(session, &source.free_prefix)?;
+    let total = column(session, &source.total_prefix)?;
+    Ok(used
+        .into_iter()
+        .filter_map(|(index, used)| {
+            let capacity = free
+                .get(&index)
+                .and_then(|free| used.checked_add(*free))
+                .or_else(|| total.get(&index).copied())?;
+            if capacity == 0 || used > capacity {
+                return None;
+            }
+            Some((used, capacity))
+        })
+        .max_by_key(|(_, capacity)| *capacity)
+        .map(|(used, capacity)| {
+            (
+                ((used as f64 / capacity as f64) * 100.0).round() as u32,
+                source.used_is_bytes.then_some(used),
+            )
+        }))
 }
 
 fn query_hr_storage_memory_used_and_total(
@@ -1813,9 +2002,9 @@ impl SnmpClient {
         let mut inventory = query_hardware_inventory_with_session(session, None)?;
 
         let template = self.templates.select(sys_object_id);
-        inventory
-            .sensors
-            .extend(self.query_sensors_from_template(session, template)?);
+        let template_inventory = self.query_sensors_from_template(session, template);
+        inventory.sensors.extend(template_inventory.sensors);
+        inventory.probes.extend(template_inventory.probes);
 
         if let Some(overrides) = &self.overrides {
             merge_manual_hardware_overrides(
@@ -1890,6 +2079,7 @@ fn merge_manual_hardware_overrides(
             status: None,
             status_text: Some("Normal".to_string()),
             is_alarm: false,
+            status_kind: None,
         });
     }
 }
@@ -1989,6 +2179,7 @@ fn query_hardware_inventory_with_session(
             status,
             status_text: None,
             is_alarm: matches!(status, Some(3) | Some(4) | Some(5)),
+            status_kind: None,
         });
     }
 
@@ -2034,6 +2225,7 @@ fn vendor_name_from_enterprise_id(enterprise_id: u32) -> Option<&'static str> {
     match enterprise_id {
         9 => Some("Cisco"),
         1182 => Some("Yamaha"),
+        2636 => Some("Juniper"),
         2078 => Some("Allied Telesis"),
         _ => None,
     }
@@ -2081,6 +2273,7 @@ pub struct SnmpHardwareSensor {
     pub status: Option<i64>,
     pub status_text: Option<String>,
     pub is_alarm: bool,
+    pub status_kind: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2130,6 +2323,134 @@ pub struct SnmpDiagnostics {
 mod template_collection_tests {
     use super::*;
     use std::net::UdpSocket;
+    use std::sync::atomic::Ordering;
+
+    struct TemplateAgent {
+        session: SyncSession,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<u32>>>>,
+        stop: std::sync::Arc<AtomicBool>,
+        server: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl TemplateAgent {
+        fn new(rows: Vec<(&str, Vec<u8>)>) -> Self {
+            let rows: std::collections::BTreeMap<_, _> = rows
+                .into_iter()
+                .map(|(oid, value)| (parse_oid_string(oid).unwrap(), value))
+                .collect();
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_millis(25)))
+                .unwrap();
+            let address = socket.local_addr().unwrap();
+            let stop = std::sync::Arc::new(AtomicBool::new(false));
+            let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let server_stop = stop.clone();
+            let server_requests = requests.clone();
+            let server = std::thread::spawn(move || {
+                while !server_stop.load(Ordering::Relaxed) {
+                    let mut buffer = [0u8; 2048];
+                    let (size, peer) = match socket.recv_from(&mut buffer) {
+                        Ok(value) => value,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            continue;
+                        }
+                        Err(error) => panic!("mock receive: {error}"),
+                    };
+                    let (message, _) = take_tlv(&buffer[..size]);
+                    let (version, rest) = take_tlv(&message[2..]);
+                    let (community, rest) = take_tlv(rest);
+                    let (request, _) = take_tlv(rest);
+                    let (request_id, rest) = take_tlv(&request[2..]);
+                    let (_, rest) = take_tlv(rest);
+                    let (_, rest) = take_tlv(rest);
+                    let (bindings, _) = take_tlv(rest);
+                    let (binding, _) = take_tlv(&bindings[2..]);
+                    let (oid, _) = take_tlv(&binding[2..]);
+                    assert_eq!(oid[2], 43);
+                    let mut requested = vec![1, 3];
+                    let mut arc = 0u32;
+                    for byte in &oid[3..] {
+                        arc = (arc << 7) | u32::from(byte & 0x7f);
+                        if byte & 0x80 == 0 {
+                            requested.push(arc);
+                            arc = 0;
+                        }
+                    }
+                    server_requests.lock().unwrap().push(requested.clone());
+                    let (returned, value) = if request[0] == 0xa0 {
+                        (
+                            requested.clone(),
+                            rows.get(&requested)
+                                .cloned()
+                                .unwrap_or_else(|| tlv(0x80, &[])),
+                        )
+                    } else {
+                        assert_eq!(request[0], 0xa1);
+                        rows.range((
+                            std::ops::Bound::Excluded(requested.clone()),
+                            std::ops::Bound::Unbounded,
+                        ))
+                        .next()
+                        .map(|(oid, value)| (oid.clone(), value.clone()))
+                        .unwrap_or_else(|| (requested.clone(), tlv(0x82, &[])))
+                    };
+                    let returned = encoded_oid(&oid_to_string(&returned));
+                    let bindings = tlv(0x30, &tlv(0x30, &[returned, value].concat()));
+                    let pdu = tlv(0xa2, &[request_id, &[2, 1, 0, 2, 1, 0], &bindings].concat());
+                    socket
+                        .send_to(&tlv(0x30, &[version, community, &pdu].concat()), peer)
+                        .unwrap();
+                }
+            });
+            Self {
+                session: SyncSession::new(
+                    &address.to_string(),
+                    b"public",
+                    Some(Duration::from_secs(1)),
+                    1,
+                )
+                .unwrap(),
+                requests,
+                stop,
+                server: Some(server),
+            }
+        }
+    }
+
+    impl Drop for TemplateAgent {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            self.server.take().unwrap().join().unwrap();
+        }
+    }
+
+    fn bundled_client() -> SnmpClient {
+        SnmpClient {
+            community: "public".into(),
+            overrides: None,
+            templates: std::sync::Arc::new(TemplateRegistry::load(
+                &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("templates")
+                    .join("absent"),
+            )),
+        }
+    }
+
+    fn unsigned(tag: u8, value: u64) -> Vec<u8> {
+        let bytes = value.to_be_bytes();
+        let start = bytes.iter().position(|byte| *byte != 0).unwrap_or(7);
+        let mut body = bytes[start..].to_vec();
+        if body[0] & 0x80 != 0 {
+            body.insert(0, 0);
+        }
+        tlv(tag, &body)
+    }
 
     fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
         assert!(body.len() < 128);
@@ -2168,6 +2489,14 @@ mod template_collection_tests {
         replies: Vec<(&'static str, Vec<u8>)>,
         error_status: u8,
     ) -> (SyncSession, std::thread::JoinHandle<()>) {
+        mock_session_with_returned_oid(replies, error_status, None)
+    }
+
+    fn mock_session_with_returned_oid(
+        replies: Vec<(&'static str, Vec<u8>)>,
+        error_status: u8,
+        returned_oid: Option<&'static str>,
+    ) -> (SyncSession, std::thread::JoinHandle<()>) {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -2189,7 +2518,9 @@ mod template_collection_tests {
                 let (binding, _) = take_tlv(&bindings[2..]);
                 let (oid, _) = take_tlv(&binding[2..]);
                 assert_eq!(oid, encoded_oid(expected_oid));
-                let returned_oid = if request[0] == 0xa1 {
+                let returned_oid = if let Some(returned_oid) = returned_oid {
+                    encoded_oid(returned_oid)
+                } else if request[0] == 0xa1 {
                     let mut next = parse_oid_string(expected_oid).unwrap();
                     *next.last_mut().unwrap() += 1;
                     encoded_oid(&oid_to_string(&next))
@@ -2363,6 +2694,330 @@ mod template_collection_tests {
         assert_eq!(
             indexed_oid(".1.3.6.1.2.1.2.2.1.10", 7).unwrap(),
             vec![1, 3, 6, 1, 2, 1, 2, 2, 1, 10, 7]
+        );
+    }
+
+    #[test]
+    fn yamaha_cpu_candidates_and_memory_keep_native_percentage_units() {
+        let client = bundled_client();
+        let sys_oid = Some("1.3.6.1.4.1.1182.1.53");
+        for candidate in [
+            "1.3.6.1.4.1.1182.2.1.5.0",
+            "1.3.6.1.4.1.1182.2.1.6.0",
+            "1.3.6.1.4.1.1182.2.1.7.0",
+        ] {
+            let mut agent = TemplateAgent::new(vec![
+                (candidate, unsigned(0x42, 37)),
+                ("1.3.6.1.4.1.1182.2.1.4.0", unsigned(0x42, 74)),
+            ]);
+            assert_eq!(
+                client.query_cpu_from_template(&mut agent.session, sys_oid),
+                Some(37)
+            );
+            assert_eq!(
+                client
+                    .query_memory_usage(&mut agent.session, sys_oid)
+                    .unwrap(),
+                Some(74)
+            );
+        }
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.4.1.1182.2.1.5.0", unsigned(0x42, 0)),
+            ("1.3.6.1.4.1.1182.2.1.6.0", unsigned(0x42, 99)),
+        ]);
+        assert_eq!(
+            client.query_cpu_from_template(&mut agent.session, sys_oid),
+            Some(0)
+        );
+        assert_eq!(agent.requests.lock().unwrap().len(), 1);
+        let (value, probes) = client
+            .diagnose_cpu_vendor_candidates(&mut agent.session, sys_oid, None)
+            .unwrap();
+        assert_eq!(value, Some(0));
+        assert_eq!(probes.iter().filter(|probe| probe.selected).count(), 1);
+        assert!(probes[0].selected);
+    }
+
+    #[test]
+    fn rejects_invalid_percentages_instead_of_clamping_or_wrapping() {
+        let client = bundled_client();
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.4.1.1182.2.1.5.0", unsigned(0x42, 200)),
+            ("1.3.6.1.4.1.1182.2.1.6.0", tlv(0x02, &[0xff])),
+            ("1.3.6.1.4.1.1182.2.1.7.0", unsigned(0x42, 55)),
+        ]);
+        assert_eq!(
+            client.query_cpu_from_template(&mut agent.session, Some("1.3.6.1.4.1.1182.1")),
+            Some(55)
+        );
+        for value in [-1.0, 100.1, f64::INFINITY, f64::NAN] {
+            assert_eq!(template_percentage(value), None);
+        }
+        assert_eq!(template_percentage(0.0), Some(0));
+        assert_eq!(template_percentage(100.0), Some(100));
+    }
+
+    #[test]
+    fn cisco_cpu_prefers_one_minute_total_then_core_and_uses_max_valid_row() {
+        let client = bundled_client();
+        let sys_oid = Some("1.3.6.1.4.1.9.1.1");
+        for total_supported in [true, false] {
+            let mut rows = vec![
+                ("1.3.6.1.4.1.9.9.109.1.1.2.1.4.1.1", unsigned(0x42, 0)),
+                ("1.3.6.1.4.1.9.9.109.1.1.2.1.4.2.1", unsigned(0x42, 92)),
+            ];
+            if total_supported {
+                rows.extend([
+                    ("1.3.6.1.4.1.9.9.109.1.1.1.1.7.1", unsigned(0x42, 10)),
+                    ("1.3.6.1.4.1.9.9.109.1.1.1.1.7.2", unsigned(0x42, 55)),
+                    ("1.3.6.1.4.1.9.9.109.1.1.1.1.7.3", unsigned(0x42, 101)),
+                ]);
+            }
+            let mut agent = TemplateAgent::new(rows);
+            assert_eq!(
+                client.query_cpu_from_template(&mut agent.session, sys_oid),
+                Some(if total_supported { 55 } else { 92 })
+            );
+        }
+    }
+
+    #[test]
+    fn cisco_memory_joins_complete_indices_and_reports_same_pool_used_bytes() {
+        let client = bundled_client();
+        let sys_oid = Some("1.3.6.1.4.1.9.1");
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.4.1.9.9.221.1.1.1.1.7.1.1", unsigned(0x42, 100)),
+            ("1.3.6.1.4.1.9.9.221.1.1.1.1.8.1.1", unsigned(0x42, 300)),
+            ("1.3.6.1.4.1.9.9.221.1.1.1.1.7.2.1", unsigned(0x42, 900)),
+            ("1.3.6.1.4.1.9.9.221.1.1.1.1.8.2.1", unsigned(0x42, 100)),
+            ("1.3.6.1.4.1.9.9.221.1.1.1.1.7.3.1", unsigned(0x42, 9999)),
+        ]);
+        assert_eq!(
+            client
+                .query_memory_usage(&mut agent.session, sys_oid)
+                .unwrap(),
+            Some(90)
+        );
+        assert_eq!(
+            client
+                .query_memory_used_bytes(&mut agent.session, sys_oid)
+                .unwrap(),
+            Some(900)
+        );
+        let (value, probes) = client
+            .diagnose_memory_candidates(&mut agent.session, sys_oid)
+            .unwrap();
+        assert_eq!(value, Some(90));
+        assert!(probes[0].selected);
+        assert!(probes[0].oid.contains(".221."));
+    }
+
+    #[test]
+    fn cisco_memory_falls_back_to_legacy_and_preserves_zero_and_counter64() {
+        let client = bundled_client();
+        let sys_oid = Some("1.3.6.1.4.1.9.1");
+        for used in [0, 30, 5_000_000_000] {
+            let free = if used == 5_000_000_000 {
+                used
+            } else {
+                100 - used
+            };
+            let mut agent = TemplateAgent::new(vec![
+                ("1.3.6.1.4.1.9.9.221.1.1.1.1.7.1.1", unsigned(0x42, 0)),
+                ("1.3.6.1.4.1.9.9.221.1.1.1.1.8.1.1", unsigned(0x42, 0)),
+                ("1.3.6.1.4.1.9.9.48.1.1.1.5.1", unsigned(0x46, used)),
+                ("1.3.6.1.4.1.9.9.48.1.1.1.6.1", unsigned(0x46, free)),
+            ]);
+            assert_eq!(
+                client
+                    .query_memory_usage(&mut agent.session, sys_oid)
+                    .unwrap(),
+                Some(if used > 100 { 50 } else { used as u32 })
+            );
+            assert_eq!(
+                client
+                    .query_memory_used_bytes(&mut agent.session, sys_oid)
+                    .unwrap(),
+                Some(used)
+            );
+        }
+    }
+
+    #[test]
+    fn juniper_uses_max_percentage_and_keeps_four_component_sensor_rows() {
+        let client = bundled_client();
+        let sys_oid = Some("1.3.6.1.4.1.2636.1.1");
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.4.1.2636.3.1.13.1.8.1.1.0.0", unsigned(0x42, 0)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.8.2.1.0.0", unsigned(0x42, 80)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.11.1.1.0.0", unsigned(0x42, 0)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.11.2.1.0.0", unsigned(0x42, 65)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.12.2.1.0.0", unsigned(0x42, 99)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.7.1.1.0.0", unsigned(0x42, 31)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.7.2.1.0.0", unsigned(0x42, 42)),
+            ("1.3.6.1.4.1.2636.3.1.13.1.5.1.1.0.0", tlv(0x04, b"RE 0")),
+            ("1.3.6.1.4.1.2636.3.1.13.1.5.2.1.0.0", tlv(0x04, b"RE 1")),
+            (
+                "1.3.6.1.4.1.2636.3.1.15.1.5.1.1.0.0",
+                tlv(0x04, b"Power Supply 0"),
+            ),
+            (
+                "1.3.6.1.4.1.2636.3.1.15.1.5.2.1.0.0",
+                tlv(0x04, b"Fan Tray 0"),
+            ),
+            (
+                "1.3.6.1.4.1.2636.3.1.15.1.5.3.1.0.0",
+                tlv(0x04, b"Routing Engine"),
+            ),
+            ("1.3.6.1.4.1.2636.3.1.15.1.8.1.1.0.0", unsigned(0x02, 6)),
+            ("1.3.6.1.4.1.2636.3.1.15.1.8.2.1.0.0", unsigned(0x02, 8)),
+            ("1.3.6.1.4.1.2636.3.1.15.1.8.3.1.0.0", unsigned(0x02, 6)),
+        ]);
+        assert_eq!(
+            client.query_cpu_from_template(&mut agent.session, sys_oid),
+            Some(80)
+        );
+        assert_eq!(
+            client
+                .query_memory_usage(&mut agent.session, sys_oid)
+                .unwrap(),
+            Some(65)
+        );
+        let template = client.templates.select(sys_oid);
+        assert!(
+            template
+                .memory
+                .sources()
+                .all(|source| !source.used_is_bytes)
+        );
+        let inventory = client.query_sensors_from_template(&mut agent.session, template);
+        assert_eq!(inventory.sensors.len(), 4);
+        let temperatures: Vec<_> = inventory
+            .sensors
+            .iter()
+            .filter(|sensor| sensor.sensor_type == "temperature")
+            .collect();
+        assert_eq!(temperatures.len(), 2);
+        assert_eq!(temperatures[0].name, "RE 0");
+        assert_eq!(temperatures[1].name, "RE 1");
+        assert_eq!(temperatures[0].value, Some(31));
+        assert_eq!(temperatures[1].value, Some(42));
+        assert!(temperatures[0].oid.ends_with(".1.1.0.0"));
+        assert!(temperatures[1].oid.ends_with(".2.1.0.0"));
+        assert!(temperatures.iter().all(|sensor| sensor.status.is_none()));
+        let power = inventory
+            .sensors
+            .iter()
+            .find(|sensor| sensor.sensor_type == "power")
+            .unwrap();
+        assert!(!power.is_alarm);
+        assert_eq!(power.status_kind.as_deref(), Some("normal"));
+        assert_eq!(power.unit, None);
+        let fan = inventory
+            .sensors
+            .iter()
+            .find(|sensor| sensor.sensor_type == "fan")
+            .unwrap();
+        assert!(fan.is_alarm);
+        assert_eq!(fan.status_text.as_deref(), Some("Offline"));
+    }
+
+    #[test]
+    fn cisco_fru_power_on_is_normal_and_failure_is_alarm_without_phantom_entities() {
+        let client = bundled_client();
+        let template = client.templates.select(Some("1.3.6.1.4.1.9.1"));
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.2.1.47.1.1.1.1.7.1", tlv(0x04, b"Chassis")),
+            ("1.3.6.1.2.1.47.1.1.1.1.7.10", tlv(0x04, b"PSU 1")),
+            ("1.3.6.1.2.1.47.1.1.1.1.7.11", tlv(0x04, b"PSU 2")),
+            ("1.3.6.1.2.1.47.1.1.1.1.7.12", tlv(0x04, b"PSU 3")),
+            ("1.3.6.1.2.1.47.1.1.1.1.7.13", tlv(0x04, b"PSU 4")),
+            ("1.3.6.1.4.1.9.9.117.1.1.2.1.2.10", unsigned(0x02, 2)),
+            ("1.3.6.1.4.1.9.9.117.1.1.2.1.2.11", unsigned(0x02, 8)),
+            ("1.3.6.1.4.1.9.9.117.1.1.2.1.2.12", unsigned(0x02, 3)),
+            ("1.3.6.1.4.1.9.9.117.1.1.2.1.2.13", unsigned(0x02, 99)),
+        ]);
+        let inventory = client.query_sensors_from_template(&mut agent.session, template);
+        assert_eq!(inventory.sensors.len(), 4);
+        assert_eq!(inventory.sensors[0].name, "PSU 1");
+        assert_eq!(inventory.sensors[0].status_text.as_deref(), Some("On"));
+        assert_eq!(inventory.sensors[0].status_kind.as_deref(), Some("normal"));
+        assert!(!inventory.sensors[0].is_alarm);
+        assert!(inventory.sensors[1].is_alarm);
+        assert_eq!(inventory.sensors[1].status_text.as_deref(), Some("Failed"));
+        assert!(!inventory.sensors[2].is_alarm);
+        assert_eq!(inventory.sensors[2].status_kind.as_deref(), Some("warning"));
+        assert_eq!(
+            inventory.sensors[3].status_text.as_deref(),
+            Some("Unknown (99)")
+        );
+        assert!(
+            inventory
+                .sensors
+                .iter()
+                .all(|sensor| sensor.unit.is_none() && sensor.value.is_none())
+        );
+    }
+
+    #[test]
+    fn template_walk_rejects_non_increasing_rows_and_reports_sensor_agent_errors() {
+        let oid = "1.3.6.1.2.1.1.3";
+        let (mut session, server) =
+            mock_session_with_returned_oid(vec![(oid, unsigned(0x42, 42))], 0, Some(oid));
+        assert!(
+            query_template_column(&mut session, &parse_oid_string(oid).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("non-increasing")
+        );
+        server.join().unwrap();
+        let client = bundled_client();
+        let template = client.templates.select(Some("1.3.6.1.4.1.9.1"));
+        let (mut session, server) = mock_session_with_status(
+            vec![("1.3.6.1.4.1.9.9.117.1.1.2.1.2", unsigned(0x02, 2))],
+            16,
+        );
+        let inventory = client.query_sensors_from_template(&mut session, template);
+        server.join().unwrap();
+        assert!(inventory.sensors.is_empty());
+        assert_eq!(inventory.probes.len(), 1);
+        assert_eq!(inventory.probes[0].value, None);
+        assert!(!inventory.probes[0].selected);
+        assert!(inventory.probes[0].status.contains("agent error 16"));
+    }
+
+    #[test]
+    fn legacy_scalar_memory_and_envmon_sensor_configuration_remain_compatible() {
+        let source: crate::snmp::template::MemoryTemplate = toml::from_str(
+            "mode = 'calculated'\nused_oid = '1.3.6.1.2.1.1.3.0'\nfree_oid = '1.3.6.1.2.1.1.4.0'",
+        )
+        .unwrap();
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.2.1.1.3.0", unsigned(0x42, 0)),
+            ("1.3.6.1.2.1.1.4.0", unsigned(0x42, 100)),
+        ]);
+        assert_eq!(
+            query_template_memory_source(&mut agent.session, &source.primary).unwrap(),
+            Some((0, None))
+        );
+        let template: VendorOidTemplate = toml::from_str(
+            "name = 'Legacy'\n[[sensors.power]]\nstate_prefix = '1.3.6.1.4.1.65000.1'",
+        )
+        .unwrap();
+        let mut agent = TemplateAgent::new(vec![
+            ("1.3.6.1.4.1.65000.1.1", unsigned(0x02, 1)),
+            ("1.3.6.1.4.1.65000.1.2", unsigned(0x02, 2)),
+        ]);
+        let inventory = bundled_client().query_sensors_from_template(&mut agent.session, &template);
+        assert_eq!(inventory.sensors.len(), 2);
+        assert_eq!(inventory.sensors[0].status_text.as_deref(), Some("Normal"));
+        assert!(!inventory.sensors[0].is_alarm);
+        assert!(inventory.sensors[1].is_alarm);
+        assert!(
+            inventory
+                .sensors
+                .iter()
+                .all(|sensor| sensor.status_kind.is_none())
         );
     }
 }

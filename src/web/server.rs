@@ -1523,7 +1523,7 @@ fn api_device_detail(
         let unit = s.unit.as_deref().unwrap_or("");
         let status = s.status.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
         format!(
-            r#"{{"index":{},"name":"{}","sensor_type":"{}","source":"{}","oid":"{}","value":{},"unit":"{}","status":{},"status_text":"{}","is_alarm":{}}}"#,
+            r#"{{"index":{},"name":"{}","sensor_type":"{}","source":"{}","oid":"{}","value":{},"unit":"{}","status":{},"status_text":"{}","is_alarm":{},"status_kind":"{}"}}"#,
             s.index,
             escape_json(&s.name),
             escape_json(&s.sensor_type),
@@ -1534,6 +1534,7 @@ fn api_device_detail(
             status,
             escape_json(s.status_text.as_deref().unwrap_or("")),
             s.is_alarm,
+            escape_json(s.status_kind.as_deref().unwrap_or("")),
         )
     }).collect();
 
@@ -3786,7 +3787,7 @@ const SETTINGS_HTML: &str = "<main>
 
 <div class='settings-section'>
   <h2 data-i18n='snmp'>SNMP</h2>
-  <p class='field-hint' data-i18n='snmp_template_disclaimer'>TracePulse monitors standard RFC-compliant metrics by default. When configuring proprietary vendor OIDs or importing third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.</p>
+  <p class='field-hint' data-i18n='snmp_template_disclaimer'>TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.</p>
   <div class='field-row'>
     <div class='field-group'>
       <label data-i18n='default_community'>Default Community String</label>

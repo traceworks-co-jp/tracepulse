@@ -68,7 +68,7 @@ the release assets once a representative monitoring dataset is available.
 - **Embedded WebGUI**
   - Web dashboard featuring multi-device monitoring, real-time charts for bandwidth, error counters, and CPU/memory utilization, as well as auto-generated topology maps via LLDP/CDP.
 - **Template-Driven Multi-Vendor Support**
-  - RFC-standard defaults are embedded in the binary. Add your own numeric-OID TOML definitions under `custom_templates/`; raw MIB files are never parsed. See [SNMP template specification](docs/design/03-snmp-collection.md).
+  - RFC-standard defaults and Cisco, Yamaha RT, and Juniper numeric-OID templates are embedded in the binary. Add or override vendor definitions under `custom_templates/`; raw MIB files are never parsed. See [SNMP template specification](docs/design/03-snmp-collection.md).
 - **Network Discovery & Topology Detection**
   - Parallel CIDR host scanning and automated neighbor port discovery via LLDP and CDP.
 - **Health Scoring & Anomaly Detection**
@@ -105,13 +105,13 @@ separate TracePulse Enterprise package through the notification provider API.
 
 ### Supported vendors (OID templates)
 
-TracePulse bundles only RFC-standard numeric OID definitions. Vendor-specific definitions are user-supplied (BYO), not distributed in the repository, release archives, or Docker image. Place legally obtained TOML templates in `TRACEPULSE_DATA_DIR/custom_templates` (beside the executable when the variable is unset), then restart.
+TracePulse bundles RFC-standard monitoring plus numeric-OID templates for [Cisco](templates/cisco.toml), [Yamaha RT](templates/yamaha.toml), and [Juniper](templates/juniper.toml) in the binary, release archives, and Docker image. Templates are automatically selected by sysObjectID. Place legally obtained additional TOML templates in `TRACEPULSE_DATA_DIR/custom_templates` (beside the executable when the variable is unset), then restart. A custom template with the same selector replaces its bundled vendor definition; a more specific selector takes precedence.
 
 Devices without a dedicated template can still be monitored through the `generic.toml` template, which relies on standard MIBs (IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB, etc.).
 
-> TracePulse monitors standard RFC-compliant metrics by default. When configuring proprietary vendor OIDs or importing third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.
+> TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.
 
-See the [template schema, Docker mount example, and migration guide](docs/design/03-snmp-collection.md). Legacy vendor metric auto-probes are disabled; LLDP/CDP topology discovery is retained separately.
+See the [template schema, OID sources, Docker mount example, and migration guide](docs/design/03-snmp-collection.md). Vendor metric collection is defined in TOML, not hard-coded probes; LLDP/CDP topology discovery is retained separately. The new vendor definitions are tested with mock SNMP agents, not certified across physical device models.
 
 ### Verified hardware
 
@@ -443,7 +443,7 @@ TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検�
 - **直感的な WebGUI**
   - ブラウザから複数台の監視、帯域・エラー・CPU/メモリ使用率のリアルタイムグラフ、LLDP/CDP による自動トポロジー描画が可能。
 - **テンプレート駆動マルチベンダー対応**
-  - RFC 標準定義をバイナリに内蔵。独自の数値 OID 定義は `custom_templates/*.toml` で追加できます。生 MIB の解析は行いません。[SNMP テンプレート仕様](docs/design/03-snmp-collection.md)を参照してください。
+  - RFC 標準と Cisco・Yamaha RT・Juniper の数値 OID 定義をバイナリに内蔵。`custom_templates/*.toml` でベンダー定義を追加・上書きできます。生 MIB の解析は行いません。[SNMP テンプレート仕様](docs/design/03-snmp-collection.md)を参照してください。
 - **自動探索＆トポロジー認識 (Discovery)**
   - CIDR 並列スキャンと LLDP / CDP 隣接情報取得による対向機器・対向ポートの自動マッピング。
 - **障害予兆＆健全度スコアリング**
@@ -466,7 +466,7 @@ Community 版はアラートを記録・表示しますが、外部への通知�
 
 ### 対応ベンダー（OID テンプレート提供）
 
-公式同梱は RFC 標準の数値 OID 定義のみです。ベンダー固有定義は公式リポジトリ・配布アーカイブ・Docker イメージに含めません。利用者が適法に用意した TOML を `TRACEPULSE_DATA_DIR/custom_templates`（環境変数未指定時は実行ファイルと同じ場所の `custom_templates`）に配置して再起動してください。
+RFC 標準に加え、[Cisco](templates/cisco.toml)・[Yamaha RT](templates/yamaha.toml)・[Juniper](templates/juniper.toml) の数値 OID テンプレートをバイナリ・配布アーカイブ・Docker イメージに公式同梱し、sysObjectID で自動選択します。追加の TOML は利用権を確認した上で `TRACEPULSE_DATA_DIR/custom_templates`（環境変数未指定時は実行ファイルと同じ場所の `custom_templates`）に配置して再起動してください。同一セレクターの BYO 定義は内蔵ベンダー定義を置き換え、より具体的なセレクターがあればそちらを優先します。今回の追加定義は模擬 SNMP エージェントで検証しており、全機種での実機動作を保証するものではありません。
 
 専用テンプレートがない機器でも、標準 MIB（IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB 等）に対応していれば `generic.toml` テンプレートで監視できます。
 

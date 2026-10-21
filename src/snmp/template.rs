@@ -308,11 +308,30 @@ fn default_metric_min_period_days() -> f64 {
 pub struct CpuTemplate {
     #[serde(default)]
     pub candidates: Vec<String>,
+    #[serde(default)]
+    pub aggregation: PercentageAggregation,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PercentageAggregation {
+    #[default]
+    First,
+    Max,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryTemplate {
+    #[serde(flatten)]
+    pub primary: MemorySource,
+    #[serde(default)]
+    pub fallbacks: Vec<MemorySource>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemorySource {
     #[serde(default)]
     pub mode: String,
     #[serde(default, alias = "util_prefix")]
@@ -323,6 +342,16 @@ pub struct MemoryTemplate {
     pub free_prefix: String,
     #[serde(default, alias = "total_oid")]
     pub total_prefix: String,
+    #[serde(default)]
+    pub aggregation: PercentageAggregation,
+    #[serde(default)]
+    pub used_is_bytes: bool,
+}
+
+impl MemoryTemplate {
+    pub fn sources(&self) -> impl Iterator<Item = &MemorySource> {
+        std::iter::once(&self.primary).chain(&self.fallbacks)
+    }
 }
 
 impl MemoryTemplate {
@@ -369,6 +398,14 @@ pub struct SensorGroupTemplate {
     pub state_prefix: String,
     #[serde(default)]
     pub fallback_builtin_power: bool,
+    #[serde(default)]
+    pub alarm_states: Option<Vec<i64>>,
+    #[serde(default)]
+    pub normal_states: Vec<i64>,
+    #[serde(default)]
+    pub state_labels: HashMap<String, String>,
+    #[serde(default)]
+    pub match_names: Vec<String>,
 }
 
 impl VendorOidTemplate {
@@ -380,30 +417,38 @@ impl VendorOidTemplate {
         if let Some(prefix) = &self.sys_object_id_prefix {
             oids.push(prefix.strip_suffix('.').unwrap_or(prefix));
         }
-        for oid in [
-            &self.memory.oid,
-            &self.memory.used_prefix,
-            &self.memory.free_prefix,
-            &self.memory.total_prefix,
-        ] {
-            if !oid.is_empty() {
-                oids.push(oid);
+        for memory in self.memory.sources() {
+            for oid in [
+                &memory.oid,
+                &memory.used_prefix,
+                &memory.free_prefix,
+                &memory.total_prefix,
+            ] {
+                if !oid.is_empty() {
+                    oids.push(oid);
+                }
             }
-        }
-        if !matches!(self.memory.mode.as_str(), "" | "direct" | "calculated") {
-            return Err("memory mode must be direct or calculated".into());
-        }
-        if self.memory.mode == "direct" && self.memory.oid.is_empty() {
-            return Err("direct memory mode requires oid".into());
-        }
-        if self.memory.mode == "calculated"
-            && (self.memory.used_prefix.is_empty()
-                || (self.memory.free_prefix.is_empty() && self.memory.total_prefix.is_empty()))
-        {
-            return Err(
-                "calculated memory mode requires used_prefix and free_prefix or total_prefix"
-                    .into(),
-            );
+            if !matches!(memory.mode.as_str(), "" | "direct" | "calculated") {
+                return Err("memory mode must be direct or calculated".into());
+            }
+            if memory.mode == "direct" && memory.oid.is_empty() {
+                return Err("direct memory mode requires oid".into());
+            }
+            if memory.mode == "calculated"
+                && (memory.used_prefix.is_empty()
+                    || (memory.free_prefix.is_empty() && memory.total_prefix.is_empty()))
+            {
+                return Err(
+                    "calculated memory mode requires used_prefix and free_prefix or total_prefix"
+                        .into(),
+                );
+            }
+            if memory.used_is_bytes && memory.mode != "calculated" {
+                return Err("used_is_bytes requires calculated memory mode".into());
+            }
+            if memory.mode != "direct" && memory.aggregation != PercentageAggregation::First {
+                return Err("memory aggregation is only supported in direct mode".into());
+            }
         }
         for group in self.sensors.values().flatten() {
             for oid in [
@@ -417,6 +462,24 @@ impl VendorOidTemplate {
             }
             if group.fallback_builtin_power {
                 return Err("synthetic built-in power readings are not supported".into());
+            }
+            if group.state_labels.iter().any(|(key, label)| {
+                key.parse::<i64>()
+                    .map_or(true, |value| value.to_string() != *key)
+                    || label.trim().is_empty()
+            }) || group.normal_states.iter().any(|value| {
+                group
+                    .alarm_states
+                    .as_deref()
+                    .unwrap_or(&[2, 3, 4, 6])
+                    .contains(value)
+            }) || group.match_names.iter().any(|name| name.trim().is_empty())
+                || (group.state_prefix.is_empty()
+                    && (!group.state_labels.is_empty()
+                        || group.alarm_states.is_some()
+                        || !group.normal_states.is_empty()))
+            {
+                return Err("invalid sensor state mapping or name filter".into());
             }
         }
         let mut keys = std::collections::HashSet::new();
@@ -482,12 +545,16 @@ pub struct TemplateRegistry {
 
 impl TemplateRegistry {
     pub fn load(dir: &Path) -> Self {
-        let generic: VendorOidTemplate =
-            toml::from_str(include_str!("../../templates/generic.toml"))
-                .expect("bundled RFC template must be valid");
-        let mut registry = Self {
-            templates: vec![generic],
-        };
+        let templates = [
+            include_str!("../../templates/generic.toml"),
+            include_str!("../../templates/cisco.toml"),
+            include_str!("../../templates/yamaha.toml"),
+            include_str!("../../templates/juniper.toml"),
+        ]
+        .into_iter()
+        .map(|content| toml::from_str(content).expect("bundled template must be valid"))
+        .collect();
+        let mut registry = Self { templates };
         let mut paths = match std::fs::read_dir(dir) {
             Ok(entries) => entries
                 .filter_map(|entry| match entry {
@@ -508,6 +575,7 @@ impl TemplateRegistry {
             }
         };
         paths.sort();
+        let mut custom_selectors = std::collections::HashSet::new();
         for path in paths {
             if path.extension().and_then(|value| value.to_str()) != Some("toml") {
                 continue;
@@ -520,18 +588,6 @@ impl TemplateRegistry {
             match result {
                 Ok(template) => {
                     let selector = template.selector();
-                    if registry
-                        .templates
-                        .iter()
-                        .any(|existing| existing.selector() == selector)
-                    {
-                        tracing::error!(
-                            "[Template] Duplicate selector '{}' in {:?}; ignored",
-                            selector,
-                            path
-                        );
-                        continue;
-                    }
                     if selector.is_empty() {
                         tracing::error!(
                             "[Template] Custom template {:?} requires sysObjectID_prefix or enterprise_id",
@@ -539,8 +595,29 @@ impl TemplateRegistry {
                         );
                         continue;
                     }
+                    if !custom_selectors.insert(selector.clone()) {
+                        tracing::error!(
+                            "[Template] Duplicate custom selector '{}' in {:?}; ignored",
+                            selector,
+                            path
+                        );
+                        continue;
+                    }
                     tracing::info!("[Template] Loaded {:?}: {}", path, template.name);
-                    registry.templates.push(template);
+                    if let Some(existing) = registry
+                        .templates
+                        .iter_mut()
+                        .find(|existing| existing.selector() == selector)
+                    {
+                        tracing::warn!(
+                            "[Template] Replacing selector '{}' from {:?}",
+                            selector,
+                            path
+                        );
+                        *existing = template;
+                    } else {
+                        registry.templates.push(template);
+                    }
                 }
                 Err(error) => tracing::error!("[Template] Invalid {:?}: {}", path, error),
             }
@@ -593,8 +670,8 @@ mod tests {
             oid = "1.3.6.1.4.1.12356.101.4.1.4"
         "#;
         let template: VendorOidTemplate = toml::from_str(toml_str).unwrap();
-        assert_eq!(template.memory.mode, "direct");
-        assert_eq!(template.memory.oid, "1.3.6.1.4.1.12356.101.4.1.4");
+        assert_eq!(template.memory.primary.mode, "direct");
+        assert_eq!(template.memory.primary.oid, "1.3.6.1.4.1.12356.101.4.1.4");
 
         let util = MemoryTemplate::calculate_utilization("direct", Some(45.0), None, None, None);
         assert_eq!(util, Some(45.0));
@@ -611,9 +688,15 @@ mod tests {
             free_oid = "1.3.6.1.4.1.9.9.48.1.1.1.6"
         "#;
         let template: VendorOidTemplate = toml::from_str(toml_str).unwrap();
-        assert_eq!(template.memory.mode, "calculated");
-        assert_eq!(template.memory.used_prefix, "1.3.6.1.4.1.9.9.48.1.1.1.5");
-        assert_eq!(template.memory.free_prefix, "1.3.6.1.4.1.9.9.48.1.1.1.6");
+        assert_eq!(template.memory.primary.mode, "calculated");
+        assert_eq!(
+            template.memory.primary.used_prefix,
+            "1.3.6.1.4.1.9.9.48.1.1.1.5"
+        );
+        assert_eq!(
+            template.memory.primary.free_prefix,
+            "1.3.6.1.4.1.9.9.48.1.1.1.6"
+        );
 
         // Used=42MB, Free=58MB -> 42.0%
         let util =
@@ -670,8 +753,8 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(profile.memory.mode, "direct");
-        assert_eq!(profile.memory.oid, "1.3.6.1.4.1.65001.1.0");
+        assert_eq!(profile.memory.primary.mode, "direct");
+        assert_eq!(profile.memory.primary.oid, "1.3.6.1.4.1.65001.1.0");
         assert!(profile.metrics.is_empty());
     }
 
@@ -699,19 +782,99 @@ mod tests {
     }
 
     #[test]
-    fn bundles_only_standard_numeric_definitions() {
+    fn bundles_standard_and_approved_vendor_definitions() {
         let template_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
         let files: Vec<_> = std::fs::read_dir(template_dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
             .collect();
-        assert_eq!(files.len(), 1);
-        let content = std::fs::read_to_string(&files[0]).unwrap();
+        assert_eq!(files.len(), 4);
+        for file in &files {
+            toml::from_str::<VendorOidTemplate>(&std::fs::read_to_string(file).unwrap()).unwrap();
+        }
+        let content = std::fs::read_to_string(
+            files
+                .iter()
+                .find(|file| file.file_name().unwrap() == "generic.toml")
+                .unwrap(),
+        )
+        .unwrap();
         let generic: VendorOidTemplate = toml::from_str(&content).unwrap();
         assert_eq!(generic.enterprise_id, 0);
         assert!(!content.contains("1.3.6.1.4.1."));
         assert!(generic.tables.interfaces.is_some());
+        let registry = TemplateRegistry::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("templates")
+                .join("absent"),
+        );
+        for (id, name) in [
+            (9, "Cisco Network Device"),
+            (1182, "Yamaha RT Series"),
+            (2636, "Juniper Network Device"),
+        ] {
+            assert_eq!(
+                registry.select(Some(&format!("1.3.6.1.4.1.{id}.1"))).name,
+                name
+            );
+        }
+        assert_eq!(
+            registry.select(Some("1.3.6.1.4.1.999999.1")).enterprise_id,
+            0
+        );
+    }
+
+    #[test]
+    fn custom_vendor_override_preserves_rfc_fallback_and_first_custom_wins() {
+        let dir = TestDirectory::new();
+        dir.write(
+            "a.toml",
+            "name = 'My Cisco'\nenterprise_id = 9\n[cpu]\ncandidates = ['1.3.6.1.4.1.9.1.0']",
+        );
+        dir.write(
+            "b.toml",
+            "name = 'Duplicate'\nsysObjectID_prefix = '.1.3.6.1.4.1.9.'",
+        );
+        dir.write(
+            "model.toml",
+            "name = 'My Cisco model'\nsysObjectID_prefix = '1.3.6.1.4.1.9.1.2'",
+        );
+        let registry = TemplateRegistry::load(&dir.0);
+        assert_eq!(registry.select(Some("1.3.6.1.4.1.9.1")).name, "My Cisco");
+        assert_eq!(
+            registry.select(Some("1.3.6.1.4.1.9.1.2.3")).name,
+            "My Cisco model"
+        );
+        assert_eq!(registry.select(None).enterprise_id, 0);
+        assert_eq!(
+            registry.select(Some("1.3.6.1.4.1.2636.1")).enterprise_id,
+            2636
+        );
+    }
+
+    #[test]
+    fn validates_memory_fallbacks_and_sensor_state_configuration() {
+        for suffix in [
+            "[cpu]\naggregation = 'average'",
+            "[memory]\nunknown = true",
+            "[memory]\nmode = 'direct'\noid = '1.3.6.1.2.1.1.3.0'\nused_is_bytes = true",
+            "[[memory.fallbacks]]\nmode = 'direct'",
+            "[[memory.fallbacks]]\nmode = 'calculated'\nused_prefix = 'symbolic'\nfree_prefix = '1.3.6.1.2.1.1.3.0'",
+            "[[sensors.power]]\nstate_labels = { bad = 'Bad' }",
+            "[[sensors.power]]\nalarm_states = [2]\nnormal_states = [2]",
+            "[[sensors.power]]\nmatch_names = ['']",
+        ] {
+            assert!(
+                toml::from_str::<VendorOidTemplate>(&format!("name = 'Bad'\n{suffix}")).is_err(),
+                "{suffix}"
+            );
+        }
+        let vendor: VendorOidTemplate =
+            toml::from_str(include_str!("../../templates/cisco.toml")).unwrap();
+        assert_eq!(vendor.memory.sources().count(), 2);
+        assert!(vendor.memory.primary.used_is_bytes);
+        assert_eq!(vendor.sensors["power"][0].normal_states, vec![2]);
     }
 
     struct TestDirectory(std::path::PathBuf);
@@ -791,7 +954,7 @@ data_type = "gauge"
             "name = 'Bad'\nenterprise_id = 65001\n[cpu]\ncandidates = ['IF-MIB::ifIndex']",
         );
         let registry = TemplateRegistry::load(&dir.0);
-        assert_eq!(registry.templates.len(), 2);
+        assert_eq!(registry.templates.len(), 5);
         assert_eq!(registry.select(Some("1.3.6.1.4.1.65000.1")).name, "First");
         assert_eq!(
             registry.select(Some("1.3.6.1.4.1.65001.1")).enterprise_id,

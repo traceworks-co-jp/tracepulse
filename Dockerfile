@@ -10,7 +10,7 @@ FROM rust:1-slim-trixie AS backend
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY templates/generic.toml ./templates/generic.toml
+COPY templates ./templates
 COPY frontend/assets ./frontend/assets
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 RUN cargo build --release --locked && strip target/release/tracepulse
