@@ -480,7 +480,7 @@ export function renderHardwareStatus(sensors: HardwareSensor[] = []): void {
     }
     box.innerHTML = visible
         .map((sensor) => {
-            const cls = sensor.is_alarm ? "hardware-card crit" : sensor.status_kind === "normal" ? "hardware-card" : sensor.status !== null && sensor.status !== undefined && sensor.status !== 0 ? "hardware-card warn" : "hardware-card";
+            const cls = sensor.is_alarm || sensor.status_kind === "critical" ? "hardware-card crit" : sensor.status_kind === "warning" ? "hardware-card warn" : sensor.status_kind === "normal" ? "hardware-card" : sensor.status !== null && sensor.status !== undefined && sensor.status !== 0 ? "hardware-card warn" : "hardware-card";
             const label = sensor.name || (sensor.source === "entity-physical" ? `component ${sensor.index}` : `sensor ${sensor.index}`);
             const displayValue = sensor.status_text
                 ? sensor.status_text
