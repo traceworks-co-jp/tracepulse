@@ -1,5 +1,68 @@
 import { expect, test } from "@playwright/test";
 
+test("vendor hardware states render normal power and critical failures correctly", async ({ page }) => {
+    await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
+    await page.goto("/");
+    await page.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", "<div id='hardware-status'></div>");
+    });
+    await page.addScriptTag({ url: "/static/js/device-detail.js" });
+    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderHardwareStatus([
+        {name:"Cisco PSU 1",sensor_type:"power",status:2,status_text:"On",status_kind:"normal",is_alarm:false},
+        {name:"Cisco PSU 2",sensor_type:"power",status:8,status_text:"Failed",status_kind:"critical",is_alarm:true},
+        {name:"Juniper Fan",sensor_type:"fan",status:6,status_text:"Online",status_kind:"normal",is_alarm:false},
+        {name:"Unknown FRU",sensor_type:"power",status:1,status_text:"Unknown",status_kind:"warning",is_alarm:false},
+        {name:"RE Temperature",sensor_type:"temperature",value:42,unit:"C",status:null,is_alarm:false}
+    ]);` });
+    const cards = page.locator("#hardware-status .hardware-card");
+    await expect(cards).toHaveCount(5);
+    await expect(cards.nth(0)).toHaveClass("hardware-card");
+    await expect(cards.nth(0)).toContainText("On");
+    await expect(cards.nth(1)).toHaveClass("hardware-card crit");
+    await expect(cards.nth(1)).toContainText("Failed");
+    await expect(cards.nth(2)).toHaveClass("hardware-card");
+    await expect(cards.nth(3)).toHaveClass("hardware-card warn");
+    await expect(cards.nth(4)).toHaveClass("hardware-card");
+    await expect(cards.nth(4)).toContainText("42 C");
+});
+
+test("numeric template metrics render exact values and explicit errors safely", async ({ page }) => {
+    await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
+    await page.route("**/api/device/*", (route) => route.fulfill({ json: { interfaces: [], metrics: [] } }));
+    await page.goto("/");
+    await page.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", "<div id='template-metrics'></div>");
+    });
+    await page.addScriptTag({ url: "/static/js/device-detail.js" });
+    await expect(page.locator("#template-metrics")).toHaveText("No numeric metrics configured for this device.");
+    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderTemplateMetrics([
+        {key:"cpu",label:"<img src=x onerror=alert(1)>",unit:"percent",data_type:"gauge",oid:"1.3.6.1.2.1.1.3.0",value:0,value_text:"0"},
+        {key:"packets",label:"Packets",unit:"count",data_type:"counter",oid:"1.3.6.1.2.1.1.3.0",value:9007199254740992,value_text:"9007199254740993"},
+        {key:"missing",label:"Missing",unit:"celsius",data_type:"gauge",oid:"1.3.6.1.2.1.1.3.0",value:null,error:"OID <unavailable>"}
+    ]);` });
+    const metrics = page.locator("#template-metrics");
+    await expect(metrics.locator(".hardware-card")).toHaveCount(3);
+    await expect(metrics.locator("[data-metric-key='cpu']")).toContainText("0 percent");
+    await expect(metrics.locator("[data-metric-key='cpu']")).toContainText("<img src=x onerror=alert(1)>");
+    await expect(metrics.locator("img")).toHaveCount(0);
+    await expect(metrics.locator("[data-metric-key='packets']")).toContainText("9007199254740993 count");
+    await expect(metrics.locator("[data-metric-key='missing']")).toContainText("N/A");
+    await expect(metrics.getByRole("alert")).toHaveText("OID <unavailable>");
+    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderTemplateMetrics([], "SNMP unavailable");` });
+    await expect(metrics.getByRole("alert")).toHaveText("SNMP unavailable");
+    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderTemplateMetrics([]);` });
+    await expect(metrics).toHaveText("No numeric metrics configured for this device.");
+});
+
+test("SNMP settings show the template disclaimer in English and Japanese", async ({ page }) => {
+    await page.goto("/settings");
+    const disclaimer = page.locator("[data-i18n='snmp_template_disclaimer']");
+    await expect(disclaimer).toContainText("TraceWorks assumes no liability");
+    await page.evaluate(() => window.setLanguage?.("ja"));
+    await expect(disclaimer).toContainText("EULA");
+    await expect(disclaimer).toContainText("無許可アクセス");
+});
+
 test("setup guide appears only for empty monitoring and remembers Skip", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.goto("/");

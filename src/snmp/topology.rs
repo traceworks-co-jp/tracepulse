@@ -1,0 +1,530 @@
+use crate::snmp::{SnmpValue, SnmpVarBind};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+pub const LLDP_REM_TABLE: [u32; 10] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1];
+pub const LLDP_REM_CHASSIS_SUBTYPE: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 4];
+pub const LLDP_REM_CHASSIS_ID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 5];
+pub const LLDP_REM_PORT_SUBTYPE: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 6];
+pub const LLDP_REM_PORT_ID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 7];
+pub const LLDP_REM_SYS_NAME: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9];
+pub const LLDP_REM_MAN_ADDR: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 2, 1, 4];
+pub const LLDP_LOC_PORT_TABLE: [u32; 10] = [1, 0, 8802, 1, 1, 2, 1, 3, 7, 1];
+pub const LLDP_LOC_PORT_SUBTYPE: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 3, 7, 1, 2];
+pub const LLDP_LOC_PORT_ID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 3, 7, 1, 3];
+pub const LLDP_LOC_PORT_DESC: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 3, 7, 1, 4];
+pub const IF_DESCR: [u32; 10] = [1, 3, 6, 1, 2, 1, 2, 2, 1, 2];
+pub const IF_PHYS_ADDRESS: [u32; 10] = [1, 3, 6, 1, 2, 1, 2, 2, 1, 6];
+pub const IF_NAME: [u32; 11] = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1];
+pub const IF_ALIAS: [u32; 11] = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 18];
+
+pub const CDP_CACHE_TABLE: [u32; 13] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1];
+pub const CDP_CACHE_DEVICE_ID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 6];
+pub const CDP_CACHE_DEVICE_PORT: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 7];
+pub const CDP_CACHE_ADDRESS: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 4];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalizedTopologyProtocol {
+    Lldp,
+    Cdp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryIdentifier {
+    pub subtype: Option<u32>,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedNeighbor {
+    pub protocol: NormalizedTopologyProtocol,
+    pub local_port_if_index: Option<u32>,
+    pub local_port_id: Option<Vec<u8>>,
+    pub local_port_name: Option<String>,
+    pub remote_chassis_id: Option<BinaryIdentifier>,
+    pub remote_hostname: Option<String>,
+    pub remote_ip: Option<IpAddr>,
+    pub remote_port_id: Option<Vec<u8>>,
+    pub remote_port_subtype: Option<u32>,
+}
+
+#[derive(Default)]
+struct LldpRow {
+    chassis_subtype: Option<u32>,
+    chassis_id: Option<Vec<u8>>,
+    port_subtype: Option<u32>,
+    port_id: Option<Vec<u8>>,
+    hostname: Option<String>,
+}
+
+#[derive(Default)]
+struct LocalPort {
+    subtype: Option<u32>,
+    id: Option<Vec<u8>>,
+    description: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct Interface {
+    name: Option<Vec<u8>>,
+    description: Option<Vec<u8>>,
+    alias: Option<Vec<u8>>,
+    physical_address: Option<Vec<u8>>,
+}
+
+pub fn normalize_lldp_neighbors(
+    remote_rows: &[SnmpVarBind],
+    management_addresses: &[SnmpVarBind],
+    local_ports: &[SnmpVarBind],
+    interfaces: &[SnmpVarBind],
+) -> Vec<NormalizedNeighbor> {
+    let mut rows: BTreeMap<Vec<u32>, LldpRow> = BTreeMap::new();
+    for varbind in remote_rows {
+        let Some((column, suffix)) = match_column(
+            &varbind.oid,
+            &[
+                &LLDP_REM_CHASSIS_SUBTYPE,
+                &LLDP_REM_CHASSIS_ID,
+                &LLDP_REM_PORT_SUBTYPE,
+                &LLDP_REM_PORT_ID,
+                &LLDP_REM_SYS_NAME,
+            ],
+        ) else {
+            continue;
+        };
+        if suffix.len() < 3 {
+            continue;
+        }
+        let row = rows.entry(suffix[..3].to_vec()).or_default();
+        match column {
+            0 => row.chassis_subtype = value_u32(&varbind.value),
+            1 => row.chassis_id = varbind.value.as_bytes().map(<[u8]>::to_vec),
+            2 => row.port_subtype = value_u32(&varbind.value),
+            3 => row.port_id = varbind.value.as_bytes().map(<[u8]>::to_vec),
+            4 => row.hostname = value_text(&varbind.value),
+            _ => unreachable!(),
+        }
+    }
+
+    let local_ports = local_port_map(local_ports);
+    let interfaces = interface_map(interfaces);
+    let mut addresses = BTreeMap::new();
+    for varbind in management_addresses {
+        let Some(suffix) = varbind.oid.strip_prefix(&LLDP_REM_MAN_ADDR) else {
+            continue;
+        };
+        if suffix.len() < 6 {
+            continue;
+        }
+        let key = suffix[..3].to_vec();
+        if let Some(address) = lldp_address(&varbind.value, &suffix[3..]) {
+            addresses.entry(key).or_insert(address);
+        }
+    }
+
+    rows.into_iter()
+        .map(|(row_key, row)| {
+            let local_port_num = row_key.get(1).copied();
+            let local_port = local_port_num.and_then(|port| local_ports.get(&port));
+            let local_if_index = local_port.and_then(|port| resolve_local_port(port, &interfaces));
+            NormalizedNeighbor {
+                protocol: NormalizedTopologyProtocol::Lldp,
+                local_port_if_index: local_if_index,
+                local_port_id: local_port.and_then(|port| port.id.clone()),
+                local_port_name: local_if_index
+                    .and_then(|index| interfaces.get(&index))
+                    .and_then(interface_name),
+                remote_chassis_id: row.chassis_id.map(|value| BinaryIdentifier {
+                    subtype: row.chassis_subtype,
+                    value,
+                }),
+                remote_hostname: row.hostname,
+                remote_ip: addresses.get(&row_key).copied(),
+                remote_port_id: row.port_id,
+                remote_port_subtype: row.port_subtype,
+            }
+        })
+        .collect()
+}
+
+pub fn normalize_cdp_neighbors(
+    rows: &[SnmpVarBind],
+    interfaces: &[SnmpVarBind],
+) -> Vec<NormalizedNeighbor> {
+    let mut neighbors: BTreeMap<Vec<u32>, CdpRow> = BTreeMap::new();
+    for varbind in rows {
+        let Some((column, suffix)) = match_column(
+            &varbind.oid,
+            &[
+                &CDP_CACHE_DEVICE_ID,
+                &CDP_CACHE_DEVICE_PORT,
+                &CDP_CACHE_ADDRESS,
+            ],
+        ) else {
+            continue;
+        };
+        if suffix.len() < 2 {
+            continue;
+        }
+        let row = neighbors.entry(suffix[..2].to_vec()).or_default();
+        match column {
+            0 => row.hostname = value_text(&varbind.value),
+            1 => row.port_id = varbind.value.as_bytes().map(<[u8]>::to_vec),
+            2 => row.remote_ip = cdp_address(&varbind.value),
+            _ => unreachable!(),
+        }
+    }
+    let interfaces = interface_map(interfaces);
+    neighbors
+        .into_iter()
+        .map(|(key, row)| {
+            let local_if_index = key.first().copied();
+            NormalizedNeighbor {
+                protocol: NormalizedTopologyProtocol::Cdp,
+                local_port_if_index: local_if_index,
+                local_port_id: None,
+                local_port_name: local_if_index
+                    .and_then(|index| interfaces.get(&index))
+                    .and_then(interface_name),
+                remote_chassis_id: None,
+                remote_hostname: row.hostname,
+                remote_ip: row.remote_ip,
+                remote_port_id: row.port_id,
+                remote_port_subtype: None,
+            }
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct CdpRow {
+    hostname: Option<String>,
+    port_id: Option<Vec<u8>>,
+    remote_ip: Option<IpAddr>,
+}
+
+pub fn display_binary_identifier(identifier: &BinaryIdentifier) -> String {
+    if identifier.subtype == Some(4) && identifier.value.len() == 6 {
+        return format_mac(&identifier.value);
+    }
+    match std::str::from_utf8(&identifier.value) {
+        Ok(text) if !text.as_bytes().contains(&0) => text.to_string(),
+        _ => format!("0x{}", hex_bytes(&identifier.value)),
+    }
+}
+
+pub fn display_port_id(bytes: &[u8], subtype: Option<u32>) -> String {
+    if subtype == Some(3) && bytes.len() == 6 {
+        return format_mac(bytes);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.as_bytes().contains(&0) => text.to_string(),
+        _ => format!("0x{}", hex_bytes(bytes)),
+    }
+}
+
+fn local_port_map(varbinds: &[SnmpVarBind]) -> HashMap<u32, LocalPort> {
+    let mut result: HashMap<u32, LocalPort> = HashMap::new();
+    for varbind in varbinds {
+        let Some((column, suffix)) = match_column(
+            &varbind.oid,
+            &[
+                &LLDP_LOC_PORT_SUBTYPE,
+                &LLDP_LOC_PORT_ID,
+                &LLDP_LOC_PORT_DESC,
+            ],
+        ) else {
+            continue;
+        };
+        let Some(index) = suffix.first().copied() else {
+            continue;
+        };
+        let port = result.entry(index).or_default();
+        match column {
+            0 => port.subtype = value_u32(&varbind.value),
+            1 => port.id = varbind.value.as_bytes().map(<[u8]>::to_vec),
+            2 => port.description = varbind.value.as_bytes().map(<[u8]>::to_vec),
+            _ => unreachable!(),
+        }
+    }
+    result
+}
+
+fn interface_map(varbinds: &[SnmpVarBind]) -> HashMap<u32, Interface> {
+    let mut result: HashMap<u32, Interface> = HashMap::new();
+    for varbind in varbinds {
+        let Some((column, suffix)) = match_column(
+            &varbind.oid,
+            &[&IF_NAME, &IF_DESCR, &IF_ALIAS, &IF_PHYS_ADDRESS],
+        ) else {
+            continue;
+        };
+        let Some(index) = suffix.first().copied() else {
+            continue;
+        };
+        let interface = result.entry(index).or_default();
+        let bytes = varbind.value.as_bytes().map(<[u8]>::to_vec);
+        match column {
+            0 => interface.name = bytes,
+            1 => interface.description = bytes,
+            2 => interface.alias = bytes,
+            3 => interface.physical_address = bytes,
+            _ => unreachable!(),
+        }
+    }
+    result
+}
+
+fn resolve_local_port(port: &LocalPort, interfaces: &HashMap<u32, Interface>) -> Option<u32> {
+    let mut identity_candidates = BTreeSet::new();
+    let mut description_candidates = BTreeSet::new();
+    for (index, interface) in interfaces {
+        let matches = match port.subtype {
+            Some(1) => equal_bytes(port.id.as_deref(), interface.alias.as_deref()),
+            Some(3) => equal_bytes(port.id.as_deref(), interface.physical_address.as_deref()),
+            Some(5) => equal_bytes(port.id.as_deref(), interface.name.as_deref()),
+            _ => false,
+        };
+        let description_matches =
+            equal_bytes(port.description.as_deref(), interface.name.as_deref())
+                || equal_bytes(
+                    port.description.as_deref(),
+                    interface.description.as_deref(),
+                );
+        if matches {
+            identity_candidates.insert(*index);
+        }
+        if description_matches {
+            description_candidates.insert(*index);
+        }
+    }
+    let candidates = if identity_candidates.is_empty() {
+        description_candidates
+    } else {
+        identity_candidates
+    };
+    (candidates.len() == 1).then(|| *candidates.first().unwrap())
+}
+
+fn interface_name(interface: &Interface) -> Option<String> {
+    interface
+        .name
+        .as_deref()
+        .or(interface.description.as_deref())
+        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn equal_bytes(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
+    left.zip(right)
+        .is_some_and(|(left, right)| !left.is_empty() && left == right)
+}
+
+fn match_column<'a>(oid: &'a [u32], columns: &[&[u32]]) -> Option<(usize, &'a [u32])> {
+    columns.iter().enumerate().find_map(|(index, column)| {
+        oid.strip_prefix(*column)
+            .filter(|suffix| !suffix.is_empty())
+            .map(|suffix| (index, suffix))
+    })
+}
+
+fn value_u32(value: &SnmpValue) -> Option<u32> {
+    value.as_u64().and_then(|value| u32::try_from(value).ok())
+}
+
+fn value_text(value: &SnmpValue) -> Option<String> {
+    value
+        .as_bytes()
+        .map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .trim_matches(char::from(0))
+                .to_string()
+        })
+        .or_else(|| value.as_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn lldp_address(value: &SnmpValue, suffix: &[u32]) -> Option<IpAddr> {
+    match value {
+        SnmpValue::IpAddress(address) => Some(IpAddr::V4(Ipv4Addr::from(*address))),
+        SnmpValue::OctetString(bytes) | SnmpValue::Opaque(bytes) => match bytes.len() {
+            4 => Some(IpAddr::V4(Ipv4Addr::new(
+                bytes[0], bytes[1], bytes[2], bytes[3],
+            ))),
+            16 => Some(IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(bytes.as_slice()).ok()?,
+            ))),
+            _ => indexed_address(suffix),
+        },
+        _ => indexed_address(suffix),
+    }
+}
+
+fn cdp_address(value: &SnmpValue) -> Option<IpAddr> {
+    match value {
+        SnmpValue::IpAddress(address) => Some(IpAddr::V4(Ipv4Addr::from(*address))),
+        SnmpValue::OctetString(bytes) | SnmpValue::Opaque(bytes) if bytes.len() == 4 => Some(
+            IpAddr::V4(Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])),
+        ),
+        _ => value
+            .as_string()
+            .and_then(|value| value.parse::<IpAddr>().ok()),
+    }
+}
+
+fn indexed_address(suffix: &[u32]) -> Option<IpAddr> {
+    let address_type = *suffix.first()?;
+    let length = usize::try_from(*suffix.get(1)?).ok()?;
+    let octets = suffix.get(2..2 + length)?;
+    let octets: Vec<u8> = octets
+        .iter()
+        .map(|octet| u8::try_from(*octet).ok())
+        .collect::<Option<_>>()?;
+    match (address_type, octets.as_slice()) {
+        (1, [a, b, c, d]) => Some(IpAddr::V4(Ipv4Addr::new(*a, *b, *c, *d))),
+        (2, bytes) if bytes.len() == 16 => Some(IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(bytes).ok()?,
+        ))),
+        _ => None,
+    }
+}
+
+fn format_mac(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn octets(oid: &[u32], value: &[u8]) -> SnmpVarBind {
+        SnmpVarBind {
+            oid: oid.to_vec(),
+            value: SnmpValue::OctetString(value.to_vec()),
+        }
+    }
+
+    fn integer(oid: &[u32], value: i64) -> SnmpVarBind {
+        SnmpVarBind {
+            oid: oid.to_vec(),
+            value: SnmpValue::Integer(value),
+        }
+    }
+
+    #[test]
+    fn lldp_joins_full_row_key_and_maps_local_port_without_index_assumption() {
+        let remote = vec![
+            octets(
+                &[LLDP_REM_SYS_NAME.as_slice(), &[0, 24, 3]].concat(),
+                b"leaf",
+            ),
+            integer(
+                &[LLDP_REM_CHASSIS_SUBTYPE.as_slice(), &[0, 24, 3]].concat(),
+                4,
+            ),
+            octets(
+                &[LLDP_REM_CHASSIS_ID.as_slice(), &[0, 24, 3]].concat(),
+                &[0, 1, 2, 3, 4, 5],
+            ),
+            octets(
+                &[LLDP_REM_PORT_ID.as_slice(), &[0, 24, 3]].concat(),
+                b"Ethernet1",
+            ),
+        ];
+        let addresses = vec![SnmpVarBind {
+            oid: [
+                LLDP_REM_MAN_ADDR.as_slice(),
+                &[0, 24, 3, 1, 4, 192, 0, 2, 4],
+            ]
+            .concat(),
+            value: SnmpValue::OctetString(vec![192, 0, 2, 4]),
+        }];
+        let local_ports = vec![
+            integer(&[LLDP_LOC_PORT_SUBTYPE.as_slice(), &[24]].concat(), 5),
+            octets(&[LLDP_LOC_PORT_ID.as_slice(), &[24]].concat(), b"uplink-1"),
+        ];
+        let interfaces = vec![
+            octets(&[IF_NAME.as_slice(), &[7]].concat(), b"uplink-1"),
+            octets(&[IF_DESCR.as_slice(), &[7]].concat(), b"Ethernet 1"),
+        ];
+
+        let result = normalize_lldp_neighbors(&remote, &addresses, &local_ports, &interfaces);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].local_port_if_index, Some(7));
+        assert_eq!(result[0].local_port_name.as_deref(), Some("uplink-1"));
+        assert_eq!(
+            result[0].remote_ip,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 4)))
+        );
+        assert_eq!(
+            result[0].remote_chassis_id,
+            Some(BinaryIdentifier {
+                subtype: Some(4),
+                value: vec![0, 1, 2, 3, 4, 5],
+            })
+        );
+        assert_eq!(
+            display_binary_identifier(result[0].remote_chassis_id.as_ref().unwrap()),
+            "00:01:02:03:04:05"
+        );
+    }
+
+    #[test]
+    fn unresolved_or_ambiguous_lldp_port_is_not_guessed() {
+        let remote = vec![octets(
+            &[LLDP_REM_SYS_NAME.as_slice(), &[1, 99, 1]].concat(),
+            b"leaf",
+        )];
+        let local_ports = vec![
+            integer(&[LLDP_LOC_PORT_SUBTYPE.as_slice(), &[99]].concat(), 5),
+            octets(&[LLDP_LOC_PORT_ID.as_slice(), &[99]].concat(), b"unknown"),
+        ];
+        let result = normalize_lldp_neighbors(&remote, &[], &local_ports, &[]);
+
+        assert_eq!(result[0].local_port_if_index, None);
+        assert_eq!(result[0].local_port_name, None);
+    }
+
+    #[test]
+    fn cdp_uses_first_of_two_indices_as_ifindex_and_joins_address_by_row() {
+        let rows = vec![
+            octets(
+                &[CDP_CACHE_DEVICE_ID.as_slice(), &[42, 2]].concat(),
+                b"leaf",
+            ),
+            octets(
+                &[CDP_CACHE_DEVICE_PORT.as_slice(), &[42, 2]].concat(),
+                b"Gi1/0/2",
+            ),
+            octets(
+                &[CDP_CACHE_ADDRESS.as_slice(), &[42, 2]].concat(),
+                &[192, 0, 2, 42],
+            ),
+        ];
+        let interfaces = vec![octets(
+            &[IF_NAME.as_slice(), &[42]].concat(),
+            b"GigabitEthernet1/0/1",
+        )];
+
+        let result = normalize_cdp_neighbors(&rows, &interfaces);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].local_port_if_index, Some(42));
+        assert_eq!(
+            result[0].local_port_name.as_deref(),
+            Some("GigabitEthernet1/0/1")
+        );
+        assert_eq!(
+            result[0].remote_ip,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 42)))
+        );
+    }
+}

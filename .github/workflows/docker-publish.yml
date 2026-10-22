@@ -59,7 +59,9 @@ jobs:
           curl --fail --retry 30 --retry-delay 1 --retry-connrefused http://127.0.0.1:8080/ -o /dev/null
           docker exec tracepulse-smoke test -s /data/data.db
           docker exec tracepulse-smoke test -s /data/config.toml
-          docker exec tracepulse-smoke test -s /opt/tracepulse/templates/generic.toml
+          # Bundled templates are embedded in the binary; only BYO templates need a runtime directory.
+          docker exec tracepulse-smoke test ! -e /opt/tracepulse/templates
+          docker exec tracepulse-smoke test -d /data/custom_templates
           docker exec tracepulse-smoke sh -c 'printf "\n# persistence smoke test\n" >> /data/config.toml'
           docker cp tracepulse-smoke:/data/config.toml /tmp/tracepulse-config.toml
           docker rm -f tracepulse-smoke

@@ -71,6 +71,9 @@ var TracePulseI18n = (() => {
       alert_history: "Alert History",
       polling: "Polling",
       snmp: "SNMP",
+      template_metrics_title: "Template Metrics",
+      template_metrics_empty: "No numeric metrics configured for this device.",
+      snmp_template_disclaimer: "TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.",
       display: "Display",
       time_zone: "Time Zone",
       time_zone_hint: "Controls how timestamps are shown in the web UI",
@@ -271,6 +274,9 @@ var TracePulseI18n = (() => {
       traffic_protocols_top_talkers: "Top Talkers"
     },
     ja: {
+      template_metrics_title: "\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8\u30E1\u30C8\u30EA\u30AF\u30B9",
+      template_metrics_empty: "\u3053\u306E\u6A5F\u5668\u306E\u72EC\u81EA\u6570\u5024\u30E1\u30C8\u30EA\u30AF\u30B9\u306F\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002",
+      snmp_template_disclaimer: "TracePulse \u306F RFC \u6A19\u6E96\u6E96\u62E0\u306E\u76E3\u8996\u3092\u57FA\u790E\u3068\u3057\u3001\u8B58\u5225\u3057\u305F\u6A5F\u5668\u306B\u306F\u540C\u68B1\u306E\u30D9\u30F3\u30C0\u30FC\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8\u3092\u81EA\u52D5\u9078\u629E\u3057\u307E\u3059\u3002\u30D9\u30F3\u30C0\u30FC\u72EC\u81EA OID \u3084\u7B2C\u4E09\u8005\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8\u306E\u5229\u7528\u6642\u306F\u3001\u5404\u30CF\u30FC\u30C9\u30A6\u30A7\u30A2\u30D9\u30F3\u30C0\u30FC\u306E EULA \u304A\u3088\u3073\u30B5\u30DD\u30FC\u30C8\u5951\u7D04\u3078\u306E\u6E96\u62E0\u3092\u3054\u78BA\u8A8D\u304F\u3060\u3055\u3044\u3002TraceWorks \u306F\u3001\u30D9\u30F3\u30C0\u30FC\u72EC\u81EA\u30E1\u30C8\u30EA\u30AF\u30B9\u3078\u306E\u7121\u8A31\u53EF\u30A2\u30AF\u30BB\u30B9\u306B\u3064\u3044\u3066\u8CAC\u4EFB\u3092\u8CA0\u3044\u307E\u305B\u3093\u3002",
       nav_dashboard: "\u30C0\u30C3\u30B7\u30E5\u30DC\u30FC\u30C9",
       nav_discovery: "\u63A2\u7D22",
       nav_diagnostics: "\u8A3A\u65AD",

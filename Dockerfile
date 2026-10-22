@@ -10,6 +10,7 @@ FROM rust:1-slim-trixie AS backend
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY templates ./templates
 COPY frontend/assets ./frontend/assets
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 RUN cargo build --release --locked && strip target/release/tracepulse
@@ -18,10 +19,9 @@ FROM debian:trixie-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /data
+    && mkdir -p /data/custom_templates
 WORKDIR /opt/tracepulse
 COPY --from=backend /build/target/release/tracepulse ./tracepulse
-COPY templates ./templates
 COPY config/services.toml ./config/services.toml
 COPY LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES.html ./
 COPY docker/config.toml /etc/tracepulse/config.toml

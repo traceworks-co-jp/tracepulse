@@ -1,34 +1,33 @@
-name = "Juniper JunOS"
+name = "Juniper Network Device"
+description = "Operating CPU, buffer utilization, temperature, and named FRU status"
 enterprise_id = 2636
 
+# Operating and FRU rows use all four index components.
 [cpu]
-candidates = [
-    "1.3.6.1.4.1.2636.3.1.13.1.8", # JUNIPER-MIB::jnxOperatingCPU (Routing Engine / FPC)
-]
+candidates = ["1.3.6.1.4.1.2636.3.1.13.1.8"]
+aggregation = "max"
 
 [memory]
 mode = "direct"
-util_prefix = "1.3.6.1.4.1.2636.3.1.13.1.11" # JUNIPER-MIB::jnxOperatingBuffer (バッファ・メモリ使用率 %)
+oid = "1.3.6.1.4.1.2636.3.1.13.1.11" # jnxOperatingBuffer, not used bytes
+aggregation = "max"
 
-# -------------------------------------------------------------
-# 1. 温度センサー (JUNIPER-MIB::jnxOperatingTable)
-# -------------------------------------------------------------
 [[sensors.temperature]]
-descr_prefix = "1.3.6.1.4.1.2636.3.1.13.1.5" # jnxOperatingDescr
-value_prefix = "1.3.6.1.4.1.2636.3.1.13.1.7" # jnxOperatingTemp (°C)
-state_prefix = "1.3.6.1.4.1.2636.3.1.13.1.6" # jnxOperatingState
+descr_prefix = "1.3.6.1.4.1.2636.3.1.13.1.5"
+value_prefix = "1.3.6.1.4.1.2636.3.1.13.1.7"
 
-# -------------------------------------------------------------
-# 2. ファン (JUNIPER-MIB::jnxOperatingTable: type .4)
-# -------------------------------------------------------------
-[[sensors.fan]]
-descr_prefix = "1.3.6.1.4.1.2636.3.1.13.1.5.4" # jnxOperatingDescr (Fan)
-state_prefix = "1.3.6.1.4.1.2636.3.1.13.1.6.4" # jnxOperatingState.4 (2: running, 6: down or off)
-
-# -------------------------------------------------------------
-# 3. 電源ユニット (JUNIPER-MIB::jnxOperatingTable: type .2)
-# -------------------------------------------------------------
 [[sensors.power]]
-descr_prefix = "1.3.6.1.4.1.2636.3.1.13.1.5.2" # jnxOperatingDescr (Power Supply)
-state_prefix = "1.3.6.1.4.1.2636.3.1.13.1.6.2" # jnxOperatingState.2 (2: running, 6: down or off)
-fallback_builtin_power = false
+descr_prefix = "1.3.6.1.4.1.2636.3.1.15.1.5"
+state_prefix = "1.3.6.1.4.1.2636.3.1.15.1.8"
+match_names = ["power", "pem", "psu"]
+normal_states = [6]
+alarm_states = [8]
+state_labels = { "1" = "Unknown", "2" = "Empty", "3" = "Present", "4" = "Ready", "5" = "Announcing online", "6" = "Online", "7" = "Announcing offline", "8" = "Offline", "9" = "Diagnostic", "10" = "Standby" }
+
+[[sensors.fan]]
+descr_prefix = "1.3.6.1.4.1.2636.3.1.15.1.5"
+state_prefix = "1.3.6.1.4.1.2636.3.1.15.1.8"
+match_names = ["fan"]
+normal_states = [6]
+alarm_states = [8]
+state_labels = { "1" = "Unknown", "2" = "Empty", "3" = "Present", "4" = "Ready", "5" = "Announcing online", "6" = "Online", "7" = "Announcing offline", "8" = "Offline", "9" = "Diagnostic", "10" = "Standby" }

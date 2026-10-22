@@ -926,6 +926,7 @@ impl TuiRenderer {
         let mut alert_table_state = TableState::default();
 
         let mut selected_device_idx: usize = 0;
+        let mut interfaces_need_refresh = false;
         let mut table_state = TableState::default();
         if !devices.is_empty() {
             table_state.select(Some(0));
@@ -1082,6 +1083,15 @@ impl TuiRenderer {
                         .saturating_add(1)
                         .min(alerts.len().saturating_sub(1));
                 }
+            }
+
+            if interfaces_need_refresh
+                && matches!(active_tab, TuiTab::Interfaces | TuiTab::Traffic)
+                && let Some(dev) = devices.get(selected_device_idx)
+            {
+                current_interfaces = self.load_interface_summaries(&dev.device, &repository);
+                interface_idx = 0;
+                interfaces_need_refresh = false;
             }
 
             if let Some(extension) = &mut self.extension {
@@ -2013,7 +2023,17 @@ impl TuiRenderer {
                             );
                         }
                     }
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    Event::Key(key)
+                        if key.kind == KeyEventKind::Press
+                            || (key.kind == KeyEventKind::Repeat
+                                && matches!(
+                                    key.code,
+                                    KeyCode::Up
+                                        | KeyCode::Down
+                                        | KeyCode::Char('j')
+                                        | KeyCode::Char('k')
+                                )) =>
+                    {
                         if active_tab.extension_index().is_none()
                             && key.code == KeyCode::Char(' ')
                             && !matches!(mode, TuiMode::FilterInput(_))
@@ -2249,15 +2269,7 @@ impl TuiRenderer {
                                             ) && next != selected_device_idx
                                             {
                                                 selected_device_idx = next;
-                                                if let Some(dev) = devices.get(selected_device_idx)
-                                                {
-                                                    current_interfaces = self
-                                                        .load_interface_summaries(
-                                                            &dev.device,
-                                                            &repository,
-                                                        );
-                                                }
-                                                interface_idx = 0;
+                                                interfaces_need_refresh = true;
                                             }
                                         }
                                         TuiTab::Interfaces => {

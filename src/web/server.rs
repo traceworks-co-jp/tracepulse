@@ -5,6 +5,7 @@ use crate::db::repository::{Repository, counter32_delta};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::snmp::SnmpClient;
+use crate::snmp::topology::{self, NormalizedNeighbor, NormalizedTopologyProtocol};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -1304,9 +1305,13 @@ fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String
 fn api_device_detail(
     ip: &str,
     repo: &Arc<Mutex<Repository>>,
-    _cfg: &Arc<Mutex<AppConfig>>,
+    cfg: &Arc<Mutex<AppConfig>>,
     active_probes: bool,
 ) -> String {
+    let snmp_config = match cfg.lock() {
+        Ok(config) => config.snmp.clone(),
+        Err(_) => return r#"{"error":"lock failed"}"#.to_string(),
+    };
     let Ok(r) = repo.lock() else {
         return r#"{"error":"lock failed"}"#.to_string();
     };
@@ -1324,20 +1329,33 @@ fn api_device_detail(
     let interface_spikes = r
         .get_recent_interface_spikes(device_id, 30)
         .unwrap_or_default();
+    let device_config = DeviceConfig {
+        id: device.id,
+        name: device.name.clone(),
+        ip: device.ip.clone(),
+        community: device.community.clone(),
+        device_type: device.device_type.clone(),
+        status: device.status.clone(),
+        last_seen_at: device.last_seen_at.clone(),
+    };
+    let client = SnmpClient::with_snmp_config(snmp_config.default_community.clone(), snmp_config);
     let hardware_sensors = if active_probes {
-        SnmpClient::new(device.community.clone())
-            .query_hardware_sensors(&DeviceConfig {
-                id: device.id,
-                name: device.name.clone(),
-                ip: device.ip.clone(),
-                community: device.community.clone(),
-                device_type: device.device_type.clone(),
-                status: device.status.clone(),
-                last_seen_at: device.last_seen_at.clone(),
-            })
+        client
+            .query_hardware_sensors(&device_config)
             .unwrap_or_default()
     } else {
         Vec::new()
+    };
+    let (template_metrics, template_metrics_error) = if active_probes {
+        match client.query_template_metrics(&device_config) {
+            Ok(metrics) => (metrics, None),
+            Err(error) => {
+                tracing::warn!(device = %device.ip, %error, "Template metric query failed");
+                (Vec::new(), Some(error.to_string()))
+            }
+        }
+    } else {
+        (Vec::new(), None)
     };
 
     // 最新インターフェーススナップショット
@@ -1505,7 +1523,7 @@ fn api_device_detail(
         let unit = s.unit.as_deref().unwrap_or("");
         let status = s.status.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string());
         format!(
-            r#"{{"index":{},"name":"{}","sensor_type":"{}","source":"{}","oid":"{}","value":{},"unit":"{}","status":{},"status_text":"{}","is_alarm":{}}}"#,
+            r#"{{"index":{},"name":"{}","sensor_type":"{}","source":"{}","oid":"{}","value":{},"unit":"{}","status":{},"status_text":"{}","is_alarm":{},"status_kind":"{}"}}"#,
             s.index,
             escape_json(&s.name),
             escape_json(&s.sensor_type),
@@ -1516,11 +1534,12 @@ fn api_device_detail(
             status,
             escape_json(s.status_text.as_deref().unwrap_or("")),
             s.is_alarm,
+            escape_json(s.status_kind.as_deref().unwrap_or("")),
         )
     }).collect();
 
     format!(
-        r#"{{"device_id":"{}","ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","system_metrics":{},"interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}]}}"#,
+        r#"{{"device_id":"{}","ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","system_metrics":{},"interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}],"template_metrics":{},"template_metrics_error":{}}}"#,
         escape_json(&device.ip),
         escape_json(&device.ip),
         escape_json(&device.name),
@@ -1538,6 +1557,9 @@ fn api_device_detail(
         alerts_json.join(","),
         spikes_json.join(","),
         sensors_json.join(","),
+        serde_json::to_string(&template_metrics)
+            .expect("template metrics contain only JSON numbers"),
+        serde_json::to_string(&template_metrics_error).expect("error string is JSON serializable"),
     )
 }
 
@@ -2155,24 +2177,55 @@ fn discover_topology_once(seed_ip: &str, community: &str) -> Result<WebTopologyR
     let mut warnings = Vec::new();
     let mut edges = Vec::new();
 
-    let local_if_names = match client.walk_oid(&device, &IF_NAME_OID) {
-        Ok(varbinds) => parse_if_names(&varbinds),
+    let mut interfaces = match client.walk_oid(&device, &topology::IF_NAME) {
+        Ok(varbinds) => varbinds,
         Err(err) => {
             warnings.push(format!("ifName walk failed: {err}"));
-            BTreeMap::new()
+            Vec::new()
+        }
+    };
+    let local_if_names = parse_if_names(&interfaces);
+    for (oid, name) in [
+        (topology::IF_DESCR.as_slice(), "ifDescr"),
+        (topology::IF_ALIAS.as_slice(), "ifAlias"),
+        (topology::IF_PHYS_ADDRESS.as_slice(), "ifPhysAddress"),
+    ] {
+        match client.walk_oid(&device, oid) {
+            Ok(varbinds) => interfaces.extend(varbinds),
+            Err(err) => warnings.push(format!("{name} walk failed: {err}")),
+        }
+    }
+    let local_ports = match client.walk_oid(&device, &topology::LLDP_LOC_PORT_TABLE) {
+        Ok(varbinds) => varbinds,
+        Err(err) => {
+            warnings.push(format!("LLDP local port walk failed: {err}"));
+            Vec::new()
         }
     };
 
-    match client.walk_oid(&device, &LLDP_REMOTE_SYSTEMS_DATA_OID) {
-        Ok(varbinds) => edges.extend(parse_lldp_edges(seed_ip, &varbinds)),
-        Err(err) => warnings.push(format!("LLDP walk failed: {err}")),
-    }
-    match client.walk_oid(&device, &LLDP_REM_MAN_ADDR_OID) {
-        Ok(varbinds) => merge_lldp_management_addresses(&mut edges, &varbinds),
-        Err(err) => warnings.push(format!("LLDP management address walk failed: {err}")),
-    }
-    match client.walk_oid(&device, &CDP_CACHE_TABLE_OID) {
-        Ok(varbinds) => edges.extend(parse_cdp_edges(seed_ip, &varbinds)),
+    let remote_rows = match client.walk_oid(&device, &topology::LLDP_REM_TABLE) {
+        Ok(varbinds) => varbinds,
+        Err(err) => {
+            warnings.push(format!("LLDP walk failed: {err}"));
+            Vec::new()
+        }
+    };
+    let management_addresses = match client.walk_oid(&device, &topology::LLDP_REM_MAN_ADDR) {
+        Ok(varbinds) => varbinds,
+        Err(err) => {
+            warnings.push(format!("LLDP management address walk failed: {err}"));
+            Vec::new()
+        }
+    };
+    edges.extend(parse_lldp_edges(
+        seed_ip,
+        &remote_rows,
+        &management_addresses,
+        &local_ports,
+        &interfaces,
+    ));
+    match client.walk_oid(&device, &topology::CDP_CACHE_TABLE) {
+        Ok(varbinds) => edges.extend(parse_cdp_edges(seed_ip, &varbinds, &interfaces)),
         Err(err) => warnings.push(format!("CDP walk failed: {err}")),
     }
 
@@ -2216,7 +2269,7 @@ fn remote_node_id(edge: &WebTopologyEdge, position: usize) -> String {
 fn parse_if_names(varbinds: &[crate::snmp::SnmpVarBind]) -> BTreeMap<i64, String> {
     let mut names = BTreeMap::new();
     for varbind in varbinds {
-        let Some(suffix) = varbind.index_suffix(&IF_NAME_OID) else {
+        let Some(suffix) = varbind.index_suffix(&topology::IF_NAME) else {
             continue;
         };
         let Some(if_index) = suffix.first().map(|value| i64::from(*value)) else {
@@ -2577,163 +2630,56 @@ fn json_opt_i64(value: Option<i64>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
-#[derive(Debug, Clone, Default)]
-struct NeighborRow {
-    local_if_index: Option<i64>,
-    remote_ip: Option<String>,
-    remote_hostname: Option<String>,
-    remote_port: Option<String>,
-}
-
-const LLDP_REMOTE_SYSTEMS_DATA_OID: [u32; 10] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1];
-const LLDP_REM_CHASSIS_ID_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 5];
-const LLDP_REM_PORT_ID_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 7];
-const LLDP_REM_SYS_NAME_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 1, 1, 9];
-const LLDP_REM_MAN_ADDR_OID: [u32; 11] = [1, 0, 8802, 1, 1, 2, 1, 4, 2, 1, 4];
-const CDP_CACHE_TABLE_OID: [u32; 13] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1];
-const CDP_CACHE_ADDRESS_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 4];
-const CDP_CACHE_DEVICE_ID_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 6];
-const CDP_CACHE_DEVICE_PORT_OID: [u32; 14] = [1, 3, 6, 1, 4, 1, 9, 9, 23, 1, 2, 1, 1, 7];
-const IF_NAME_OID: [u32; 11] = [1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1];
-
-fn parse_lldp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec<WebTopologyEdge> {
-    let mut rows: BTreeMap<String, NeighborRow> = BTreeMap::new();
-    for varbind in varbinds {
-        if let Some(suffix) = varbind.index_suffix(&LLDP_REM_SYS_NAME_OID) {
-            // lldpRemEntry の index は [timeMark, localPortNum, index] の3要素
-            let row = neighbor_row(&mut rows, suffix, 1);
-            row.remote_hostname = varbind.value.as_string();
-        } else if let Some(suffix) = varbind.index_suffix(&LLDP_REM_PORT_ID_OID) {
-            let row = neighbor_row(&mut rows, suffix, 1);
-            row.remote_port = varbind.value.as_string();
-        } else if let Some(suffix) = varbind.index_suffix(&LLDP_REM_CHASSIS_ID_OID) {
-            let row = neighbor_row(&mut rows, suffix, 1);
-            if row.remote_hostname.is_none() {
-                row.remote_hostname = varbind.value.as_string();
-            }
-        }
-    }
-
-    rows.into_values()
-        .map(|row| WebTopologyEdge {
-            id: String::new(),
-            protocol: "LLDP".to_string(),
-            source: seed_ip.to_string(),
-            target: String::new(),
-            local_ip: seed_ip.to_string(),
-            local_if_index: row.local_if_index,
-            local_port: None,
-            remote_ip: row.remote_ip,
-            remote_hostname: row.remote_hostname,
-            remote_port: row.remote_port,
-            health_status: None,
-        })
+fn parse_lldp_edges(
+    seed_ip: &str,
+    remote_rows: &[crate::snmp::SnmpVarBind],
+    management_addresses: &[crate::snmp::SnmpVarBind],
+    local_ports: &[crate::snmp::SnmpVarBind],
+    interfaces: &[crate::snmp::SnmpVarBind],
+) -> Vec<WebTopologyEdge> {
+    topology::normalize_lldp_neighbors(remote_rows, management_addresses, local_ports, interfaces)
+        .into_iter()
+        .map(|neighbor| topology_edge(seed_ip, neighbor))
         .collect()
 }
 
-fn merge_lldp_management_addresses(
-    edges: &mut [WebTopologyEdge],
+fn parse_cdp_edges(
+    seed_ip: &str,
     varbinds: &[crate::snmp::SnmpVarBind],
-) {
-    let mut addresses = BTreeMap::new();
-    for varbind in varbinds {
-        if let Some(suffix) = varbind.index_suffix(&LLDP_REM_MAN_ADDR_OID) {
-            let key = lldp_remote_row_key(suffix).unwrap_or_else(|| suffix_to_key(suffix));
-            if let Some(ip) = snmp_value_to_ip(&varbind.value) {
-                addresses.insert(key, ip);
-            }
-        }
-    }
-
-    for edge in edges.iter_mut().filter(|edge| edge.protocol == "LLDP") {
-        if edge.remote_ip.is_none()
-            && let Some(local_if_index) = edge.local_if_index
-            && let Some((_, ip)) = addresses
-                .iter()
-                .find(|(key, _)| key.split('.').nth(1) == Some(&local_if_index.to_string()))
-        {
-            edge.remote_ip = Some(ip.clone());
-        }
-    }
-}
-
-fn parse_cdp_edges(seed_ip: &str, varbinds: &[crate::snmp::SnmpVarBind]) -> Vec<WebTopologyEdge> {
-    let mut rows: BTreeMap<String, NeighborRow> = BTreeMap::new();
-    for varbind in varbinds {
-        if let Some(suffix) = varbind.index_suffix(&CDP_CACHE_DEVICE_ID_OID) {
-            // cdpCacheEntry の index は [ifIndex, deviceIndex] の2要素（LLDPとは位置が違う）
-            let row = neighbor_row(&mut rows, suffix, 0);
-            row.remote_hostname = varbind.value.as_string();
-        } else if let Some(suffix) = varbind.index_suffix(&CDP_CACHE_DEVICE_PORT_OID) {
-            let row = neighbor_row(&mut rows, suffix, 0);
-            row.remote_port = varbind.value.as_string();
-        } else if let Some(suffix) = varbind.index_suffix(&CDP_CACHE_ADDRESS_OID) {
-            let row = neighbor_row(&mut rows, suffix, 0);
-            row.remote_ip = snmp_value_to_ip(&varbind.value);
-        }
-    }
-
-    rows.into_values()
-        .map(|row| WebTopologyEdge {
-            id: String::new(),
-            protocol: "CDP".to_string(),
-            source: seed_ip.to_string(),
-            target: String::new(),
-            local_ip: seed_ip.to_string(),
-            local_if_index: row.local_if_index,
-            local_port: None,
-            remote_ip: row.remote_ip,
-            remote_hostname: row.remote_hostname,
-            remote_port: row.remote_port,
-            health_status: None,
-        })
+    interfaces: &[crate::snmp::SnmpVarBind],
+) -> Vec<WebTopologyEdge> {
+    topology::normalize_cdp_neighbors(varbinds, interfaces)
+        .into_iter()
+        .map(|neighbor| topology_edge(seed_ip, neighbor))
         .collect()
 }
 
-fn neighbor_row<'a>(
-    rows: &'a mut BTreeMap<String, NeighborRow>,
-    suffix: &[u32],
-    local_index_pos: usize,
-) -> &'a mut NeighborRow {
-    let key = suffix_to_key(suffix);
-    rows.entry(key).or_insert_with(|| NeighborRow {
-        local_if_index: suffix
-            .get(local_index_pos)
-            .or_else(|| suffix.first())
-            .map(|value| i64::from(*value)),
-        ..NeighborRow::default()
-    })
-}
-
-fn lldp_remote_row_key(suffix: &[u32]) -> Option<String> {
-    (suffix.len() >= 3).then(|| suffix_to_key(&suffix[..3]))
-}
-
-fn suffix_to_key(suffix: &[u32]) -> String {
-    suffix
-        .iter()
-        .map(|value| value.to_string())
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn snmp_value_to_ip(value: &crate::snmp::SnmpValue) -> Option<String> {
-    if let crate::snmp::SnmpValue::IpAddress(addr) = value {
-        return Some(format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]));
+fn topology_edge(seed_ip: &str, neighbor: NormalizedNeighbor) -> WebTopologyEdge {
+    WebTopologyEdge {
+        id: String::new(),
+        protocol: match neighbor.protocol {
+            NormalizedTopologyProtocol::Lldp => "LLDP",
+            NormalizedTopologyProtocol::Cdp => "CDP",
+        }
+        .to_string(),
+        source: seed_ip.to_string(),
+        target: String::new(),
+        local_ip: seed_ip.to_string(),
+        local_if_index: neighbor.local_port_if_index.map(i64::from),
+        local_port: neighbor.local_port_name,
+        remote_ip: neighbor.remote_ip.map(|ip| ip.to_string()),
+        remote_hostname: neighbor.remote_hostname.or_else(|| {
+            neighbor
+                .remote_chassis_id
+                .as_ref()
+                .map(topology::display_binary_identifier)
+        }),
+        remote_port: neighbor
+            .remote_port_id
+            .as_deref()
+            .map(|bytes| topology::display_port_id(bytes, neighbor.remote_port_subtype)),
+        health_status: None,
     }
-
-    if let Some(bytes) = value.as_bytes()
-        && bytes.len() >= 4
-    {
-        return Some(format!(
-            "{}.{}.{}.{}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-    }
-
-    value
-        .as_string()
-        .filter(|text| text.parse::<std::net::Ipv4Addr>().is_ok())
 }
 
 /// POST /api/discovery/register
@@ -3122,6 +3068,7 @@ fn page_device_detail(
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='hardware_status_title'>Hardware Status</h2>");
     html.push_str("<div id='hardware-status' class='hardware-status'>Loading...</div>");
+    html.push_str("<h3 data-i18n='template_metrics_title'>Template Metrics</h3><div id='template-metrics' class='hardware-status'>Loading...</div>");
     html.push_str("</section>");
 
     // セクション: インターフェース別スパイク
@@ -3840,6 +3787,7 @@ const SETTINGS_HTML: &str = "<main>
 
 <div class='settings-section'>
   <h2 data-i18n='snmp'>SNMP</h2>
+  <p class='field-hint' data-i18n='snmp_template_disclaimer'>TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.</p>
   <div class='field-row'>
     <div class='field-group'>
       <label data-i18n='default_community'>Default Community String</label>
@@ -4811,11 +4759,11 @@ impl PollResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        CDP_CACHE_DEVICE_ID_OID, COMMUNITY_MAX_DEVICES, WebLimits, WebServer, WebTopologyEdge,
-        WebTopologyInterface, WebTopologyReport, annotate_edge_health, api_flow_analytics,
-        api_live_flow_analytics, classify_interface_diagnostic, effective_interface_link_status,
-        evaluate_port_health, merge_duplicate_edges, page_dashboard, page_device_detail,
-        page_discovery, parse_cdp_edges, persist_config, strip_community,
+        COMMUNITY_MAX_DEVICES, WebLimits, WebServer, WebTopologyEdge, WebTopologyInterface,
+        WebTopologyReport, annotate_edge_health, api_flow_analytics, api_live_flow_analytics,
+        classify_interface_diagnostic, effective_interface_link_status, evaluate_port_health,
+        merge_duplicate_edges, page_dashboard, page_device_detail, page_discovery, parse_cdp_edges,
+        persist_config, strip_community,
     };
     use crate::config::AppConfig;
     use crate::db::models::{Device, FlowRecord, InterfacePortDelta, InterfaceSample};
@@ -5062,6 +5010,9 @@ mod tests {
         let html = super::page_settings(&config, None, true);
         assert!(!html.contains("destination-grid"));
         assert!(!html.contains("notifications.js"));
+        assert!(html.contains(
+            "TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics."
+        ));
     }
 
     #[test]
@@ -5188,6 +5139,16 @@ mod tests {
         assert!(html.contains("openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)"));
         assert!(html.contains("/static/js/diagnostics.js"));
         assert!(!html.contains("Extra Probe"));
+        assert!(html.contains("id='template-metrics'"));
+        let passive = super::api_device_detail(
+            "192.0.2.1",
+            &repository,
+            &Arc::new(Mutex::new(AppConfig::default())),
+            false,
+        );
+        let passive: serde_json::Value = serde_json::from_str(&passive).unwrap();
+        assert_eq!(passive["template_metrics"], serde_json::json!([]));
+        assert!(passive["template_metrics_error"].is_null());
 
         assert!(html.contains("id='traffic-protocols-section' style='display:none'"));
         let extended = page_device_detail("192.0.2.1", &repository, Some(&ExtraDiagnostics));
@@ -5548,14 +5509,199 @@ mod tests {
     #[test]
     fn cdp_local_if_index_uses_ifindex_not_device_index() {
         let varbind = crate::snmp::SnmpVarBind {
-            oid: [CDP_CACHE_DEVICE_ID_OID.as_slice(), &[23, 1]].concat(),
+            oid: [super::topology::CDP_CACHE_DEVICE_ID.as_slice(), &[23, 1]].concat(),
             value: crate::snmp::SnmpValue::OctetString(b"core-sw-02".to_vec()),
         };
 
-        let edges = parse_cdp_edges("10.0.0.1", &[varbind]);
+        let edges = parse_cdp_edges("10.0.0.1", &[varbind], &[]);
 
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].local_if_index, Some(23));
+    }
+
+    fn topology_varbind(
+        column: &[u32],
+        index: &[u32],
+        value: crate::snmp::SnmpValue,
+    ) -> crate::snmp::SnmpVarBind {
+        crate::snmp::SnmpVarBind {
+            oid: [column, index].concat(),
+            value,
+        }
+    }
+
+    #[test]
+    fn web_topology_lldp_resolves_local_port_and_joins_full_remote_index() {
+        use super::topology::*;
+        use crate::snmp::SnmpValue::{Integer, OctetString};
+        let mut rows = Vec::new();
+        let mut addresses = Vec::new();
+        // Both remIndex and timeMark must participate in management-address joins.
+        for (key, hostname, address) in [
+            ([0, 7, 1], b"peer-a".as_slice(), [10, 0, 0, 2]),
+            ([0, 7, 2], b"peer-b".as_slice(), [10, 0, 0, 3]),
+            ([9, 7, 1], b"peer-c".as_slice(), [10, 0, 0, 4]),
+        ] {
+            rows.push(topology_varbind(
+                &LLDP_REM_SYS_NAME,
+                &key,
+                OctetString(hostname.to_vec()),
+            ));
+            rows.push(topology_varbind(
+                &LLDP_REM_PORT_ID,
+                &key,
+                OctetString(b"Gi1/0/23".to_vec()),
+            ));
+            let index = [key.as_slice(), &[1, 4], &address].concat();
+            // Real LLDP management table values are interface identifiers, not IP octets.
+            addresses.push(topology_varbind(&LLDP_REM_MAN_ADDR, &index, Integer(42)));
+        }
+        let local_ports = [
+            topology_varbind(&LLDP_LOC_PORT_SUBTYPE, &[7], Integer(5)),
+            topology_varbind(&LLDP_LOC_PORT_ID, &[7], OctetString(b"Gi1/0/1".to_vec())),
+        ];
+        let interfaces = [
+            topology_varbind(&IF_NAME, &[101], OctetString(b"Gi1/0/1".to_vec())),
+            topology_varbind(&IF_NAME, &[7], OctetString(b"wrong-port".to_vec())),
+        ];
+        let edges =
+            super::parse_lldp_edges("10.0.0.1", &rows, &addresses, &local_ports, &interfaces);
+
+        assert_eq!(edges.len(), 3);
+        for (edge, (hostname, ip)) in edges.iter().zip([
+            ("peer-a", "10.0.0.2"),
+            ("peer-b", "10.0.0.3"),
+            ("peer-c", "10.0.0.4"),
+        ]) {
+            assert_eq!(edge.protocol, "LLDP");
+            assert_eq!(edge.local_if_index, Some(101));
+            assert_eq!(edge.local_port.as_deref(), Some("Gi1/0/1"));
+            assert_eq!(edge.remote_hostname.as_deref(), Some(hostname));
+            assert_eq!(edge.remote_ip.as_deref(), Some(ip));
+            assert_eq!(edge.label(), "Gi1/0/1 \u{2194} Gi1/0/23");
+        }
+    }
+
+    #[test]
+    fn web_topology_lldp_uses_if_mib_identity_and_leaves_unresolved_ports_unknown() {
+        use super::topology::*;
+        use crate::snmp::SnmpValue::{Integer, OctetString};
+        let rows = [topology_varbind(
+            &LLDP_REM_SYS_NAME,
+            &[0, 7, 1],
+            OctetString(b"peer".to_vec()),
+        )];
+        let name = topology_varbind(&IF_NAME, &[101], OctetString(b"Gi1/0/1".to_vec()));
+        for (subtype, local_column, interface_column, identity) in [
+            (
+                5,
+                LLDP_LOC_PORT_ID.as_slice(),
+                IF_NAME.as_slice(),
+                b"Gi1/0/1".as_slice(),
+            ),
+            (
+                1,
+                LLDP_LOC_PORT_ID.as_slice(),
+                IF_ALIAS.as_slice(),
+                b"uplink".as_slice(),
+            ),
+            (
+                3,
+                LLDP_LOC_PORT_ID.as_slice(),
+                IF_PHYS_ADDRESS.as_slice(),
+                &[0, 1, 2, 3, 4, 5],
+            ),
+            (
+                7,
+                LLDP_LOC_PORT_DESC.as_slice(),
+                IF_DESCR.as_slice(),
+                b"Ethernet 1".as_slice(),
+            ),
+        ] {
+            let local = [
+                topology_varbind(&LLDP_LOC_PORT_SUBTYPE, &[7], Integer(subtype)),
+                topology_varbind(local_column, &[7], OctetString(identity.to_vec())),
+            ];
+            let interfaces = [
+                name.clone(),
+                topology_varbind(interface_column, &[101], OctetString(identity.to_vec())),
+            ];
+            let edges = super::parse_lldp_edges("10.0.0.1", &rows, &[], &local, &interfaces);
+            assert_eq!(edges[0].local_if_index, Some(101));
+        }
+        let same_number = [topology_varbind(
+            &IF_NAME,
+            &[7],
+            OctetString(b"Gi1/0/1".to_vec()),
+        )];
+        let unresolved = super::parse_lldp_edges("10.0.0.1", &rows, &[], &[], &same_number);
+        assert_eq!(unresolved[0].local_if_index, None);
+        assert_eq!(unresolved[0].local_port, None);
+        assert!(unresolved[0].to_json().contains("\"local_if_index\":null"));
+
+        let local = [
+            topology_varbind(&LLDP_LOC_PORT_SUBTYPE, &[7], Integer(5)),
+            topology_varbind(&LLDP_LOC_PORT_ID, &[7], OctetString(b"Gi1/0/1".to_vec())),
+        ];
+        let ambiguous = super::parse_lldp_edges(
+            "10.0.0.1",
+            &rows,
+            &[],
+            &local,
+            &[name, same_number[0].clone()],
+        );
+        assert_eq!(ambiguous[0].local_if_index, None);
+    }
+
+    #[test]
+    fn web_topology_cdp_joins_device_rows_without_conflating_neighbors() {
+        use super::topology::*;
+        use crate::snmp::SnmpValue::OctetString;
+        let mut rows = Vec::new();
+        for (index, hostname, port, ip) in [
+            (
+                1,
+                b"peer-a".as_slice(),
+                b"Gi1/0/23".as_slice(),
+                [10, 0, 0, 2],
+            ),
+            (
+                2,
+                b"peer-b".as_slice(),
+                b"Gi1/0/24".as_slice(),
+                [10, 0, 0, 3],
+            ),
+        ] {
+            for (column, bytes) in [
+                (CDP_CACHE_DEVICE_ID.as_slice(), hostname),
+                (CDP_CACHE_DEVICE_PORT.as_slice(), port),
+                (CDP_CACHE_ADDRESS.as_slice(), ip.as_slice()),
+            ] {
+                rows.push(topology_varbind(
+                    column,
+                    &[23, index],
+                    OctetString(bytes.to_vec()),
+                ));
+            }
+        }
+        let interfaces = [topology_varbind(
+            &IF_NAME,
+            &[23],
+            OctetString(b"Gi1/0/1".to_vec()),
+        )];
+        let edges = parse_cdp_edges("10.0.0.1", &rows, &interfaces);
+        assert_eq!(edges.len(), 2);
+        for edge in &edges {
+            assert_eq!(edge.protocol, "CDP");
+            assert_eq!(edge.local_if_index, Some(23));
+            assert_eq!(edge.local_port.as_deref(), Some("Gi1/0/1"));
+        }
+        assert_eq!(edges[0].remote_hostname.as_deref(), Some("peer-a"));
+        assert_eq!(edges[0].remote_port.as_deref(), Some("Gi1/0/23"));
+        assert_eq!(edges[0].remote_ip.as_deref(), Some("10.0.0.2"));
+        assert_eq!(edges[1].remote_hostname.as_deref(), Some("peer-b"));
+        assert_eq!(edges[1].remote_port.as_deref(), Some("Gi1/0/24"));
+        assert_eq!(edges[1].remote_ip.as_deref(), Some("10.0.0.3"));
     }
 
     #[test]
