@@ -207,6 +207,13 @@ where
                 return finish(status, reason, varbinds);
             }
             WalkStep::VarBind(varbind) => {
+                if !varbind.oid.starts_with(prefix) {
+                    return finish(
+                        ReliableWalkStatus::Complete,
+                        WalkReason::OutsidePrefix,
+                        varbinds,
+                    );
+                }
                 if varbind.oid <= current {
                     return finish(
                         if varbinds.is_empty() {
@@ -215,13 +222,6 @@ where
                             ReliableWalkStatus::Partial
                         },
                         WalkReason::NonIncreasingOid,
-                        varbinds,
-                    );
-                }
-                if !varbind.oid.starts_with(prefix) {
-                    return finish(
-                        ReliableWalkStatus::Complete,
-                        WalkReason::OutsidePrefix,
                         varbinds,
                     );
                 }
@@ -299,6 +299,60 @@ mod tests {
         assert_eq!(result.status, ReliableWalkStatus::Partial);
         assert_eq!(result.reason, Some(WalkReason::RequestTimeout));
         assert_eq!(result.count, 1);
+    }
+
+    #[test]
+    fn outside_prefix_completes_even_when_oid_does_not_increase() {
+        for after_row in [false, true] {
+            let result = walk_with(
+                &[1, 3, 6],
+                &options(Duration::from_secs(1), 10),
+                &AtomicBool::new(false),
+                |current, _| {
+                    if after_row && current == [1, 3, 6] {
+                        WalkStep::VarBind(varbind(&[1, 3, 6, 1]))
+                    } else {
+                        WalkStep::VarBind(varbind(&[1, 3, 5]))
+                    }
+                },
+            );
+
+            assert_eq!(result.status, ReliableWalkStatus::Complete);
+            assert_eq!(result.reason, Some(WalkReason::OutsidePrefix));
+            assert_eq!(result.count, usize::from(after_row));
+            assert_eq!(result.cursor, after_row.then(|| vec![1, 3, 6, 1]));
+        }
+    }
+
+    #[test]
+    fn repeated_oid_inside_prefix_is_not_complete() {
+        for after_row in [false, true] {
+            let mut calls = 0;
+            let result = walk_with(
+                &[1, 3, 6],
+                &options(Duration::from_secs(1), 10),
+                &AtomicBool::new(false),
+                |current, _| {
+                    calls += 1;
+                    if after_row && calls == 1 {
+                        WalkStep::VarBind(varbind(&[1, 3, 6, 1]))
+                    } else {
+                        WalkStep::VarBind(varbind(current))
+                    }
+                },
+            );
+
+            assert_eq!(
+                result.status,
+                if after_row {
+                    ReliableWalkStatus::Partial
+                } else {
+                    ReliableWalkStatus::Failed
+                }
+            );
+            assert_eq!(result.reason, Some(WalkReason::NonIncreasingOid));
+            assert_eq!(result.count, usize::from(after_row));
+        }
     }
 
     #[test]

@@ -31,7 +31,7 @@ var TracePulseDashboard = (() => {
 
   // frontend/src/shared/escape.ts
   function esc(value) {
-    return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;");
+    return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/\x27/g, "&#39;");
   }
 
   // frontend/src/shared/format.ts

@@ -45,7 +45,7 @@ var TracePulseDeviceDetail = (() => {
 
   // frontend/src/shared/escape.ts
   function esc(value) {
-    return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/'/g, "&#39;");
+    return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/\x27/g, "&#39;");
   }
 
   // frontend/src/shared/format.ts
@@ -354,7 +354,7 @@ var TracePulseDeviceDetail = (() => {
       return;
     }
     box.innerHTML = visible.map((sensor) => {
-      const cls = sensor.is_alarm ? "hardware-card crit" : sensor.status_kind === "normal" ? "hardware-card" : sensor.status !== null && sensor.status !== void 0 && sensor.status !== 0 ? "hardware-card warn" : "hardware-card";
+      const cls = sensor.is_alarm || sensor.status_kind === "critical" ? "hardware-card crit" : sensor.status_kind === "warning" ? "hardware-card warn" : sensor.status_kind === "normal" ? "hardware-card" : sensor.status !== null && sensor.status !== void 0 && sensor.status !== 0 ? "hardware-card warn" : "hardware-card";
       const label = sensor.name || (sensor.source === "entity-physical" ? `component ${sensor.index}` : `sensor ${sensor.index}`);
       const displayValue = sensor.status_text ? sensor.status_text : sensor.value !== null && sensor.value !== void 0 ? `${sensor.value}${sensor.unit ? ` ${sensor.unit}` : ""}` : sensor.status !== null && sensor.status !== void 0 ? sensor.status : "N/A";
       return `<div class='${cls}'><div class='label'>${esc(label)}</div><div class='value'>${esc(displayValue)}</div></div>`;

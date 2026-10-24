@@ -54,6 +54,7 @@ CDP のベンダー固有 OID 照会は監視メトリクスと分離した既�
 取得予算、最大varbind数、要求間隔、中断用 `AtomicBool` を指定できる。要求ごとのsocket timeoutは
 残りdeadlineと2秒の小さい方に制限され、要求間隔は最低20msとなる。
 上限到達や途中の通信失敗は完全結果ではなくpartialとして返る。明示的な未対応応答のみunsupportedとする。
+要求範囲外の OID は正常終了として判定し、範囲内の同一・逆行 OID は取得失敗（既取得行があれば partial）とする。
 
 共有 `snmp::topology` 正規化器はLLDPのリモート行を `[timeMark, localPortNum, remIndex]` で結合し、
 管理アドレスを同じ先頭3要素で結合する。LLDPのlocalPortNumはIF-MIBのifIndexと同一視せず、
@@ -62,7 +63,25 @@ CDPは `[ifIndex, deviceIndex]` を用いる。Chassis ID等のオクテット�
 Webの単発トポロジ探索もこの共有正規化器を使用する。LLDP local port tableとIF-MIBの
 ifName・ifDescr・ifAlias・ifPhysAddressを取得して照合し、未解決・曖昧なポートのifIndexは
 `null`のままとする。管理アドレスは同一ローカルポート上でもリモート行ごとに結合する。
+ポート ID と説明が異なるインターフェースに一致する場合も曖昧として扱い、一方を優先して推測しない。
 既存のWebレポート形式、ラベル、ノード上限、LLDP/CDP重複リンク統合は維持し、各Walkの失敗は警告として返す。
+
+### 正規化品質と last-known-good の維持
+
+`snmp::topology::normalize_lldp_neighbors_with_quality(remote_rows, management_addresses, local_ports, interfaces)`
+および `normalize_cdp_neighbors_with_quality(rows, interfaces)` は `NeighborNormalizationOutcome { neighbors, quality }`
+を返す。既存の同名（`_with_quality` なし）API と `neighbors` の出力は同じで、部分行やリモートポートの生バイト列も維持する。
+
+`quality.is_complete()` は正規化の品質のみを判定する。last-known-good の置換・削除は、関連する全 Walk の正常完了と
+この値の両方を確認してから行う。不正な行インデックスは `rejected_remote_rows`、必須の機器 ID / ポート ID・subtype の不足や
+不正値、重複列、復号不能な名前は `incomplete_remote_rows` に報告する。各項目は別途
+`invalid_remote_identity_rows / invalid_remote_port_rows / malformed_address_rows / malformed_local_rows / unresolved_local_ports`
+で確認できる。件数は列数ではなく行数で、複数カテゴリ間では重複し得る。
+
+LLDP は chassis ID と port ID/subtype を必須とし、曖昧・未解決のローカルポートも不完全とする。
+CDP は device ID と port ID を必須とし、管理アドレスと IF-MIB の表示名は省略可能。
+不正な関連管理アドレス・ローカル行・IF-MIB 行は保守的に品質を低下させる。
+空のリモートテーブルは正常な空結果で、無関係な補助テーブルの不正行だけでは不完全にしない。
 
 ## BYO ディレクトリと読み込み
 
