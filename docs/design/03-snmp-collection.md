@@ -46,6 +46,104 @@ CDP のベンダー固有 OID 照会は監視メトリクスと分離した既�
 
 ユーザー提供の生成済み `snmp.yml` の `cisco_device` / `yamaha_rt` / `juniper` にある数値 OID・列挙値を参照し、TracePulse のスキーマ向けに説明・定義を独自に記述した。参考プロジェクトは [Prometheus snmp_exporter](https://github.com/prometheus/snmp_exporter)（[Apache-2.0](https://github.com/prometheus/snmp_exporter/blob/main/LICENSE)、[生成済み定義](https://github.com/prometheus/snmp_exporter/blob/main/snmp.yml)）。Yamaha の百分率の範囲は [公式 RT hardware 定義](https://www.rtpro.yamaha.co.jp/RT/docs/mib/yamaha-rt-hardware.mib.txt) でも確認した。生成済み YAML・MIB 本体・MIB の説明文は同梱しない。これはベンダー契約への準拠やアクセス許諾を保証するものではない。
 
+## Optical transceiver power (DOM / DDM)
+
+DOM is optional and template-driven. The Web and TUI pollers walk each configured
+DOM column once per device/cycle, then join the result to interface samples by
+`ifIndex`. No DOM table is assumed for the generic RFC template: DOM is not a
+uniform IF-MIB column. Copper ports, missing SNMP instances, nonnumeric values,
+and unavailable sensor readings remain unmeasured (`null` / `N/A`); they do not
+interrupt traffic collection. Transport/walk errors are logged and the optional
+DOM collection is omitted for that cycle, rather than reusing stale values.
+
+### Direct dBm tables
+
+```toml
+[tables.dom]
+base_oid = "1.3.6.1.4.1.2636.3.60.1.1.1.1"
+# Omit index_oid when the row suffix is already ifIndex, as on Juniper.
+# Otherwise supply a numeric column whose VALUE is the corresponding ifIndex:
+# index_oid = "1.3.6.1.2.1.2.2.1.1"
+
+[[tables.dom.metrics]]
+key = "rx_power"
+oid = "1.3.6.1.4.1.2636.3.60.1.1.1.1.5"
+unit = "dBm"
+scale = 0.01
+label = "Rx Power"
+invalid_values = [] # Raw, BEFORE scaling; add only documented device sentinels.
+
+[[tables.dom.metrics]]
+key = "tx_power"
+oid = "1.3.6.1.4.1.2636.3.60.1.1.1.1.7"
+unit = "dBm"
+scale = 0.01
+label = "Tx Power"
+```
+
+`base_oid` and metric column OIDs are required numeric OIDs; metric columns must
+be beneath the base. `key` is `rx_power` or `tx_power`, each at most once, with
+`unit = "dBm"` and a nonempty label. `scale` defaults to 1 and must be finite and
+positive. `invalid_values` defaults to empty and must contain finite numbers.
+An explicit `index_oid` joins by the complete row suffix, not by row order. If it
+is omitted, a single positive suffix component is the ifIndex. Composite/lane
+rows are not silently truncated to a port index.
+
+The bundled Juniper definition uses Rx column `.5` and **Tx column `.7`**.
+Column `.6` is laser bias current, not Tx power. Both optical power columns
+report hundredths of dBm. References:
+[Juniper MIB Explorer](https://apps.juniper.net/mib-explorer/),
+[Rx numeric OID](https://oidref.com/1.3.6.1.4.1.2636.3.60.1.1.1.1.5),
+[Tx numeric OID](https://oidref.com/1.3.6.1.4.1.2636.3.60.1.1.1.1.7).
+
+### Cisco ENTITY sensors
+
+The bundled Cisco definition additionally supplies `[tables.dom.entity]` with
+numeric `name_oid`, `contained_in_oid`, `alias_oid`, `type_oid`, `scale_oid`,
+`precision_oid`, and `status_oid` columns. It is mutually exclusive with
+`index_oid`. Each metric has case-insensitive `match_names` filters for
+receive/transmit power sensors. All mapping and measurement OIDs remain in TOML.
+
+The collector follows ENTITY-MIB containment from sensor to physical port,
+resolves `entAliasMappingIdentifier` values referencing IF-MIB `ifIndex`, and
+requires an unambiguous mapping. It never assumes `entPhysicalIndex == ifIndex`
+or matches interface names by substring. Sensor status must be OK(1), and the
+sensor type must explicitly be watts(6). SI scale, fractional precision, and the
+optional metric `scale` multiplier are applied before conversion:
+`dBm = 10 * log10(watts * 1000)`. Non-positive precision
+describes accuracy and does not add fractional digits. Unsupported unit types
+(including vendor-specific `other(1)` readings that may or may not be dBm),
+missing metadata, zero/negative watts, underflow/overflow sentinels, conflicting
+aliases, and multiple same-direction readings for one port remain N/A.
+
+The Cisco template uses the
+[public numeric CISCO-ENTITY-SENSOR-MIB definitions](https://oidref.com/1.3.6.1.4.1.9.9.91.1.1.1.1)
+and ENTITY-MIB mapping; this is not certification of every Cisco series.
+Devices without ENTITY alias mappings or with proprietary native-dBm formats
+need a model-specific template with a verified index column and units.
+MIB source text is not distributed or parsed.
+
+### Storage, display, and scope
+
+SQLite retains the existing `rx_optical_power_dbm` column for compatibility and
+adds nullable `tx_power_dbm` using an additive migration. All interface history
+and latest-sample read paths retain both values. The device API exposes
+`interfaces[].rx_power_dbm` and `interfaces[].tx_power_dbm` as dBm numbers or
+`null`. WebGUI and TUI interface tables show Tx/Rx columns with one decimal
+place. Either value **<= -20 dBm** is yellow as a display-only advisory, not a
+device alarm or a transceiver-specific operating limit.
+
+**-40 dBm is not globally discarded**: it can be a valid low-power reading.
+Declare a documented raw sentinel in the relevant metric's `invalid_values`
+(for example `[-4000]` with `scale = 0.01`) only for models where it is invalid.
+Explicit null readings are not replaced by historical measurements.
+
+This implementation is port-level, not per-lane telemetry. Juniper lane tables,
+Cisco names containing lane/channel, and ambiguous multiple sensors are not
+aggregated into a fabricated port value. Per-lane storage/UI is outside this
+scope. Tests use mock SNMP agents and database migration fixtures; real device
+model/firmware validation is still required.
+
 ## 信頼性の高い Walk API とトポロジ正規化
 
 既存の `walk_oid` 系 API は互換性のため従来の `Result<Vec<SnmpVarBind>, AppError>` 動作を維持する。

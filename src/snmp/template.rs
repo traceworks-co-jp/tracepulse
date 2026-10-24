@@ -121,6 +121,44 @@ pub enum NumericDataType {
 #[serde(deny_unknown_fields)]
 pub struct TemplateTables {
     pub interfaces: Option<InterfaceTableTemplate>,
+    pub dom: Option<DomTableTemplate>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomTableTemplate {
+    pub base_oid: String,
+    /// Omit when the row suffix itself is the ifIndex (e.g. Juniper).
+    pub index_oid: Option<String>,
+    pub entity: Option<DomEntityTemplate>,
+    pub metrics: Vec<DomMetricTemplate>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomEntityTemplate {
+    pub name_oid: String,
+    pub contained_in_oid: String,
+    pub alias_oid: String,
+    pub type_oid: String,
+    pub scale_oid: String,
+    pub precision_oid: String,
+    pub status_oid: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomMetricTemplate {
+    pub key: String,
+    pub oid: String,
+    pub unit: String,
+    pub label: String,
+    #[serde(default = "default_metric_scale")]
+    pub scale: f64,
+    #[serde(default)]
+    pub invalid_values: Vec<f64>,
+    #[serde(default)]
+    pub match_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -520,6 +558,54 @@ impl VendorOidTemplate {
         for oid in oids {
             if !is_valid_oid(oid) {
                 return Err(format!("invalid numeric OID '{oid}'"));
+            }
+        }
+        if let Some(dom) = &self.tables.dom {
+            let mut dom_oids = vec![dom.base_oid.as_str()];
+            if dom.index_oid.is_some() && dom.entity.is_some() {
+                return Err("DOM index_oid and entity mapping are mutually exclusive".into());
+            }
+            if let Some(oid) = &dom.index_oid {
+                dom_oids.push(oid);
+            }
+            if let Some(entity) = &dom.entity {
+                dom_oids.extend([
+                    entity.name_oid.as_str(),
+                    &entity.contained_in_oid,
+                    &entity.alias_oid,
+                    &entity.type_oid,
+                    &entity.scale_oid,
+                    &entity.precision_oid,
+                    &entity.status_oid,
+                ]);
+            }
+            let mut keys = std::collections::HashSet::new();
+            if dom.metrics.is_empty() {
+                return Err("DOM requires metrics".into());
+            }
+            for metric in &dom.metrics {
+                if !matches!(metric.key.as_str(), "rx_power" | "tx_power")
+                    || !keys.insert(&metric.key)
+                    || metric.unit != "dBm"
+                    || metric.label.trim().is_empty()
+                    || !metric.scale.is_finite()
+                    || metric.scale <= 0.0
+                    || metric.invalid_values.iter().any(|value| !value.is_finite())
+                    || metric.match_names.iter().any(|name| name.trim().is_empty())
+                    || (dom.entity.is_some() && metric.match_names.is_empty())
+                    || (dom.entity.is_none() && !metric.match_names.is_empty())
+                {
+                    return Err(format!("invalid DOM metric '{}'", metric.key));
+                }
+                if !oid_has_prefix(&metric.oid, &dom.base_oid)
+                    || metric.oid.trim_start_matches('.') == dom.base_oid.trim_start_matches('.')
+                {
+                    return Err("DOM metric OID must be a column within base_oid".into());
+                }
+                dom_oids.push(&metric.oid);
+            }
+            if dom_oids.iter().any(|oid| !is_valid_oid(oid)) {
+                return Err("invalid numeric DOM OID".into());
             }
         }
         for metric in &self.metrics {

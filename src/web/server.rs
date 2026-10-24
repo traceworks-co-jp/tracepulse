@@ -1383,7 +1383,7 @@ fn api_device_detail(
             late_collisions_delta,
         );
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}"}}"#,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}","rx_power_dbm":{},"tx_power_dbm":{}}}"#,
             s.if_index, escape_json(&s.if_name), escape_json(&link_status), health_status,
             s.in_errors, in_errors_delta,
             s.out_errors, out_errors_delta,
@@ -1396,6 +1396,8 @@ fn api_device_detail(
             s.frame_too_longs, frame_too_longs_delta,
             s.internal_mac_receive_errors, internal_mac_receive_errors_delta,
             escape_json(&s.sampled_at),
+            serde_json::json!(s.rx_optical_power_dbm),
+            serde_json::json!(s.tx_power_dbm),
         )
     }).collect();
 
@@ -3014,8 +3016,9 @@ fn page_device_detail(
         <th data-i18n='in_errors'>In Errors</th><th data-i18n='out_errors'>Out Errors</th>\
         <th data-i18n='in_discards'>In Discards</th><th data-i18n='out_discards'>Out Discards</th>\
         <th data-i18n='late_collisions'>Late Collisions</th>\
-        <th><span data-i18n='bandwidth_line1'>Bandwidth</span><br><span data-i18n='bandwidth_line2'>Utilization (%)</span></th><th data-i18n='time'>Sampled At</th>\
-        </tr></thead><tbody id='if-tbody'><tr><td colspan=11>Loading...</td></tr></tbody></table></div>");
+        <th><span data-i18n='bandwidth_line1'>Bandwidth</span><br><span data-i18n='bandwidth_line2'>Utilization (%)</span></th>\
+        <th>Tx Power</th><th>Rx Power</th><th data-i18n='time'>Sampled At</th>\
+        </tr></thead><tbody id='if-tbody'><tr><td colspan=13>Loading...</td></tr></tbody></table></div>");
     html.push_str("</section>");
 
     // セクション: 破損パケット内訳（EtherLike-MIB Error Breakdown）
@@ -4561,6 +4564,7 @@ fn run_polling_loop_with_observer(
                                         internal_mac_receive_errors: iface
                                             .internal_mac_receive_errors,
                                         rx_optical_power_dbm: iface.rx_optical_power_dbm,
+                                        tx_power_dbm: iface.tx_power_dbm,
                                         in_octets: iface.in_octets,
                                         out_octets: iface.out_octets,
                                         bandwidth_utilization: iface.bandwidth_utilization,
@@ -4576,6 +4580,19 @@ fn run_polling_loop_with_observer(
                                     }
                                 }
                             }
+                        }
+                    }
+                    if is_online {
+                        match client.query_dom(&dev_config) {
+                            Ok(powers) => {
+                                for sample in &mut result.samples {
+                                    if let Some(power) = powers.get(&(sample.if_index as u32)) {
+                                        sample.rx_optical_power_dbm = power.rx_power_dbm;
+                                        sample.tx_power_dbm = power.tx_power_dbm;
+                                    }
+                                }
+                            }
+                            Err(error) => tracing::warn!(device = %device.ip, %error, "Optional DOM collection unavailable"),
                         }
                     }
                     result
@@ -5161,6 +5178,46 @@ mod tests {
     }
 
     #[test]
+    fn dom_device_api_exposes_nullable_tx_rx_power_from_persisted_samples() {
+        let repository =
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap());
+        let device = crate::device::types::DeviceConfig::new("192.0.2.77", "public");
+        let id = repository.save_device_config(&device).unwrap();
+        let mut interface = crate::monitor::interface::InterfaceMonitor::new(7, "xe-0/0/0");
+        interface.rx_optical_power_dbm = Some(-3.5);
+        interface.tx_power_dbm = Some(-4.2);
+        repository.save_sample(&interface.into_sample(id)).unwrap();
+        repository
+            .save_sample(
+                &crate::monitor::interface::InterfaceMonitor::new(8, "copper").into_sample(id),
+            )
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repository));
+        let body = super::api_device_detail(
+            &device.ip,
+            &repo,
+            &Arc::new(Mutex::new(AppConfig::default())),
+            false,
+        );
+        let data: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let interfaces = data["interfaces"].as_array().unwrap();
+        let optical = interfaces
+            .iter()
+            .find(|interface| interface["if_index"] == 7)
+            .unwrap();
+        assert_eq!(optical["rx_power_dbm"], -3.5);
+        assert_eq!(optical["tx_power_dbm"], -4.2);
+        let copper = interfaces
+            .iter()
+            .find(|interface| interface["if_index"] == 8)
+            .unwrap();
+        assert!(copper["rx_power_dbm"].is_null());
+        assert!(copper["tx_power_dbm"].is_null());
+        let html = super::page_device_detail(&device.ip, &repo, None);
+        assert!(html.contains("<th>Tx Power</th><th>Rx Power</th>"));
+    }
+
+    #[test]
     fn live_flow_analytics_exposes_all_sections() {
         let records = vec![FlowRecord {
             exporter_ip: Some("192.0.2.10".to_string()),
@@ -5240,6 +5297,7 @@ mod tests {
                 frame_too_longs: 0,
                 internal_mac_receive_errors: 0,
                 rx_optical_power_dbm: None,
+                tx_power_dbm: None,
                 in_octets: 0,
                 out_octets: 0,
                 bandwidth_utilization: 0.0,

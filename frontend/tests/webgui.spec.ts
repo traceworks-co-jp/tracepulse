@@ -1,5 +1,34 @@
 import { expect, test } from "@playwright/test";
 
+test("DOM power columns show dBm, exact warning threshold, and mixed unsupported ports", async ({ page }) => {
+    await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
+    await page.goto("/");
+    await page.evaluate(() => {
+        document.body.insertAdjacentHTML("beforeend", "<table><tbody id='if-tbody'></tbody></table>");
+    });
+    await page.addScriptTag({ url: "/static/js/device-detail.js" });
+    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderInterfaces([
+        {if_index:7,if_name:"xe-0/0/0",link_status:"up",tx_power_dbm:-4.2,rx_power_dbm:-3.5},
+        {if_index:8,if_name:"ge-0/0/1",link_status:"up",tx_power_dbm:null,rx_power_dbm:null,predictive_status:{rx_optical_power_dbm:-5}},
+        {if_index:9,if_name:"weak",link_status:"up",tx_power_dbm:-20,rx_power_dbm:-40},
+        {if_index:10,if_name:"zero",link_status:"up",tx_power_dbm:0,rx_power_dbm:-19.99}
+    ]);` });
+    const rows = page.locator("#if-tbody tr");
+    await expect(rows).toHaveCount(4);
+    await expect(rows.nth(0).locator("td").nth(10)).toHaveText("-4.2 dBm");
+    await expect(rows.nth(0).locator("td").nth(11)).toHaveText("-3.5 dBm");
+    await expect(rows.nth(0).locator(".status-warning")).toHaveCount(0);
+    await expect(rows.nth(1).locator("td").nth(10)).toHaveText("N/A");
+    await expect(rows.nth(1).locator("td").nth(11)).toHaveText("N/A");
+    await expect(rows.nth(2).locator(".status-warning")).toHaveCount(2);
+    await expect(rows.nth(2).locator("td").nth(11)).toHaveText("-40.0 dBm");
+    await expect(rows.nth(2).locator(".status-warning").first()).toHaveCSS("color", "rgb(251, 191, 36)");
+    await expect(rows.nth(3).locator("td").nth(10)).toHaveText("0.0 dBm");
+    await expect(rows.nth(3).locator(".status-warning")).toHaveCount(0);
+    await page.addScriptTag({ content: "TracePulseDeviceDetail.renderInterfaces([]);" });
+    await expect(page.locator("#if-tbody td")).toHaveAttribute("colspan", "13");
+});
+
 test("vendor hardware states render normal power and critical failures correctly", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.goto("/");

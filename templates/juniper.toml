@@ -2,6 +2,24 @@ name = "Juniper Network Device"
 description = "Operating CPU, buffer utilization, temperature, and named FRU status"
 enterprise_id = 2636
 
+# JUNIPER-DOM-MIB: row suffix is ifIndex; column 6 is bias current, not Tx power.
+[tables.dom]
+base_oid = "1.3.6.1.4.1.2636.3.60.1.1.1.1"
+
+[[tables.dom.metrics]]
+key = "rx_power"
+oid = "1.3.6.1.4.1.2636.3.60.1.1.1.1.5"
+unit = "dBm"
+scale = 0.01
+label = "Rx Power"
+
+[[tables.dom.metrics]]
+key = "tx_power"
+oid = "1.3.6.1.4.1.2636.3.60.1.1.1.1.7"
+unit = "dBm"
+scale = 0.01
+label = "Tx Power"
+
 # Operating and FRU rows use all four index components.
 [cpu]
 candidates = ["1.3.6.1.4.1.2636.3.1.13.1.8"]

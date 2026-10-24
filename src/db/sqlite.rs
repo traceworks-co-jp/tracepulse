@@ -237,6 +237,12 @@ fn ensure_interface_sample_columns(connection: &Connection) -> Result<(), AppErr
             [],
         )?;
     }
+    if !columns.iter().any(|c| c == "tx_power_dbm") {
+        connection.execute(
+            "ALTER TABLE interface_samples ADD COLUMN tx_power_dbm REAL",
+            [],
+        )?;
+    }
     if !columns.iter().any(|c| c == "rx_optical_power_dbm") {
         connection.execute(
             "ALTER TABLE interface_samples ADD COLUMN rx_optical_power_dbm REAL",

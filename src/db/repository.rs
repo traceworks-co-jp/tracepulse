@@ -172,8 +172,8 @@ impl Repository {
 
     pub fn save_sample(&self, sample: &InterfaceSample) -> Result<i64, AppError> {
         let id = self.connection.execute(
-            "INSERT INTO interface_samples (device_id, if_index, if_name, link_status, in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions, fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm, in_octets, out_octets, bandwidth_utilization, sampled_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+            "INSERT INTO interface_samples (device_id, if_index, if_name, link_status, in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions, fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm, in_octets, out_octets, bandwidth_utilization, sampled_at, tx_power_dbm)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 sample.device_id,
                 sample.if_index,
@@ -195,6 +195,7 @@ impl Repository {
                 sample.out_octets,
                 sample.bandwidth_utilization,
                 sample.sampled_at,
+                sample.tx_power_dbm,
             ],
         )?;
 
@@ -982,6 +983,7 @@ impl Repository {
                 frame_too_longs: 0,
                 internal_mac_receive_errors: 0,
                 rx_optical_power_dbm: None,
+                tx_power_dbm: None,
                 in_octets: 0,
                 out_octets: 0,
                 bandwidth_utilization: 0.0,
@@ -1113,7 +1115,7 @@ impl Repository {
                     in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
                     fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
                     in_octets, out_octets,
-                    bandwidth_utilization, sampled_at
+                    bandwidth_utilization, sampled_at, tx_power_dbm
              FROM interface_samples
              WHERE device_id = ?1
              ORDER BY sampled_at DESC
@@ -1139,6 +1141,7 @@ impl Repository {
                     frame_too_longs: row.get::<_, i64>(14)? as u64,
                     internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
                     rx_optical_power_dbm: row.get(16)?,
+                    tx_power_dbm: row.get(21)?,
                     in_octets: row.get::<_, i64>(17)? as u64,
                     out_octets: row.get::<_, i64>(18)? as u64,
                     bandwidth_utilization: row.get(19)?,
@@ -1158,7 +1161,7 @@ impl Repository {
                     in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
                     fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
                     in_octets, out_octets,
-                    bandwidth_utilization, sampled_at
+                    bandwidth_utilization, sampled_at, tx_power_dbm
              FROM interface_samples
              WHERE (device_id, if_index, sampled_at) IN (
                  SELECT device_id, if_index, MAX(sampled_at)
@@ -1188,6 +1191,7 @@ impl Repository {
                     frame_too_longs: row.get::<_, i64>(14)? as u64,
                     internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
                     rx_optical_power_dbm: row.get(16)?,
+                    tx_power_dbm: row.get(21)?,
                     in_octets: row.get::<_, i64>(17)? as u64,
                     out_octets: row.get::<_, i64>(18)? as u64,
                     bandwidth_utilization: row.get(19)?,
@@ -1208,7 +1212,7 @@ impl Repository {
             "SELECT id, device_id, if_index, if_name, link_status,
                     in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
                     fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
-                    in_octets, out_octets, bandwidth_utilization, sampled_at
+                    in_octets, out_octets, bandwidth_utilization, sampled_at, tx_power_dbm
              FROM interface_samples
              WHERE device_id = ?1 AND if_index = ?2
              ORDER BY sampled_at DESC, id DESC
@@ -1234,6 +1238,7 @@ impl Repository {
                 frame_too_longs: row.get::<_, i64>(14)? as u64,
                 internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
                 rx_optical_power_dbm: row.get(16)?,
+                tx_power_dbm: row.get(21)?,
                 in_octets: row.get::<_, i64>(17)? as u64,
                 out_octets: row.get::<_, i64>(18)? as u64,
                 bandwidth_utilization: row.get(19)?,
@@ -1257,7 +1262,7 @@ impl Repository {
             "SELECT id, device_id, if_index, if_name, link_status,
                     in_errors, out_errors, in_packets, out_packets, in_discards, out_discards, late_collisions,
                     fcs_errors, alignment_errors, frame_too_longs, internal_mac_receive_errors, rx_optical_power_dbm,
-                    in_octets, out_octets, bandwidth_utilization, sampled_at
+                    in_octets, out_octets, bandwidth_utilization, sampled_at, tx_power_dbm
              FROM interface_samples
              WHERE device_id = ?1 AND if_index = ?2
              ORDER BY sampled_at DESC, id DESC
@@ -1284,6 +1289,7 @@ impl Repository {
                     frame_too_longs: row.get::<_, i64>(14)? as u64,
                     internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
                     rx_optical_power_dbm: row.get(16)?,
+                    tx_power_dbm: row.get(21)?,
                     in_octets: row.get::<_, i64>(17)? as u64,
                     out_octets: row.get::<_, i64>(18)? as u64,
                     bandwidth_utilization: row.get(19)?,

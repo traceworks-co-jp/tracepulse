@@ -130,6 +130,8 @@ declare global {
     }
 
     interface DeviceInterface {
+        rx_power_dbm?: number | null;
+        tx_power_dbm?: number | null;
         if_index: number;
         if_name?: string;
         link_status?: string;

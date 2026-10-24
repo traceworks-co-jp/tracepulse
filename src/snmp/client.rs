@@ -36,6 +36,18 @@ pub struct SnmpClient {
 }
 
 impl SnmpClient {
+    pub(super) fn interface_dom_template(
+        &self,
+        session: &mut SyncSession,
+    ) -> Result<Option<crate::snmp::template::DomTableTemplate>, AppError> {
+        let sys_object_id = query_string(session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])?;
+        Ok(self
+            .templates
+            .select(Some(&sys_object_id))
+            .tables
+            .dom
+            .clone())
+    }
     pub fn query_template_metrics(
         &self,
         device: &DeviceConfig,
@@ -825,9 +837,6 @@ impl SnmpClient {
                 query_string(&mut session, &name_oid).unwrap_or_else(|_| format!("if-{}", if_index))
             }
         };
-        let rx_optical_power_dbm =
-            query_rx_optical_power_dbm(&mut session, if_index, &resolved_name);
-
         Ok(InterfaceMonitor::from_snmp_snapshot(
             if_index as i32,
             &resolved_name,
@@ -843,13 +852,13 @@ impl SnmpClient {
             alignment_errors,
             frame_too_longs,
             internal_mac_receive_errors,
-            rx_optical_power_dbm,
+            None,
             in_octets,
             out_octets,
         ))
     }
 
-    fn open_session(&self, device: &DeviceConfig) -> Result<SyncSession, AppError> {
+    pub(super) fn open_session(&self, device: &DeviceConfig) -> Result<SyncSession, AppError> {
         self.open_session_with_timeout(device, Duration::from_secs(2))
     }
 
@@ -1217,48 +1226,6 @@ fn query_i64(session: &mut SyncSession, oid: &[u32]) -> Result<i64, AppError> {
         .ok_or_else(|| AppError::Validation(format!("OID {:?} was not returned", oid)))
 }
 
-fn query_rx_optical_power_dbm(
-    session: &mut SyncSession,
-    if_index: u32,
-    if_name: &str,
-) -> Option<f64> {
-    let names = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 2]).ok()?;
-    let index = names.into_iter().find_map(|(index, name)| {
-        let lower = name.to_ascii_lowercase();
-        let optical = lower.contains("rx")
-            || lower.contains("receive")
-            || lower.contains("optical")
-            || name.contains('光');
-        let same_interface = name.contains(if_name) || index == if_index;
-        if optical && same_interface {
-            Some(index)
-        } else {
-            None
-        }
-    })?;
-    let value = query_i64(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 4, index]).ok()? as f64;
-    let scale = query_i64(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 3, index]).unwrap_or(9);
-    let precision = query_i64(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 6, index]).unwrap_or(0);
-    let exponent = match scale {
-        1 => -24,
-        2 => -21,
-        3 => -18,
-        4 => -15,
-        5 => -12,
-        6 => -9,
-        7 => -6,
-        8 => -3,
-        _ => 0,
-    };
-    let scaled = value * 10_f64.powi(exponent);
-    let dbm = if precision > 0 {
-        scaled / 10_f64.powi(precision as i32)
-    } else {
-        scaled
-    };
-    dbm.is_finite().then_some(dbm)
-}
-
 fn query_table_average_u32(
     session: &mut SyncSession,
     prefix: &[u32],
@@ -1548,7 +1515,7 @@ impl SnmpClient {
     }
 }
 
-fn parse_oid_string(input: &str) -> Option<Vec<u32>> {
+pub(super) fn parse_oid_string(input: &str) -> Option<Vec<u32>> {
     if !crate::snmp::template::is_valid_oid(input) {
         return None;
     }
@@ -1570,7 +1537,7 @@ fn query_u32_with_table_fallback(
     query_table_first_u32(session, oid)
 }
 
-fn query_template_column(
+pub(super) fn query_template_column(
     session: &mut SyncSession,
     prefix: &[u32],
 ) -> Result<std::collections::BTreeMap<Vec<u32>, SnmpValue>, AppError> {
@@ -2550,6 +2517,107 @@ mod template_collection_tests {
     }
 
     #[test]
+    fn dom_walk_collects_juniper_tx_rx_and_skips_unsupported_ports() {
+        let template: VendorOidTemplate =
+            toml::from_str(include_str!("../../templates/juniper.toml")).unwrap();
+        let mut agent = TemplateAgent::new(vec![
+            (
+                "1.3.6.1.4.1.2636.3.60.1.1.1.1.5.7",
+                tlv(0x02, &(-350i32).to_be_bytes()),
+            ),
+            ("1.3.6.1.4.1.2636.3.60.1.1.1.1.5.10", tlv(0x80, &[])),
+            (
+                "1.3.6.1.4.1.2636.3.60.1.1.1.1.5.9",
+                tlv(0x02, &(-2200i32).to_be_bytes()),
+            ),
+            (
+                "1.3.6.1.4.1.2636.3.60.1.1.1.1.7.7",
+                tlv(0x02, &(-420i32).to_be_bytes()),
+            ),
+            ("1.3.6.1.4.1.2636.3.60.1.1.1.1.7.9", tlv(0x02, &[0])),
+        ]);
+        let powers =
+            crate::snmp::dom::collect(&mut agent.session, template.tables.dom.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(powers[&7].rx_power_dbm, Some(-3.5));
+        assert_eq!(powers[&7].tx_power_dbm, Some(-4.2));
+        assert_eq!(powers[&9].rx_power_dbm, Some(-22.0));
+        assert_eq!(powers[&9].tx_power_dbm, Some(0.0));
+        assert!(!powers.contains_key(&8));
+    }
+
+    #[test]
+    fn dom_walk_decodes_cisco_entity_alias_and_sensor_units() {
+        let template: VendorOidTemplate =
+            toml::from_str(include_str!("../../templates/cisco.toml")).unwrap();
+        let mut agent = TemplateAgent::new(vec![
+            (
+                "1.3.6.1.2.1.47.1.1.1.1.7.100",
+                tlv(0x04, b"Receive Power Sensor"),
+            ),
+            (
+                "1.3.6.1.2.1.47.1.1.1.1.7.101",
+                tlv(0x04, b"Transmit Power Sensor"),
+            ),
+            ("1.3.6.1.2.1.47.1.1.1.1.4.100", tlv(0x02, &[40])),
+            ("1.3.6.1.2.1.47.1.1.1.1.4.101", tlv(0x02, &[40])),
+            (
+                "1.3.6.1.2.1.47.1.3.2.1.2.40.0",
+                encoded_oid("1.3.6.1.2.1.2.2.1.1.7"),
+            ),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.1.100", tlv(0x02, &[6])),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.1.101", tlv(0x02, &[6])),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.2.100", tlv(0x02, &[8])),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.2.101", tlv(0x02, &[8])),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.3.100", tlv(0x02, &[3])),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.3.101", tlv(0x02, &[3])),
+            (
+                "1.3.6.1.4.1.9.9.91.1.1.1.1.4.100",
+                tlv(0x02, &500i32.to_be_bytes()),
+            ),
+            (
+                "1.3.6.1.4.1.9.9.91.1.1.1.1.4.101",
+                tlv(0x02, &1000i32.to_be_bytes()),
+            ),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.5.100", tlv(0x02, &[1])),
+            ("1.3.6.1.4.1.9.9.91.1.1.1.1.5.101", tlv(0x02, &[1])),
+        ]);
+        let powers =
+            crate::snmp::dom::collect(&mut agent.session, template.tables.dom.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(powers.len(), 1);
+        assert!((powers[&7].rx_power_dbm.unwrap() + 3.0102999566).abs() < 1e-9);
+        assert_eq!(powers[&7].tx_power_dbm, Some(0.0));
+        // Both metrics share a value column; walk it only once.
+        let requests = agent.requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|oid| oid.as_slice() == [1, 3, 6, 1, 4, 1, 9, 9, 91, 1, 1, 1, 1, 4])
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn dom_walk_handles_empty_tables_and_missing_direction() {
+        let template: VendorOidTemplate =
+            toml::from_str(include_str!("../../templates/juniper.toml")).unwrap();
+        let table = template.tables.dom.unwrap();
+        let mut empty = TemplateAgent::new(vec![]);
+        assert!(
+            crate::snmp::dom::collect(&mut empty.session, &table)
+                .unwrap()
+                .is_empty()
+        );
+        let mut tx_only =
+            TemplateAgent::new(vec![("1.3.6.1.4.1.2636.3.60.1.1.1.1.7.7", tlv(0x02, &[0]))]);
+        let powers = crate::snmp::dom::collect(&mut tx_only.session, &table).unwrap();
+        assert_eq!(powers[&7].rx_power_dbm, None);
+        assert_eq!(powers[&7].tx_power_dbm, Some(0.0));
+    }
+
+    #[test]
     fn collects_custom_toml_metrics_via_numeric_snmp_get() {
         let registry = TemplateRegistry::load(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2641,7 +2709,6 @@ mod template_collection_tests {
                 ("1.3.6.1.2.1.2.2.1.10.7", tlv(0x41, &[100])),
                 ("1.3.6.1.2.1.2.2.1.16.7", tlv(0x41, &[0, 200])),
                 (name_oid, tlv(0x04, b"Ethernet7")),
-                ("1.3.6.1.2.1.99.1.1.1.2", tlv(0x80, &[])),
             ]);
             let interface = client
                 .query_interface_with_session(session, 7, None)

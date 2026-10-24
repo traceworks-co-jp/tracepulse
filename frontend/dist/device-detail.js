@@ -323,7 +323,7 @@ var TracePulseDeviceDetail = (() => {
     const tbody = document.getElementById("if-tbody");
     if (!tbody) return;
     if (ifaces.length === 0) {
-      tbody.innerHTML = `<tr><td colspan=11 class=no-data>${t("no_interface_data")}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan=13 class=no-data>${t("no_interface_data")}</td></tr>`;
       return;
     }
     const spikeThreshold = window.TRACEPULSE_SPIKE_THRESHOLD || 10;
@@ -336,10 +336,12 @@ var TracePulseDeviceDetail = (() => {
       const predictiveStatus = iface.predictive_status;
       const predictiveBadge = predictiveStatus && (predictiveStatus.dom_warning || predictiveStatus.trend_warning) ? "<span class='pred-badge'>[PRED]</span>" : "";
       const flipErrorPopover = index >= ifaces.length - 2;
-      const rxPower = predictiveStatus?.rx_optical_power_dbm;
-      const domMeter = rxPower !== null && rxPower !== void 0 ? `<div class='dom-meter'><span>Rx Power: ${Number(rxPower).toFixed(1)} dBm</span><span class='dom-meter-track'><span class='dom-meter-fill ${predictiveStatus?.dom_warning ? "" : "ok"}' style='width:${Math.max(0, Math.min(100, (Number(rxPower) + 30) / 30 * 100))}%'></span></span></div>` : "";
-      return `<tr class='${rowClass.trim()}'><td>${iface.if_index}</td><td>${esc(iface.if_name)}${predictiveBadge}</td><td><span class=${linkClass}>${esc(iface.link_status)}</span></td><td>${diagnosticBadge(iface.health_status)}</td><td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td><td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td><td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td><td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td><td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td><td>${(Number(metrics.bandwidth_utilization || 0) * 100).toFixed(1)}%${domMeter}</td><td>${fmtTime(iface.sampled_at)}</td></tr>`;
+      return `<tr class='${rowClass.trim()}'><td>${iface.if_index}</td><td>${esc(iface.if_name)}${predictiveBadge}</td><td><span class=${linkClass}>${esc(iface.link_status)}</span></td><td>${diagnosticBadge(iface.health_status)}</td><td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td><td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td><td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td><td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td><td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td><td>${(Number(metrics.bandwidth_utilization || 0) * 100).toFixed(1)}%</td><td>${opticalPowerHtml(iface.tx_power_dbm)}</td><td>${opticalPowerHtml(iface.rx_power_dbm === void 0 ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td><td>${fmtTime(iface.sampled_at)}</td></tr>`;
     }).join("");
+  }
+  function opticalPowerHtml(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
+    return `<span class="${value <= -20 ? "status-warning" : ""}">${value.toFixed(1)} dBm</span>`;
   }
   function renderHardwareStatus(sensors = []) {
     const box = document.getElementById("hardware-status");

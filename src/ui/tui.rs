@@ -361,6 +361,8 @@ pub struct InterfaceSummary {
     pub in_discards: u64,
     pub out_discards: u64,
     pub late_collisions: u64,
+    pub rx_power_dbm: Option<f64>,
+    pub tx_power_dbm: Option<f64>,
     pub neighbor: String,
 }
 
@@ -1417,6 +1419,8 @@ impl TuiRenderer {
                         "Rate / Bandwidth",
                         "Err / Disc (In/Out)",
                         "Late Coll",
+                        "Tx Power",
+                        "Rx Power",
                         "LLDP / CDP Neighbor (Topology)",
                     ]
                     .iter()
@@ -1461,6 +1465,8 @@ impl TuiRenderer {
                             Cell::from(rate_text),
                             Cell::from(err_disc).style(err_style),
                             Cell::from(iface.late_collisions.to_string()),
+                            optical_power_cell(iface.tx_power_dbm),
+                            optical_power_cell(iface.rx_power_dbm),
                             Cell::from(iface.neighbor.clone()).style(if iface.neighbor != "N/A" {
                                 Style::default().fg(Color::LightCyan)
                             } else {
@@ -1473,12 +1479,14 @@ impl TuiRenderer {
                     let if_table = Table::new(
                         if_rows,
                         [
-                            Constraint::Percentage(18),
+                            Constraint::Percentage(15),
+                            Constraint::Percentage(6),
                             Constraint::Percentage(10),
-                            Constraint::Percentage(14),
-                            Constraint::Percentage(20),
-                            Constraint::Percentage(10),
-                            Constraint::Percentage(28),
+                            Constraint::Percentage(15),
+                            Constraint::Percentage(6),
+                            Constraint::Percentage(12),
+                            Constraint::Percentage(12),
+                            Constraint::Percentage(24),
                         ],
                     )
                     .header(if_header)
@@ -2688,6 +2696,8 @@ impl TuiRenderer {
                     in_discards: iface.in_discards,
                     out_discards: iface.out_discards,
                     late_collisions: iface.late_collisions,
+                    rx_power_dbm: iface.rx_optical_power_dbm,
+                    tx_power_dbm: iface.tx_power_dbm,
                     neighbor,
                 }
             })
@@ -2695,9 +2705,41 @@ impl TuiRenderer {
     }
 }
 
+fn optical_power_cell(value: Option<f64>) -> Cell<'static> {
+    match value.filter(|value| value.is_finite()) {
+        Some(value) => Cell::from(format!("{value:.1} dBm")).style(if value <= -20.0 {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default()
+        }),
+        None => Cell::from("N/A"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dom_cells_show_dbm_and_warn_only_at_threshold() {
+        assert_eq!(
+            optical_power_cell(Some(-4.2)),
+            Cell::from("-4.2 dBm").style(Style::default())
+        );
+        assert_eq!(
+            optical_power_cell(Some(0.0)),
+            Cell::from("0.0 dBm").style(Style::default())
+        );
+        assert_eq!(
+            optical_power_cell(Some(-20.0)),
+            Cell::from("-20.0 dBm").style(Style::default().fg(Color::Yellow))
+        );
+        assert_eq!(
+            optical_power_cell(Some(-40.0)),
+            Cell::from("-40.0 dBm").style(Style::default().fg(Color::Yellow))
+        );
+        assert_eq!(optical_power_cell(None), Cell::from("N/A"));
+    }
 
     #[test]
     fn traffic_header_fits_terminal_and_separates_columns() {

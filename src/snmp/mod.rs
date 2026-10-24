@@ -1,4 +1,5 @@
 pub mod client;
+pub mod dom;
 pub mod oid;
 pub mod template;
 pub mod topology;

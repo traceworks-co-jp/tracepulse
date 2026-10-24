@@ -34,6 +34,8 @@ pub struct InterfaceSample {
     pub frame_too_longs: u64,
     pub internal_mac_receive_errors: u64,
     pub rx_optical_power_dbm: Option<f64>,
+    #[serde(default)]
+    pub tx_power_dbm: Option<f64>,
     pub in_octets: u64,
     pub out_octets: u64,
     pub bandwidth_utilization: f64,

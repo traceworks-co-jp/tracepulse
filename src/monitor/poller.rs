@@ -75,6 +75,19 @@ impl PollingEngine {
             }
         }
 
+        match client.query_dom(device) {
+            Ok(powers) => {
+                for interface in &mut interfaces {
+                    if let Some(power) = powers.get(&(interface.if_index as u32)) {
+                        interface.rx_optical_power_dbm = power.rx_power_dbm;
+                        interface.tx_power_dbm = power.tx_power_dbm;
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(device = %device.ip, %error, "Optional DOM collection unavailable")
+            }
+        }
         Ok((system, interfaces))
     }
 }

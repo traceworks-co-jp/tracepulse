@@ -121,6 +121,14 @@ Use a concise, imperative description and keep unrelated changes in separate com
 6. Open a Pull Request against the official repository's `main` branch.
 7. Respond to review feedback and keep the branch up to date if requested.
 
+### Optical transceiver templates
+
+For optical transceiver templates, see the
+[DOM/DDM schema and vendor mapping rules](docs/design/03-snmp-collection.md#optical-transceiver-power-dom--ddm).
+Verify the actual power units, raw scale/sentinels, and mapping to ifIndex;
+never assume sensor indices are interface indices. Include model/firmware and
+sanitized validation evidence, and do not commit proprietary MIB source text.
+
 ### Pull Request Checklist
 
 Before submitting your Pull Request, confirm that:

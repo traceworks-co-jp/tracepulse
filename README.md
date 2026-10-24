@@ -113,6 +113,11 @@ Devices without a dedicated template can still be monitored through the `generic
 
 See the [template schema, OID sources, Docker mount example, and migration guide](docs/design/03-snmp-collection.md). Vendor metric collection is defined in TOML, not hard-coded probes; LLDP/CDP topology discovery is retained separately. The new vendor definitions are tested with mock SNMP agents, not certified across physical device models.
 
+Port-level optical Tx/Rx power is available through the Juniper DOM and compatible
+Cisco ENTITY sensor templates. Unsupported ports display N/A; readings at or below
+-20 dBm have a visual warning only. See the [DOM/DDM schema and limitations](docs/design/03-snmp-collection.md#optical-transceiver-power-dom--ddm)
+for units, ifIndex mapping, Cisco compatibility, and per-lane exclusions.
+
 ### Verified hardware
 
 - Cisco Catalyst 2960X series (verified on real hardware by the maintainers)
