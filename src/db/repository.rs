@@ -26,6 +26,8 @@ impl Repository {
     }
 
     pub fn save_device(&self, device: &Device) -> Result<i64, AppError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        self.check_registration_capacity(&device.ip)?;
         let community = self.protect_community(&device.ip, &device.community)?;
         let id = self.connection.execute(
             "INSERT INTO devices (name, ip, community, device_type, status, last_seen_at, created_at, updated_at, display_name, tags)
@@ -49,6 +51,7 @@ impl Repository {
             ],
         )?;
 
+        transaction.commit()?;
         Ok(id as i64)
     }
 
@@ -56,6 +59,8 @@ impl Repository {
         &self,
         device: &crate::device::types::DeviceConfig,
     ) -> Result<i64, AppError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        self.check_registration_capacity(&device.ip)?;
         let community = self.protect_community(&device.ip, &device.community)?;
         let maybe_existing = self.find_device_by_ip(&device.ip)?;
         let id = match maybe_existing {
@@ -80,7 +85,23 @@ impl Repository {
             }
         };
 
+        transaction.commit()?;
         Ok(id)
+    }
+
+    fn check_registration_capacity(&self, ip: &str) -> Result<(), AppError> {
+        let (exists, count): (bool, i64) = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE ip=?1), COUNT(*) FROM devices",
+            [ip],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if !exists && count >= crate::device::MAX_MONITORED_NODES as i64 {
+            return Err(AppError::Validation(format!(
+                "Device registration limit reached ({} nodes per instance)",
+                crate::device::MAX_MONITORED_NODES
+            )));
+        }
+        Ok(())
     }
 
     pub fn find_device_by_ip(&self, ip: &str) -> Result<Option<Device>, AppError> {
@@ -126,20 +147,26 @@ impl Repository {
             .id
             .ok_or_else(|| AppError::Validation(format!("device {} has no id", ip)))?;
 
-        self.connection.execute(
+        let transaction = self.connection.unchecked_transaction()?;
+        Self::delete_device(&transaction, device_id)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn delete_device(connection: &rusqlite::Connection, device_id: i64) -> Result<(), AppError> {
+        connection.execute(
             "DELETE FROM device_metrics WHERE device_id = ?1",
             params![device_id],
         )?;
-        self.connection.execute(
+        connection.execute(
             "DELETE FROM interface_samples WHERE device_id = ?1",
             params![device_id],
         )?;
-        self.connection.execute(
+        connection.execute(
             "DELETE FROM alert_events WHERE device_id = ?1",
             params![device_id],
         )?;
-        self.connection
-            .execute("DELETE FROM devices WHERE id = ?1", params![device_id])?;
+        connection.execute("DELETE FROM devices WHERE id = ?1", params![device_id])?;
 
         Ok(())
     }
@@ -252,6 +279,56 @@ impl Repository {
         }
         transaction.commit()?;
         Ok(plan)
+    }
+
+    pub fn bulk_action(
+        &self,
+        request: &crate::device::metadata::BulkAction,
+    ) -> Result<usize, AppError> {
+        use crate::device::metadata::{BulkAction, DeviceMetadata, selected_devices};
+        let transaction = self.connection.unchecked_transaction()?;
+        let devices = self.list_devices()?;
+        let ids = match request {
+            BulkAction::AddTags { device_ids, .. } | BulkAction::Unregister { device_ids } => {
+                device_ids
+            }
+        };
+        let selected = selected_devices(ids, &devices)?;
+        match request {
+            BulkAction::AddTags { tags, .. } => {
+                let additions = DeviceMetadata {
+                    display_name: None,
+                    tags: tags.clone(),
+                }
+                .normalize()?
+                .tags;
+                if additions.is_empty() {
+                    return Err(AppError::Validation("at least one tag is required".into()));
+                }
+                for device in &selected {
+                    let mut merged = device.tags.clone();
+                    for tag in &additions {
+                        if !merged.contains(tag) {
+                            merged.push(tag.clone());
+                        }
+                    }
+                    self.update_device_metadata(
+                        &device.ip,
+                        DeviceMetadata {
+                            display_name: device.display_name.clone(),
+                            tags: merged,
+                        },
+                    )?;
+                }
+            }
+            BulkAction::Unregister { .. } => {
+                for id in ids {
+                    Self::delete_device(&transaction, *id)?;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(selected.len())
     }
 
     pub fn count_rows(&self, table: &str) -> Result<i64, AppError> {

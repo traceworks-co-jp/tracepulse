@@ -66,10 +66,41 @@ pub struct RenameItem {
     pub display_name: String,
 }
 
-pub fn rename_plan(request: &BulkRename, devices: &[Device]) -> Result<Vec<RenameItem>, AppError> {
-    if request.device_ids.is_empty() || request.device_ids.len() > 1000 {
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BulkAction {
+    AddTags {
+        device_ids: Vec<i64>,
+        tags: Vec<String>,
+    },
+    Unregister {
+        device_ids: Vec<i64>,
+    },
+}
+
+pub fn selected_devices<'a>(
+    ids: &[i64],
+    devices: &'a [Device],
+) -> Result<Vec<&'a Device>, AppError> {
+    if ids.is_empty() || ids.len() > 1000 {
         return Err(invalid("select between 1 and 1000 devices"));
     }
+    let mut seen = HashSet::new();
+    ids.iter()
+        .map(|id| {
+            if *id <= 0 || !seen.insert(*id) {
+                return Err(invalid("device_ids must be unique positive IDs"));
+            }
+            devices
+                .iter()
+                .find(|device| device.id == Some(*id))
+                .ok_or_else(|| invalid(format!("device {id} was not found")))
+        })
+        .collect()
+}
+
+pub fn rename_plan(request: &BulkRename, devices: &[Device]) -> Result<Vec<RenameItem>, AppError> {
+    let devices = selected_devices(&request.device_ids, devices)?;
     if request.padding > 10 {
         return Err(invalid("padding must be between 0 and 10"));
     }
@@ -79,20 +110,12 @@ pub fn rename_plan(request: &BulkRename, devices: &[Device]) -> Result<Vec<Renam
         .start_number
         .checked_add(request.device_ids.len() as u32 - 1)
         .ok_or_else(|| invalid("sequence exceeds u32 maximum"))?;
-    let mut ids = HashSet::new();
     let mut selected = Vec::new();
-    for id in &request.device_ids {
-        if *id <= 0 || !ids.insert(*id) {
-            return Err(invalid("device_ids must be unique positive IDs"));
-        }
-        let device = devices
-            .iter()
-            .find(|device| device.id == Some(*id))
-            .ok_or_else(|| invalid(format!("device {id} was not found")))?;
+    for device in devices {
         let ip = device
             .ip
             .parse::<std::net::IpAddr>()
-            .map_err(|_| invalid(format!("device {id} has an invalid IP address")))?;
+            .map_err(|_| invalid(format!("device {:?} has an invalid IP address", device.id)))?;
         selected.push((device, ip));
     }
     if matches!(request.sort_by, RenameSort::IpAsc) {

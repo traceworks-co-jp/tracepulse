@@ -990,7 +990,11 @@ impl TuiRenderer {
                 let found_devices = task.found.lock().map(|l| l.clone()).unwrap_or_default();
 
                 for dev in found_devices {
-                    let _ = repository.save_device_config(&dev);
+                    if let Err(error) = repository.save_device_config(&dev) {
+                        tracing::warn!(ip = %dev.ip, %error, "Device registration failed");
+                        status_msg = format!("Registration failed: {error}");
+                        break;
+                    }
                 }
 
                 // 登録直後にプログレスバー付きで初回ポーリングタスクを開始

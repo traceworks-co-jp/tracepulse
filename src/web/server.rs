@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 // ─── Default web limits ──────────────────────────────────────────────────────
-const COMMUNITY_MAX_DEVICES: usize = 25;
+use crate::device::MAX_MONITORED_NODES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebLimits {
@@ -25,16 +25,24 @@ pub struct WebLimits {
 impl WebLimits {
     pub const fn community() -> Self {
         Self {
-            max_devices: Some(COMMUNITY_MAX_DEVICES),
+            max_devices: Some(MAX_MONITORED_NODES),
             max_discovery_cidrs: Some(1),
         }
     }
 
+    /// Remove discovery-range restrictions; the instance node ceiling still applies.
     pub const fn unrestricted() -> Self {
         Self {
             max_devices: None,
             max_discovery_cidrs: None,
         }
+    }
+
+    /// Apply the instance ceiling while retaining stricter license limits.
+    pub fn effective_max_devices(self) -> usize {
+        self.max_devices
+            .unwrap_or(MAX_MONITORED_NODES)
+            .min(MAX_MONITORED_NODES)
     }
 }
 
@@ -752,6 +760,11 @@ fn handle_connection(
         return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
     }
 
+    if req.method == "POST" && clean_path == "/api/devices/bulk-action" {
+        let (status, body) = api_bulk_action(&req.body, &repo);
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+
     // Route: GET /device/<ip>
     if req.method == "GET" && req.path.starts_with("/device/") {
         let ip = url_decode(clean_path.trim_start_matches("/device/"));
@@ -1362,6 +1375,18 @@ fn api_bulk_rename(
         repo.lock()
             .map_err(|error| AppError::Database(error.to_string()))?
             .bulk_rename(&request, preview)
+    })())
+}
+
+fn api_bulk_action(body: &str, repo: &Arc<Mutex<Repository>>) -> (&'static str, String) {
+    metadata_response((|| {
+        let request = serde_json::from_str::<crate::device::metadata::BulkAction>(body)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        let affected = repo
+            .lock()
+            .map_err(|error| AppError::Database(error.to_string()))?
+            .bulk_action(&request)?;
+        Ok(serde_json::json!({ "affected": affected }))
     })())
 }
 
@@ -2572,11 +2597,8 @@ impl WebTopologyReport {
     }
 
     fn apply_node_limit(&mut self, limits: WebLimits) {
-        self.node_limit = limits.max_devices;
-        let Some(limit) = self.node_limit else {
-            self.hidden_nodes = 0;
-            return;
-        };
+        let limit = limits.effective_max_devices();
+        self.node_limit = Some(limit);
         if self.nodes.len() <= limit {
             self.hidden_nodes = 0;
             return;
@@ -2832,9 +2854,8 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) ->
             return r#"{"error":"Device credentials could not be read"}"#.to_string();
         }
     };
-    let mut remaining_slots = limits
-        .max_devices
-        .map(|limit| limit.saturating_sub(current_count));
+    let node_limit = limits.effective_max_devices();
+    let mut remaining_slots = node_limit.saturating_sub(current_count);
 
     let mut registered = Vec::new();
     let mut skipped = Vec::new();
@@ -2852,19 +2873,17 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) ->
         match repo.find_device_by_ip(&device.ip) {
             Ok(Some(_)) => skipped.push(device.ip.clone()),
             Ok(None) => {
-                if remaining_slots == Some(0) {
+                if remaining_slots == 0 {
                     errors.push(format!(
-                        "{}: Community版の登録上限（{}台）に達しています",
-                        device.ip, COMMUNITY_MAX_DEVICES
+                        "{}: Device registration limit reached ({} nodes per instance)",
+                        device.ip, node_limit
                     ));
                     continue;
                 }
                 match repo.save_device_config(&device) {
                     Ok(_) => {
                         registered.push(device.ip.clone());
-                        if let Some(slots) = remaining_slots.as_mut() {
-                            *slots = slots.saturating_sub(1);
-                        }
+                        remaining_slots = remaining_slots.saturating_sub(1);
                     }
                     Err(err) => errors.push(format!("{}: {}", device.ip, err)),
                 }
@@ -2981,10 +3000,11 @@ fn page_dashboard(
     html.push_str("<h2 id='dashboard-table-title' class='sr-only' data-i18n='registered_devices'>Registered Devices</h2>");
     html.push_str("<table id='dash-table'><thead><tr>");
     html.push_str("<th id='th-ip' onclick='sortBy(\"ip\")' data-i18n='ip_address'>IP <span class='sort-icon' id='sort-ip'></span></th>");
+    html.push_str("<th id='th-display_name' onclick='sortBy(\"display_name\")' data-i18n='device_name'>Device Name <span class='sort-icon' id='sort-display_name'></span></th>");
     html.push_str("<th id='th-name' onclick='sortBy(\"name\")' data-i18n='hostname'>Name <span class='sort-icon' id='sort-name'></span></th>");
+    html.push_str("<th id='th-tags' onclick='sortBy(\"tags\")' data-i18n='device_tags'>Tags <span class='sort-icon' id='sort-tags'></span></th>");
     html.push_str("<th id='th-status' onclick='sortBy(\"status\")' data-i18n='status'>Status <span class='sort-icon' id='sort-status'></span></th>");
     html.push_str("<th id='th-health_score' onclick='sortBy(\"health_score\")' data-i18n='health_score'>Health Score <span class='sort-icon' id='sort-health_score'></span></th>");
-    html.push_str("<th id='th-community' onclick='sortBy(\"community\")' data-i18n='community'>Community <span class='sort-icon' id='sort-community'></span></th>");
     html.push_str("<th id='th-last_seen' onclick='sortBy(\"last_seen\")' data-i18n='time'>Last Seen <span class='sort-icon' id='sort-last_seen'></span></th>");
     html.push_str("<th data-i18n='actions'>Actions</th>");
     html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table></div>");
@@ -3295,10 +3315,7 @@ fn page_discovery(
             .max_discovery_cidrs
             .map(|limit| limit.to_string())
             .unwrap_or_else(|| "null".to_string()),
-        limits
-            .max_devices
-            .map(|limit| limit.to_string())
-            .unwrap_or_else(|| "null".to_string())
+        limits.effective_max_devices()
     ));
     html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/topology.js'></script><script src='/static/js/discovery.js'></script></body></html>");
     html
@@ -4225,6 +4242,7 @@ const DASHBOARD_CSS: &str = "<style>
     .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   #dash-table th { cursor:pointer; user-select:none; white-space:nowrap; }
   #dash-table th:hover { color:#e2e8f0; }
+  html[data-theme='light'] #dash-table th:hover:not(.sort-asc):not(.sort-desc) { color:#0f172a; }
   #dash-table th.sort-asc, #dash-table th.sort-desc { color:#38bdf8; }
   .sort-icon { font-size:.7rem; margin-left:.25rem; color:#38bdf8; opacity:0; }
   th.sort-asc .sort-icon, th.sort-desc .sort-icon { opacity:1; }
@@ -4243,9 +4261,10 @@ const DISCOVERY_CSS: &str = "<style>
     .scan-form { margin-bottom:1.5rem; }
     .discovery-community { max-width:260px; margin-bottom:1rem; }
     .discovery-workflows { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
-    .discovery-workflow { display:flex; align-items:flex-end; gap:.75rem; padding:.9rem 1rem; border:1px solid #334155; border-radius:.5rem; background:#0f172a; }
-    .discovery-workflow .form-group { flex:1; min-width:0; }
-    .discovery-workflow .btn { flex:none; }
+    .discovery-workflow { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; align-content:start; gap:.75rem; padding:.9rem 1rem; border:1px solid #334155; border-radius:.5rem; background:#0f172a; }
+    .discovery-workflow .form-group { min-width:0; }
+    .discovery-workflow .host-hint { grid-column:1 / -1; }
+    .discovery-workflow .host-hint:empty { display:none; }
   .form-group { display:flex; flex-direction:column; gap:.25rem; }
   .form-group label { font-size:.85rem; color:#94a3b8; }
   .form-group input { background:#1e293b; border:1px solid #334155; color:#f1f5f9; padding:.5rem .75rem; border-radius:.375rem; font-size:.95rem; width:100%; box-sizing:border-box; }
@@ -4255,7 +4274,7 @@ const DISCOVERY_CSS: &str = "<style>
     .manual-box .scan-form { display:flex; flex-wrap:wrap; gap:.75rem; align-items:flex-start; }
     .manual-box .scan-form .btn { margin-top:1.45rem; }
     @media (max-width:760px) { .discovery-workflows { grid-template-columns:1fr; } }
-    @media (max-width:480px) { .discovery-workflow { flex-direction:column; align-items:stretch; } .discovery-workflow .btn { width:100%; } }
+    @media (max-width:480px) { .discovery-workflow { grid-template-columns:minmax(0,1fr); align-items:stretch; } .discovery-workflow .btn { width:100%; } }
   #scan-progress { display:none; background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1rem 1.25rem; margin-bottom:1.25rem; }
   .progress-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:.6rem; font-size:.9rem; }
   .progress-label { color:#94a3b8; }
@@ -4341,9 +4360,9 @@ const DISCOVERY_HTML: &str = "<main>
                 <div class='form-group'>
                     <label for='cidr' data-i18n='cidr_range'>CIDR Range</label>
                     <input id='cidr' type='text' placeholder='192.168.1.0/24' data-i18n-placeholder='cidr_range_placeholder' required oninput='updateHint()'>
-                    <span id='host-hint' class='host-hint'></span>
                 </div>
                 <button class='btn' id='scan-btn' onclick='startScan()' data-i18n='scan'>Scan</button>
+                <span id='host-hint' class='host-hint'></span>
             </div>
             <div class='discovery-workflow'>
                 <div class='form-group'>
@@ -5019,6 +5038,54 @@ mod tests {
     }
 
     #[test]
+    fn bulk_action_api_validates_and_applies_selected_devices() {
+        use crate::device::DeviceConfig;
+        let repo = Arc::new(Mutex::new(
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+                .unwrap(),
+        ));
+        {
+            let repository = repo.lock().unwrap();
+            repository
+                .save_device_config(&DeviceConfig::new("192.0.2.1", "private"))
+                .unwrap();
+            repository
+                .save_device_config(&DeviceConfig::new("192.0.2.2", "private"))
+                .unwrap();
+        }
+        for body in [
+            "{}",
+            r#"{"action":"unknown","device_ids":[1]}"#,
+            r#"{"action":"unregister","device_ids":[1,999]}"#,
+            r#"{"action":"unregister","device_ids":[1,1]}"#,
+            r#"{"action":"add_tags","device_ids":[1],"tags":[]}"#,
+            r#"{"action":"add_tags","device_ids":[1],"tags":[4]}"#,
+            r#"{"action":"unregister","device_ids":[1],"tags":["unexpected"]}"#,
+        ] {
+            assert_eq!(super::api_bulk_action(body, &repo).0, "400 Bad Request");
+            assert_eq!(repo.lock().unwrap().list_devices().unwrap().len(), 2);
+        }
+        let (status, body) = super::api_bulk_action(
+            r#"{"action":"add_tags","device_ids":[1,2],"tags":["東京","Core"]}"#,
+            &repo,
+        );
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["devices"]["affected"],
+            2
+        );
+        assert_eq!(
+            repo.lock().unwrap().list_devices().unwrap()[0].tags,
+            ["東京", "Core"]
+        );
+        assert_eq!(
+            super::api_bulk_action(r#"{"action":"unregister","device_ids":[1,2]}"#, &repo).0,
+            "200 OK"
+        );
+        assert!(repo.lock().unwrap().list_devices().unwrap().is_empty());
+    }
+
+    #[test]
     fn metadata_apis_validate_persist_preview_and_escape_embedded_json() {
         use crate::{
             db::{repository::Repository, sqlite::initialize_database},
@@ -5094,7 +5161,7 @@ mod tests {
     }
 
     use super::{
-        COMMUNITY_MAX_DEVICES, WebLimits, WebServer, WebTopologyEdge, WebTopologyInterface,
+        MAX_MONITORED_NODES, WebLimits, WebServer, WebTopologyEdge, WebTopologyInterface,
         WebTopologyReport, annotate_edge_health, api_flow_analytics, api_live_flow_analytics,
         classify_interface_diagnostic, effective_interface_link_status, evaluate_port_health,
         merge_duplicate_edges, page_dashboard, page_device_detail, page_discovery, parse_cdp_edges,
@@ -5749,7 +5816,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_page_exposes_unrestricted_limits_to_browser_js() {
+    fn discovery_page_exposes_system_ceiling_without_cidr_restriction() {
         let repo = Arc::new(Mutex::new(
             Repository::new(Connection::open_in_memory().expect("in-memory db should open"))
                 .unwrap(),
@@ -5758,7 +5825,7 @@ mod tests {
         let html = page_discovery(&repo, WebLimits::unrestricted(), None);
 
         assert!(
-            html.contains("window.TRACEPULSE_DISCOVERY_LIMITS = {maxCidrs:null,nodeLimit:null};")
+            html.contains("window.TRACEPULSE_DISCOVERY_LIMITS = {maxCidrs:null,nodeLimit:200};")
         );
         assert!(html.contains("/static/js/discovery.js"));
         assert!(html.contains("/static/js/topology.js"));
@@ -5777,7 +5844,97 @@ mod tests {
 
         let html = page_discovery(&repo, WebLimits::community(), None);
 
-        assert!(html.contains("window.TRACEPULSE_DISCOVERY_LIMITS = {maxCidrs:1,nodeLimit:25};"));
+        assert!(html.contains("window.TRACEPULSE_DISCOVERY_LIMITS = {maxCidrs:1,nodeLimit:200};"));
+    }
+
+    #[test]
+    fn registration_enforces_200_nodes_and_retains_stricter_license_limits() {
+        use crate::device::DeviceConfig;
+        let repository = Repository::new(
+            crate::db::sqlite::initialize_database(std::path::Path::new(":memory:")).unwrap(),
+        )
+        .unwrap();
+        let repo = Arc::new(Mutex::new(repository));
+        let register = |start: usize, end: usize, limits: WebLimits| -> serde_json::Value {
+            let body = serde_json::to_string(
+                &(start..=end)
+                    .map(|index| {
+                        serde_json::json!({
+                            "ip": format!("192.0.2.{index}"), "community": "test"
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            serde_json::from_str(&super::api_register(&body, &repo, limits)).unwrap()
+        };
+        let licensed = WebLimits {
+            max_devices: Some(26),
+            max_discovery_cidrs: None,
+        };
+        assert_eq!(
+            register(1, 26, licensed)["registered"]
+                .as_array()
+                .unwrap()
+                .len(),
+            26
+        );
+        let rejected = register(27, 27, licensed);
+        assert!(rejected["errors"][0].as_str().unwrap().contains("26 nodes"));
+        assert!(rejected["registered"].as_array().unwrap().is_empty());
+        assert_eq!(
+            register(27, 200, WebLimits::community())["registered"]
+                .as_array()
+                .unwrap()
+                .len(),
+            174
+        );
+        for limits in [
+            WebLimits::community(),
+            WebLimits::unrestricted(),
+            WebLimits {
+                max_devices: Some(500),
+                max_discovery_cidrs: None,
+            },
+        ] {
+            let result = register(201, 201, limits);
+            assert!(result["errors"][0].as_str().unwrap().contains("200 nodes"));
+            assert!(result["registered"].as_array().unwrap().is_empty());
+        }
+        assert_eq!(
+            register(1, 1, WebLimits::community())["skipped"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        repo.lock()
+            .unwrap()
+            .remove_device_by_ip("192.0.2.1")
+            .unwrap();
+        let result = register(201, 202, WebLimits::community());
+        assert_eq!(result["registered"].as_array().unwrap().len(), 1);
+        assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(repo.lock().unwrap().list_devices().unwrap().len(), 200);
+        // Existing devices remain updatable at the ceiling.
+        repo.lock()
+            .unwrap()
+            .save_device_config(&DeviceConfig::new("192.0.2.2", "replacement"))
+            .unwrap();
+        assert_eq!(
+            WebLimits {
+                max_devices: Some(0),
+                max_discovery_cidrs: None
+            }
+            .effective_max_devices(),
+            0
+        );
+        let html = page_discovery(&repo, licensed, None);
+        assert!(html.contains("nodeLimit:26"));
+        let mut report = topology_report_with(30);
+        report.apply_node_limit(licensed);
+        assert_eq!(report.nodes.len(), 26);
+        assert_eq!(report.hidden_nodes, 4);
     }
 
     fn topology_report_with(node_count: usize) -> WebTopologyReport {
@@ -6081,11 +6238,11 @@ mod tests {
 
     #[test]
     fn topology_is_truncated_to_configured_node_limit() {
-        let mut report = topology_report_with(30);
+        let mut report = topology_report_with(MAX_MONITORED_NODES + 1);
         report.apply_node_limit(WebLimits::community());
 
-        assert_eq!(report.nodes.len(), COMMUNITY_MAX_DEVICES);
-        assert_eq!(report.hidden_nodes, 30 - COMMUNITY_MAX_DEVICES);
+        assert_eq!(report.nodes.len(), MAX_MONITORED_NODES);
+        assert_eq!(report.hidden_nodes, 1);
         assert!(
             report
                 .edges
@@ -6095,13 +6252,17 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_topology_keeps_every_node() {
+    fn unrestricted_topology_retains_nodes_below_system_ceiling() {
         let mut report = topology_report_with(30);
         report.apply_node_limit(WebLimits::unrestricted());
 
         assert_eq!(report.nodes.len(), 30);
         assert_eq!(report.hidden_nodes, 0);
-        assert!(report.to_json().contains(r#""node_limit":null"#));
+        assert!(report.to_json().contains(r#""node_limit":200"#));
+        let mut oversized = topology_report_with(MAX_MONITORED_NODES + 1);
+        oversized.apply_node_limit(WebLimits::unrestricted());
+        assert_eq!(oversized.nodes.len(), MAX_MONITORED_NODES);
+        assert_eq!(oversized.hidden_nodes, 1);
     }
 
     #[test]

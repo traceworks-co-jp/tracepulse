@@ -1,7 +1,8 @@
 import { esc as escapeHtml } from "../shared/escape";
 import { fmtTime, formatTracePulseClock } from "../shared/format";
 import { initializeOnboarding } from "../shared/onboarding";
-import { bulkRename, deviceLabel, metadataText } from "../shared/device-metadata";
+import { bulkActions, deviceLabel, metadataText } from "../shared/device-metadata";
+import { initializeDeviceFilters } from "../shared/device-filters";
 
 interface DashboardDevice {
     id?: number | null;
@@ -10,7 +11,6 @@ interface DashboardDevice {
     ip: string;
     name?: string;
     status?: string;
-    community?: string;
     last_seen?: string;
     last_seen_at?: string;
     error_spike?: boolean;
@@ -18,25 +18,26 @@ interface DashboardDevice {
     health_status?: string | null;
 }
 
-const columns = ["ip", "name", "status", "health_score", "community", "last_seen"] as const;
+const columns = ["ip", "display_name", "name", "tags", "status", "health_score", "last_seen"] as const;
 let sortColumn: (typeof columns)[number] = "ip";
 let sortAscending = true;
 const deletingIps = new Set<string>();
 const selectedIds = new Set<number>();
 let searchQuery = "";
+let matchesFilters: (device: DashboardDevice) => boolean = () => true;
 
 function visibleDevices(): DashboardDevice[] {
     const query = searchQuery.trim().toLocaleLowerCase();
-    return currentDevices().filter((device) => !query ||
+    return currentDevices().filter((device) => matchesFilters(device) && (!query ||
         [device.ip, device.name, device.display_name, ...(device.tags || [])]
-            .some((value) => value?.toLocaleLowerCase().includes(query)));
+            .some((value) => value?.toLocaleLowerCase().includes(query))));
 }
 
 function renderSelection(): void {
     const count = document.getElementById("device-selection-count");
     if (count) count.textContent = `${selectedIds.size} ${metadataText("selected")}`;
     const button = document.getElementById("bulk-rename") as HTMLButtonElement | null;
-    if (button) { button.textContent = metadataText("rename"); button.disabled = selectedIds.size === 0; }
+    if (button) { button.textContent = metadataText("bulk"); button.disabled = selectedIds.size === 0; }
     const all = document.getElementById("select-visible-devices") as HTMLInputElement | null;
     const visible = visibleDevices().filter((device) => typeof device.id === "number");
     if (all) {
@@ -77,8 +78,8 @@ function compareValue(a: DashboardDevice, b: DashboardDevice, column: (typeof co
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
     if (column === "status") return statusOrder(a.status) - statusOrder(b.status);
     if (column === "health_score") return (a.health_score ?? -1) - (b.health_score ?? -1);
-    const left = String(column === "name" ? deviceLabel(a) : a[column] || "").toLowerCase();
-    const right = String(column === "name" ? deviceLabel(b) : b[column] || "").toLowerCase();
+    const left = String(column === "display_name" ? deviceLabel(a) : column === "tags" ? (a.tags || []).join(", ") : a[column] || "").toLowerCase();
+    const right = String(column === "display_name" ? deviceLabel(b) : column === "tags" ? (b.tags || []).join(", ") : b[column] || "").toLowerCase();
     return left < right ? -1 : left > right ? 1 : 0;
 }
 
@@ -120,7 +121,9 @@ export function renderTable(): void {
     });
 
     if (sorted.length === 0) {
-        tbody.innerHTML = `<tr><td colspan=8 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
+        tbody.innerHTML = currentDevices().length > 0
+            ? `<tr><td colspan=9 class=empty>${t("no_matching_devices")}</td></tr>`
+            : `<tr><td colspan=9 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
         return;
     }
 
@@ -129,18 +132,20 @@ export function renderTable(): void {
         const rowClass = device.error_spike ? " class=spike-row" : "";
         const spikeBadge = device.error_spike ? "<span class=spike-badge>&#9888; Error Spike</span>" : "";
         const deleting = deletingIps.has(device.ip);
-        const actionLabel = deleting ? t("unregistering") : t("unregister");
-        const encodedIp = encodeURIComponent(device.ip);
-        const encodedName = encodeURIComponent(deviceLabel(device));
-        const actionButton = `<button class='btn-row-danger' data-ip="${escapeHtml(encodedIp)}" data-name="${escapeHtml(encodedName)}" onclick='unregisterDevice(this.dataset.ip,this.dataset.name)' ${deleting ? "disabled" : ""}>${actionLabel}</button>`;
+        const actionButton = `<button type="button" class="device-action-button" data-action-device="${escapeHtml(device.ip)}" aria-haspopup="dialog" ${deleting || typeof device.id !== "number" ? "disabled" : ""}>${escapeHtml(metadataText("actions"))}</button>`;
         const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
         const healthBadgeClass = statusClass(device.health_status);
         const health = typeof device.health_score === "number" ? `<span class="${escapeHtml(healthBadgeClass)}">${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label="${escapeHtml(t("health_score"))}" style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
         const checkbox = typeof device.id === "number" ? `<input type="checkbox" data-device-id="${device.id}" aria-label="${escapeHtml(`${metadataText("select")} ${device.ip}`)}" ${selectedIds.has(device.id) ? "checked" : ""}>` : "";
-        const original = device.display_name ? `<div class="device-original">${escapeHtml(device.name || device.ip)}</div>` : "";
         const tags = (device.tags || []).map((tag) => `<span class="device-tag">${escapeHtml(tag)}</span>`).join("");
-        return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${escapeHtml(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(deviceLabel(device))}${spikeBadge}${original}<div class="device-tags">${tags}</div></td><td><span class="${escapeHtml(statusBadgeClass)}">${escapeHtml(device.status)}</span></td><td>${health}</td><td>${escapeHtml(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
+        return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${escapeHtml(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(deviceLabel(device))}${spikeBadge}</td><td>${escapeHtml(device.name || "-")}</td><td>${tags ? `<div class="device-tags">${tags}</div>` : "-"}</td><td><span class="${escapeHtml(statusBadgeClass)}">${escapeHtml(device.status)}</span></td><td>${health}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
     }).join("");
+    tbody.querySelectorAll<HTMLButtonElement>("[data-action-device]").forEach((button) => {
+        button.onclick = () => {
+            const device = currentDevices().find((item) => item.ip === button.dataset.actionDevice);
+            if (device) bulkActions([device], refresh, true);
+        };
+    });
     tbody.querySelectorAll<HTMLInputElement>("[data-device-id]").forEach((checkbox) => {
         checkbox.onchange = () => {
             const id = Number(checkbox.dataset.deviceId);
@@ -238,13 +243,17 @@ function initializeManagement(): void {
     count.setAttribute("aria-live", "polite");
     const rename = document.createElement("button");
     rename.id = "bulk-rename";
-    rename.onclick = () => bulkRename([...selectedIds], refresh);
+    rename.onclick = () => bulkActions([...selectedIds].flatMap((id) => {
+        const device = currentDevices().find((item) => item.id === id);
+        return device ? [device] : [];
+    }), refresh);
     toolbar.append(search, count, rename);
     const error = document.createElement("p");
     error.id = "device-load-error";
     error.setAttribute("role", "alert");
     toolbar.append(error);
     table.parentElement!.before(toolbar);
+    matchesFilters = initializeDeviceFilters(toolbar, renderTable);
     const header = document.createElement("th");
     const all = document.createElement("input");
     all.type = "checkbox";

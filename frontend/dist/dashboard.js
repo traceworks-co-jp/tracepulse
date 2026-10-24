@@ -83,6 +83,59 @@ var TracePulseDashboard = (() => {
     return Number.isNaN(date.getTime()) ? String(iso) : formatTracePulseTime(date);
   }
 
+  // frontend/src/shared/secret-visibility.ts
+  var eye = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="secret-eye-slash" d="m3 3 18 18"/></svg>`;
+  function addSecretVisibility(input) {
+    if (input.parentElement?.classList.contains("secret-input")) return;
+    if (!document.getElementById("secret-visibility-style")) {
+      const style = document.createElement("style");
+      style.id = "secret-visibility-style";
+      style.textContent = `
+            .secret-input{position:relative;display:block;min-width:0}
+            .secret-input input{padding-right:44px!important}
+            .secret-input .secret-toggle{position:absolute;right:2px;top:2px;bottom:2px;width:40px;padding:0;display:flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:inherit;cursor:pointer}
+            .secret-toggle:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
+            .secret-toggle:hover{background:rgb(127 127 127 / .15)}
+            .secret-toggle .secret-eye-slash{display:none}
+            .secret-toggle[aria-pressed=true] .secret-eye-slash{display:block}
+        `;
+      document.head.append(style);
+    }
+    const wrapper = document.createElement("span");
+    wrapper.className = "secret-input";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secret-toggle";
+    button.setAttribute("aria-controls", input.id);
+    button.innerHTML = eye;
+    const update = () => {
+      const visible = input.type === "text";
+      const key = visible ? "hide_community" : "show_community";
+      const fallback = visible ? "Hide community" : "Show community";
+      const label = window.t?.(key) || fallback;
+      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-pressed", String(visible));
+      button.title = label;
+    };
+    button.addEventListener("click", () => {
+      input.type = input.type === "password" ? "text" : "password";
+      update();
+    });
+    input.before(wrapper);
+    wrapper.append(input, button);
+    update();
+  }
+  window.addEventListener("tracepulse-language-change", () => {
+    document.querySelectorAll(".secret-toggle").forEach((button) => {
+      const key = button.getAttribute("aria-pressed") === "true" ? "hide_community" : "show_community";
+      const label = window.t?.(key);
+      if (label) {
+        button.setAttribute("aria-label", label);
+        button.title = label;
+      }
+    });
+  });
+
   // frontend/src/shared/onboarding.ts
   var storageKey = "tracepulse-onboarding-v1";
   var copy = {
@@ -144,7 +197,7 @@ var TracePulseDashboard = (() => {
     }
   };
   function initializeOnboarding(auto = false) {
-    const text = (key) => copy[document.documentElement.lang === "ja" ? "ja" : "en"][key];
+    const text2 = (key) => copy[document.documentElement.lang === "ja" ? "ja" : "en"][key];
     const style = document.createElement("style");
     style.textContent = `
         .setup-dialog{box-sizing:border-box;inset:0;margin:auto;width:min(600px,calc(100% - 24px));max-height:calc(100dvh - 24px);padding:24px;border:1px solid var(--border,#475569);border-radius:8px;background:var(--panel-bg,#1e293b);color:var(--text,#e2e8f0);overflow:auto}
@@ -251,8 +304,10 @@ var TracePulseDashboard = (() => {
         return;
       }
       const titles = ["welcome", "discovery", "alerts"];
-      dialog2.innerHTML = `<div class="setup-step">${text("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text(titles[step])}</h2>` + (step === 0 ? `<p>${text("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text("privacy")}</p><button class="setup-primary" type="submit">${text("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text("alertInfo")}</p><a href="/settings" id="setup-settings">${text("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
+      dialog2.innerHTML = `<div class="setup-step">${text2("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text2(titles[step])}</h2>` + (step === 0 ? `<p>${text2("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text2("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text2("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text2("privacy")}</p><button class="setup-primary" type="submit">${text2("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text2("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text2("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text2("alertInfo")}</p><a href="/settings" id="setup-settings">${text2("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text2("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text2("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text2(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
       dialog2.querySelector("#setup-title")?.focus();
+      const communityInput = dialog2.querySelector("#setup-community");
+      if (communityInput) addSecretVisibility(communityInput);
       dialog2.querySelector("#setup-settings")?.addEventListener("click", close);
       dialog2.querySelector("form")?.addEventListener("submit", (event) => {
         event.preventDefault();
@@ -265,7 +320,7 @@ var TracePulseDashboard = (() => {
       const community = dialog2.querySelector("#setup-community").value;
       const match = cidr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
       if (!match || match[1].split(".").some((part) => Number(part) > 255) || Number(match[2]) < 24 || Number(match[2]) > 32) {
-        status(text("rangeError"), true);
+        status(text2("rangeError"), true);
         return;
       }
       stop();
@@ -275,7 +330,7 @@ var TracePulseDashboard = (() => {
       dialog2.querySelector("[data-action=register]").hidden = true;
       const signal = controller.signal;
       setBusy(true);
-      status(text("scanning"));
+      status(text2("scanning"));
       const progress = dialog2.querySelector("#setup-progress");
       progress.hidden = false;
       progress.removeAttribute("value");
@@ -284,23 +339,23 @@ var TracePulseDashboard = (() => {
         stop();
         setBusy(false);
         progress.hidden = true;
-        status(error instanceof Error ? error.message : text("failure"), true);
+        status(error instanceof Error ? error.message : text2("failure"), true);
       };
-      deadline = window.setTimeout(() => fail(new Error(text("timeout"))), 3e5);
+      deadline = window.setTimeout(() => fail(new Error(text2("timeout"))), 3e5);
       try {
         const prefix = Number(match[2]);
         const hosts = prefix >= 31 ? 2 ** (32 - prefix) : 2 ** (32 - prefix) - 2;
         const job = await request("/api/discovery/scan", signal, new URLSearchParams({ cidr, community, max_hosts: String(hosts) }));
         if (signal.aborted) return;
-        if (!job.job_id) throw new Error(text("failure"));
+        if (!job.job_id) throw new Error(text2("failure"));
         const poll = async () => {
           try {
             const result = await request(`/api/discovery/scan/${encodeURIComponent(job.job_id)}`, signal);
             if (signal.aborted) return;
             progress.max = result.total || hosts;
             progress.value = result.scanned || 0;
-            status(`${text("scanning")} ${result.scanned || 0} / ${result.total || hosts}`);
-            if (result.status === "error") throw new Error(text("failure"));
+            status(`${text2("scanning")} ${result.scanned || 0} / ${result.total || hosts}`);
+            if (result.status === "error") throw new Error(text2("failure"));
             if (result.status !== "done") {
               timer = window.setTimeout(() => void poll(), 1500);
               return;
@@ -312,7 +367,7 @@ var TracePulseDashboard = (() => {
             devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community }));
             setBusy(false);
             progress.hidden = true;
-            status(devices.length ? text("selected") : text("empty"));
+            status(devices.length ? text2("selected") : text2("empty"));
             dialog2.querySelector("#setup-results").innerHTML = devices.map((device, index) => `<label class="setup-device"><input type="checkbox" value="${index}" checked><span>${esc(device.ip)} ${esc(device.name || "")}</span></label>`).join("");
             dialog2.querySelector("[data-action=register]").hidden = devices.length === 0;
           } catch (error) {
@@ -328,7 +383,7 @@ var TracePulseDashboard = (() => {
       if (busy) return;
       const selected = Array.from(dialog2.querySelectorAll("#setup-results input:checked")).map((input) => devices[Number(input.value)]);
       if (!selected.length) {
-        status(text("selected"), true);
+        status(text2("selected"), true);
         return;
       }
       const signal = controller.signal;
@@ -341,12 +396,12 @@ var TracePulseDashboard = (() => {
           if (accepted.has(devices[Number(input.value)].ip)) input.closest("label")?.remove();
         });
         registered = result.registered.length > 0 || result.skipped.length > 0;
-        status(result.errors.length ? result.errors.join("\n") : registered ? text("registered") : text("failure"), result.errors.length > 0 || !registered);
+        status(result.errors.length ? result.errors.join("\n") : registered ? text2("registered") : text2("failure"), result.errors.length > 0 || !registered);
         window.refreshDashboard?.();
-        dialog2.querySelector("[data-action=next]").textContent = text(registered ? "next" : "continue");
+        dialog2.querySelector("[data-action=next]").textContent = text2(registered ? "next" : "continue");
         dialog2.querySelector("[data-action=register]").hidden = dialog2.querySelectorAll("#setup-results input").length === 0;
       } catch (error) {
-        if (!signal.aborted) status(error instanceof Error ? error.message : text("failure"), true);
+        if (!signal.aborted) status(error instanceof Error ? error.message : text2("failure"), true);
       } finally {
         if (!signal.aborted) setBusy(false);
       }
@@ -387,12 +442,12 @@ var TracePulseDashboard = (() => {
     const launch = document.createElement("button");
     launch.className = "setup-launch";
     launch.type = "button";
-    launch.textContent = text("guide");
+    launch.textContent = text2("guide");
     launch.hidden = auto && dismissed;
     launch.addEventListener("click", () => open());
     document.querySelector("main h1")?.after(launch);
     window.addEventListener("tracepulse-language-change", () => {
-      launch.textContent = text("guide");
+      launch.textContent = text2("guide");
       if (dialog2.open && step !== 1) render();
     });
     if (auto) {
@@ -413,7 +468,7 @@ var TracePulseDashboard = (() => {
         .metadata-dialog form,.metadata-dialog label{display:grid;gap:8px}
         .metadata-dialog p,.metadata-dialog li{overflow-wrap:anywhere}
         .metadata-dialog input,.metadata-dialog select,.device-toolbar input{box-sizing:border-box;width:100%;padding:8px;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px;min-width:0}
-        .metadata-dialog button,.device-toolbar button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
+        .metadata-dialog button,.device-toolbar button,.device-action-button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
         .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
         .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
         .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
@@ -421,7 +476,7 @@ var TracePulseDashboard = (() => {
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
         :root[data-theme=light] .metadata-dialog{background:#fff;color:#1e293b}
-        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
+        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-action-button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
     `;
     document.head.append(style);
   }
@@ -456,7 +511,16 @@ var TracePulseDashboard = (() => {
       failed: "Request failed",
       missing: "Select at least one device",
       tagHint: "Enter a tag, then press Add tag or Enter.",
-      clear: "Leave the display name empty to use sysName or IP."
+      clear: "Leave the display name empty to use sysName or IP.",
+      bulk: "Bulk actions",
+      actions: "Actions",
+      bulkTags: "Add tags",
+      bulkNames: "Set / change device names",
+      unregister: "Unregister",
+      targets: "Selected devices",
+      appendHint: "Existing tags are retained. Duplicate tags are ignored.",
+      unregisterHint: "Unregister these devices and delete their monitoring history? This cannot be undone.",
+      confirm: "Confirm"
     },
     ja: {
       edit: "\u8868\u793A\u540D\u30FB\u30BF\u30B0\u3092\u7DE8\u96C6",
@@ -483,7 +547,16 @@ var TracePulseDashboard = (() => {
       failed: "\u51E6\u7406\u306B\u5931\u6557\u3057\u307E\u3057\u305F",
       missing: "\u6A5F\u5668\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044",
       tagHint: "\u30BF\u30B0\u3092\u5165\u529B\u3057\u3001\u8FFD\u52A0\u30DC\u30BF\u30F3\u307E\u305F\u306FEnter\u3067\u78BA\u5B9A\u3057\u307E\u3059\u3002",
-      clear: "\u8868\u793A\u540D\u3092\u7A7A\u306B\u3059\u308B\u3068sysName\u307E\u305F\u306FIP\u3092\u8868\u793A\u3057\u307E\u3059\u3002"
+      clear: "\u8868\u793A\u540D\u3092\u7A7A\u306B\u3059\u308B\u3068sysName\u307E\u305F\u306FIP\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+      bulk: "\u4E00\u62EC\u64CD\u4F5C",
+      actions: "\u64CD\u4F5C",
+      bulkTags: "\u30BF\u30B0\u4ED8\u3051",
+      bulkNames: "\u6A5F\u5668\u540D\u306E\u8A2D\u5B9A\u30FB\u5909\u66F4",
+      unregister: "\u767B\u9332\u89E3\u9664",
+      targets: "\u9078\u629E\u3057\u305F\u6A5F\u5668",
+      appendHint: "\u65E2\u5B58\u30BF\u30B0\u3092\u4FDD\u6301\u3057\u3066\u8FFD\u52A0\u3057\u307E\u3059\u3002\u91CD\u8907\u3059\u308B\u30BF\u30B0\u306F\u8FFD\u52A0\u3057\u307E\u305B\u3093\u3002",
+      unregisterHint: "\u4EE5\u4E0B\u306E\u6A5F\u5668\u306E\u767B\u9332\u3068\u76E3\u8996\u5C65\u6B74\u3092\u524A\u9664\u3057\u307E\u3059\u3002\u5143\u306B\u623B\u305B\u307E\u305B\u3093\u3002\u5B9F\u884C\u3057\u307E\u3059\u304B\uFF1F",
+      confirm: "\u78BA\u5B9A"
     }
   };
   function metadataText(key) {
@@ -512,6 +585,182 @@ var TracePulseDashboard = (() => {
   }
   function field(id, label, value, type = "text", limits = "") {
     return `<label for="${id}">${esc(label)}<input id="${id}" type="${type}" value="${esc(value)}" ${limits}></label>`;
+  }
+  function editDeviceMetadata(device, saved) {
+    if (!device.ip) return;
+    const element = dialog("device-metadata-dialog", metadataText("edit"));
+    let tags = [...device.tags || []];
+    element.insertAdjacentHTML("beforeend", `<form>
+        <p>${esc(device.name || "")} (${esc(device.ip)})</p>
+        ${field("device-alias", metadataText("alias"), device.display_name || "", "text", "maxlength=512")}
+        <p>${esc(metadataText("clear"))}</p>
+        <label for="device-tag-input">${esc(metadataText("tags"))}</label>
+        <div id="device-tag-chips" class="device-tags"></div>
+        <input id="device-tag-input" maxlength="64" aria-describedby="device-tag-hint">
+        <p id="device-tag-hint">${esc(metadataText("tagHint"))}</p>
+        <button type="button" id="device-add-tag">${esc(metadataText("add"))}</button>
+        <p role="alert"></p><div class="metadata-actions">
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
+        <button type="submit">${esc(metadataText("save"))}</button></div></form>`);
+    const input = element.querySelector("#device-tag-input");
+    const error = element.querySelector("[role=alert]");
+    const renderTags = () => {
+      const chips = element.querySelector("#device-tag-chips");
+      chips.replaceChildren();
+      tags.forEach((tag) => {
+        const chip = document.createElement("span");
+        chip.className = "device-tag";
+        chip.append(document.createTextNode(tag));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "\xD7";
+        remove.setAttribute("aria-label", `${metadataText("remove")} ${tag}`);
+        remove.onclick = () => {
+          tags = tags.filter((value) => value !== tag);
+          renderTags();
+        };
+        chip.append(remove);
+        chips.append(chip);
+      });
+    };
+    const addTag = () => {
+      const tag = input.value.trim();
+      if (tag && !tags.includes(tag)) tags.push(tag);
+      input.value = "";
+      renderTags();
+    };
+    element.querySelector("#device-add-tag").onclick = addTag;
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        addTag();
+      }
+    });
+    element.querySelector("[data-cancel]").onclick = () => element.close();
+    element.querySelector("form").onsubmit = async (event) => {
+      event.preventDefault();
+      addTag();
+      const submit = element.querySelector("[type=submit]");
+      submit.disabled = true;
+      error.textContent = "";
+      try {
+        await post(`/api/device/${encodeURIComponent(device.ip)}/metadata`, {
+          display_name: element.querySelector("#device-alias").value || null,
+          tags
+        });
+        element.close();
+        saved();
+      } catch (failure) {
+        error.textContent = String(failure);
+      } finally {
+        submit.disabled = false;
+      }
+    };
+    renderTags();
+    element.showModal();
+  }
+  function bulkActions(devices, saved, individual = false) {
+    const ids = devices.map((device) => device.id).filter((id) => typeof id === "number");
+    const chooser = dialog("bulk-actions-dialog", metadataText(individual ? "actions" : "bulk"));
+    const list = () => `<p>${esc(metadataText("targets"))}: ${devices.length}</p><ul>${devices.map((device) => `<li>${esc(device.ip || "")} \u2014 ${esc(deviceLabel(device))}</li>`).join("")}</ul>`;
+    chooser.insertAdjacentHTML("beforeend", `${list()}<div class="metadata-actions">
+        <button type="button" data-action="tags">${esc(metadataText("bulkTags"))}</button>
+        <button type="button" data-action="names">${esc(metadataText("bulkNames"))}</button>
+        <button type="button" data-action="unregister">${esc(metadataText("unregister"))}</button>
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button></div>`);
+    chooser.querySelector("[data-cancel]").onclick = () => chooser.close();
+    chooser.querySelector("[data-action=names]").onclick = () => {
+      chooser.close();
+      if (individual) editDeviceMetadata(devices[0], saved);
+      else bulkRename(ids, saved);
+    };
+    const actionDialog = (action) => {
+      chooser.close();
+      const tags = action === "add_tags";
+      const element = dialog("bulk-action-confirm", metadataText(tags ? "bulkTags" : "unregister"));
+      element.insertAdjacentHTML("beforeend", `<form>${list()}
+            <p>${esc(metadataText(tags ? "appendHint" : "unregisterHint"))}</p>
+            ${tags ? `<div id="bulk-tag-chips" class="device-tags"></div>${field("bulk-tag-input", metadataText("tags"), "", "text", "maxlength=64")}
+                <p>${esc(metadataText("tagHint"))}</p><button type="button" id="bulk-tag-add">${esc(metadataText("add"))}</button>` : ""}
+            <p role="alert"></p><div class="metadata-actions"><button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
+            <button type="submit">${esc(metadataText("confirm"))}</button></div></form>`);
+      let busy = false;
+      const additions = [];
+      const error = element.querySelector("[role=alert]");
+      const input = element.querySelector("#bulk-tag-input");
+      const renderTags = () => {
+        const chips = element.querySelector("#bulk-tag-chips");
+        chips.replaceChildren();
+        additions.forEach((tag, index) => {
+          const chip = document.createElement("span");
+          chip.className = "device-tag";
+          chip.append(document.createTextNode(tag));
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.textContent = "\xD7";
+          remove.setAttribute("aria-label", `${metadataText("remove")} ${tag}`);
+          remove.onclick = () => {
+            additions.splice(index, 1);
+            renderTags();
+          };
+          chip.append(remove);
+          chips.append(chip);
+        });
+      };
+      const addTag = () => {
+        const tag = input.value.trim();
+        if (tag && !additions.includes(tag)) additions.push(tag);
+        input.value = "";
+        renderTags();
+        input.focus();
+      };
+      if (input) {
+        element.querySelector("#bulk-tag-add").onclick = addTag;
+        input.onkeydown = (event) => {
+          if (event.key === "Enter" && !event.isComposing) {
+            event.preventDefault();
+            addTag();
+          }
+        };
+      }
+      element.querySelector("[data-cancel]").onclick = () => element.close();
+      element.addEventListener("cancel", (event) => {
+        if (busy) event.preventDefault();
+      });
+      element.querySelector("form").onsubmit = async (event) => {
+        event.preventDefault();
+        if (busy) return;
+        if (input?.value.trim()) addTag();
+        if (tags && additions.length === 0) {
+          input?.reportValidity();
+          input?.focus();
+          error.textContent = metadataText("tagHint");
+          return;
+        }
+        busy = true;
+        error.textContent = "";
+        const controls = element.querySelectorAll("input,button");
+        controls.forEach((control) => {
+          control.disabled = true;
+        });
+        try {
+          await post("/api/devices/bulk-action", { action, device_ids: ids, ...tags ? { tags: additions } : {} });
+          element.close();
+          saved();
+        } catch (failure) {
+          error.textContent = String(failure);
+        } finally {
+          busy = false;
+          controls.forEach((control) => {
+            control.disabled = false;
+          });
+        }
+      };
+      element.showModal();
+    };
+    chooser.querySelector("[data-action=tags]").onclick = () => actionDialog("add_tags");
+    chooser.querySelector("[data-action=unregister]").onclick = () => actionDialog("unregister");
+    chooser.showModal();
   }
   function bulkRename(ids, saved) {
     const element = dialog("bulk-rename-dialog", metadataText("rename"));
@@ -611,23 +860,185 @@ var TracePulseDashboard = (() => {
     element.showModal();
   }
 
+  // frontend/src/shared/device-filters.ts
+  var copy3 = {
+    en: {
+      title: "Column filters (AND)",
+      add: "Add condition",
+      clear: "Clear conditions",
+      field: "Column",
+      operator: "Condition",
+      value: "Value",
+      remove: "Remove condition",
+      ip: "IP address",
+      display_name: "Display name",
+      name: "Hostname (sysName)",
+      tags: "Tags",
+      status: "Status",
+      health_score: "Health score",
+      contains: "Contains",
+      equals: "Equals",
+      not_equals: "Does not equal",
+      starts_with: "Starts with",
+      gte: "At least (\u2265)",
+      lte: "At most (\u2264)",
+      gt: "Greater than (>)",
+      lt: "Less than (<)",
+      hint: "All conditions and the search must match. Empty values are ignored. Text matching is case-insensitive; tags match individually.",
+      invalid: "Health score must be a number from 0 to 100."
+    },
+    ja: {
+      title: "\u30AB\u30E9\u30E0\u5225\u30D5\u30A3\u30EB\u30BF\u30FC\uFF08AND\uFF09",
+      add: "\u6761\u4EF6\u3092\u8FFD\u52A0",
+      clear: "\u6761\u4EF6\u3092\u30AF\u30EA\u30A2",
+      field: "\u5BFE\u8C61\u30AB\u30E9\u30E0",
+      operator: "\u6761\u4EF6",
+      value: "\u5024",
+      remove: "\u6761\u4EF6\u3092\u524A\u9664",
+      ip: "IP\u30A2\u30C9\u30EC\u30B9",
+      display_name: "\u8868\u793A\u540D",
+      name: "\u30DB\u30B9\u30C8\u540D\uFF08sysName\uFF09",
+      tags: "\u30BF\u30B0",
+      status: "\u72B6\u614B",
+      health_score: "\u30D8\u30EB\u30B9\u30B9\u30B3\u30A2",
+      contains: "\u542B\u3080",
+      equals: "\u4E00\u81F4\u3059\u308B",
+      not_equals: "\u4E00\u81F4\u3057\u306A\u3044",
+      starts_with: "\u3067\u59CB\u307E\u308B",
+      gte: "\u4EE5\u4E0A\uFF08\u2265\uFF09",
+      lte: "\u4EE5\u4E0B\uFF08\u2264\uFF09",
+      gt: "\u3088\u308A\u5927\u304D\u3044\uFF08>\uFF09",
+      lt: "\u3088\u308A\u5C0F\u3055\u3044\uFF08<\uFF09",
+      hint: "\u3059\u3079\u3066\u306E\u6761\u4EF6\u3068\u691C\u7D22\u306B\u4E00\u81F4\u3059\u308B\u6A5F\u5668\u3092\u8868\u793A\u3057\u307E\u3059\u3002\u7A7A\u6B04\u306F\u7121\u8996\u3057\u307E\u3059\u3002\u82F1\u5B57\u306E\u5927\u6587\u5B57\u30FB\u5C0F\u6587\u5B57\u306F\u533A\u5225\u305B\u305A\u3001\u30BF\u30B0\u306F\u500B\u5225\u306B\u7167\u5408\u3057\u307E\u3059\u3002",
+      invalid: "\u30D8\u30EB\u30B9\u30B9\u30B3\u30A2\u306F0\u304B\u3089100\u306E\u6570\u5024\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002"
+    }
+  };
+  var fields = ["ip", "display_name", "name", "tags", "status", "health_score"];
+  var statuses = ["online", "warning", "critical", "offline", "unknown"];
+  var text = (key) => copy3[document.documentElement.lang === "ja" ? "ja" : "en"][key];
+  var operators = (field2) => field2 === "health_score" ? ["gte", "lte", "equals", "not_equals", "gt", "lt"] : field2 === "status" ? ["equals", "not_equals"] : ["contains", "equals", "not_equals", "starts_with"];
+  function initializeDeviceFilters(before, changed) {
+    const conditions = [];
+    const section = document.createElement("section");
+    section.id = "device-filters";
+    section.setAttribute("aria-labelledby", "device-filters-title");
+    const style = document.createElement("style");
+    style.textContent = `
+        #device-filters{margin:12px 0}
+        .device-filter-row{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:8px 0}
+        .device-filter-row label{display:grid;gap:4px;flex:1 1 150px;min-width:0}
+        .device-filter-row input,.device-filter-row select,#device-filters button{box-sizing:border-box;max-width:100%;padding:8px;border:1px solid #64748b;border-radius:4px;background:var(--tp-bg,#0f172a);color:inherit}
+        .device-filter-row input,.device-filter-row select{width:100%;min-width:0}
+        #device-filters button{cursor:pointer}#device-filters p{font-size:.85rem}
+        #device-filters [role=alert]{color:#f87171}
+        :root[data-theme=light] #device-filters input,:root[data-theme=light] #device-filters select,:root[data-theme=light] #device-filters button{background:#f1f5f9;color:#1e293b}
+    `;
+    document.head.append(style);
+    before.before(section);
+    const invalid = (condition) => condition.field === "health_score" && condition.value.trim() !== "" && (!Number.isFinite(Number(condition.value)) || Number(condition.value) < 0 || Number(condition.value) > 100);
+    const update = () => {
+      section.querySelector("[role=alert]").textContent = conditions.some(invalid) ? text("invalid") : "";
+      changed();
+    };
+    const render = () => {
+      section.innerHTML = `<h3 id="device-filters-title">${esc(text("title"))}</h3><p>${esc(text("hint"))}</p><div id="device-filter-rows"></div><button type="button" id="device-filter-add">${esc(text("add"))}</button> <button type="button" id="device-filter-clear">${esc(text("clear"))}</button><p role="alert"></p>`;
+      const rows = section.querySelector("#device-filter-rows");
+      conditions.forEach((condition, index) => {
+        const row = document.createElement("div");
+        row.className = "device-filter-row";
+        const options = (values, selected, labels) => values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(labels ? text(value) : value)}</option>`).join("");
+        row.innerHTML = `<label>${esc(text("field"))}<select data-filter-field>${options(fields, condition.field, true)}</select></label>
+                <label>${esc(text("operator"))}<select data-filter-operator>${options(operators(condition.field), condition.operator, true)}</select></label>
+                <label>${esc(text("value"))}${condition.field === "status" ? `<select data-filter-value><option value="">-</option>${options(statuses, condition.value, false)}</select>` : `<input data-filter-value type="text" ${condition.field === "health_score" ? 'inputmode="decimal"' : ""} value="${esc(condition.value)}">`}</label>
+                <button type="button" data-filter-remove>${esc(text("remove"))}</button>`;
+        row.querySelector("[data-filter-field]").onchange = (event) => {
+          condition.field = event.currentTarget.value;
+          condition.operator = operators(condition.field)[0];
+          condition.value = "";
+          render();
+          update();
+          section.querySelectorAll("[data-filter-field]")[index]?.focus();
+        };
+        row.querySelector("[data-filter-operator]").onchange = (event) => {
+          condition.operator = event.currentTarget.value;
+          update();
+        };
+        row.querySelector("[data-filter-value]").oninput = (event) => {
+          condition.value = event.currentTarget.value;
+          update();
+        };
+        row.querySelector("[data-filter-remove]").onclick = () => {
+          conditions.splice(index, 1);
+          render();
+          update();
+          section.querySelector("#device-filter-add").focus();
+        };
+        rows.append(row);
+      });
+      section.querySelector("#device-filter-add").onclick = () => {
+        conditions.push({ field: "ip", operator: "contains", value: "" });
+        render();
+        update();
+        section.querySelectorAll("[data-filter-field]")[conditions.length - 1]?.focus();
+      };
+      section.querySelector("#device-filter-clear").onclick = () => {
+        conditions.length = 0;
+        render();
+        update();
+        section.querySelector("#device-filter-add").focus();
+      };
+      section.querySelector("[role=alert]").textContent = conditions.some(invalid) ? text("invalid") : "";
+    };
+    render();
+    window.addEventListener("tracepulse-language-change", render);
+    return (device) => conditions.every((condition) => {
+      const value = condition.value.trim().toLocaleLowerCase();
+      if (!value) return true;
+      if (invalid(condition)) return false;
+      if (condition.field === "health_score") {
+        const score = device.health_score;
+        if (typeof score !== "number" || !Number.isFinite(score)) return false;
+        const target = Number(value);
+        switch (condition.operator) {
+          case "gte":
+            return score >= target;
+          case "lte":
+            return score <= target;
+          case "gt":
+            return score > target;
+          case "lt":
+            return score < target;
+          case "not_equals":
+            return score !== target;
+          default:
+            return score === target;
+        }
+      }
+      const raw = device[condition.field];
+      const values = (Array.isArray(raw) ? raw : [raw || ""]).map((item) => item.toLocaleLowerCase());
+      if (condition.operator === "not_equals") return values.every((item) => item !== value);
+      return values.some((item) => condition.operator === "contains" ? item.includes(value) : condition.operator === "starts_with" ? item.startsWith(value) : item === value);
+    });
+  }
+
   // frontend/src/pages/dashboard.ts
-  var columns = ["ip", "name", "status", "health_score", "community", "last_seen"];
+  var columns = ["ip", "display_name", "name", "tags", "status", "health_score", "last_seen"];
   var sortColumn = "ip";
   var sortAscending = true;
   var deletingIps = /* @__PURE__ */ new Set();
   var selectedIds = /* @__PURE__ */ new Set();
   var searchQuery = "";
+  var matchesFilters = () => true;
   function visibleDevices() {
     const query = searchQuery.trim().toLocaleLowerCase();
-    return currentDevices().filter((device) => !query || [device.ip, device.name, device.display_name, ...device.tags || []].some((value) => value?.toLocaleLowerCase().includes(query)));
+    return currentDevices().filter((device) => matchesFilters(device) && (!query || [device.ip, device.name, device.display_name, ...device.tags || []].some((value) => value?.toLocaleLowerCase().includes(query))));
   }
   function renderSelection() {
     const count = document.getElementById("device-selection-count");
     if (count) count.textContent = `${selectedIds.size} ${metadataText("selected")}`;
     const button = document.getElementById("bulk-rename");
     if (button) {
-      button.textContent = metadataText("rename");
+      button.textContent = metadataText("bulk");
       button.disabled = selectedIds.size === 0;
     }
     const all = document.getElementById("select-visible-devices");
@@ -673,8 +1084,8 @@ var TracePulseDashboard = (() => {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
     if (column === "status") return statusOrder(a.status) - statusOrder(b.status);
     if (column === "health_score") return (a.health_score ?? -1) - (b.health_score ?? -1);
-    const left = String(column === "name" ? deviceLabel(a) : a[column] || "").toLowerCase();
-    const right = String(column === "name" ? deviceLabel(b) : b[column] || "").toLowerCase();
+    const left = String(column === "display_name" ? deviceLabel(a) : column === "tags" ? (a.tags || []).join(", ") : a[column] || "").toLowerCase();
+    const right = String(column === "display_name" ? deviceLabel(b) : column === "tags" ? (b.tags || []).join(", ") : b[column] || "").toLowerCase();
     return left < right ? -1 : left > right ? 1 : 0;
   }
   function currentDevices() {
@@ -714,7 +1125,7 @@ var TracePulseDashboard = (() => {
       return sortAscending ? result : -result;
     });
     if (sorted.length === 0) {
-      tbody.innerHTML = `<tr><td colspan=8 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
+      tbody.innerHTML = currentDevices().length > 0 ? `<tr><td colspan=9 class=empty>${t("no_matching_devices")}</td></tr>` : `<tr><td colspan=9 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
       return;
     }
     tbody.innerHTML = sorted.map((device) => {
@@ -722,18 +1133,20 @@ var TracePulseDashboard = (() => {
       const rowClass = device.error_spike ? " class=spike-row" : "";
       const spikeBadge = device.error_spike ? "<span class=spike-badge>&#9888; Error Spike</span>" : "";
       const deleting = deletingIps.has(device.ip);
-      const actionLabel = deleting ? t("unregistering") : t("unregister");
-      const encodedIp = encodeURIComponent(device.ip);
-      const encodedName = encodeURIComponent(deviceLabel(device));
-      const actionButton = `<button class='btn-row-danger' data-ip="${esc(encodedIp)}" data-name="${esc(encodedName)}" onclick='unregisterDevice(this.dataset.ip,this.dataset.name)' ${deleting ? "disabled" : ""}>${actionLabel}</button>`;
+      const actionButton = `<button type="button" class="device-action-button" data-action-device="${esc(device.ip)}" aria-haspopup="dialog" ${deleting || typeof device.id !== "number" ? "disabled" : ""}>${esc(metadataText("actions"))}</button>`;
       const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
       const healthBadgeClass = statusClass(device.health_status);
       const health = typeof device.health_score === "number" ? `<span class="${esc(healthBadgeClass)}">${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label="${esc(t("health_score"))}" style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
       const checkbox = typeof device.id === "number" ? `<input type="checkbox" data-device-id="${device.id}" aria-label="${esc(`${metadataText("select")} ${device.ip}`)}" ${selectedIds.has(device.id) ? "checked" : ""}>` : "";
-      const original = device.display_name ? `<div class="device-original">${esc(device.name || device.ip)}</div>` : "";
       const tags = (device.tags || []).map((tag) => `<span class="device-tag">${esc(tag)}</span>`).join("");
-      return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${esc(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${esc(device.ip)}</a></td><td>${esc(deviceLabel(device))}${spikeBadge}${original}<div class="device-tags">${tags}</div></td><td><span class="${esc(statusBadgeClass)}">${esc(device.status)}</span></td><td>${health}</td><td>${esc(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
+      return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${esc(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${esc(device.ip)}</a></td><td>${esc(deviceLabel(device))}${spikeBadge}</td><td>${esc(device.name || "-")}</td><td>${tags ? `<div class="device-tags">${tags}</div>` : "-"}</td><td><span class="${esc(statusBadgeClass)}">${esc(device.status)}</span></td><td>${health}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
     }).join("");
+    tbody.querySelectorAll("[data-action-device]").forEach((button) => {
+      button.onclick = () => {
+        const device = currentDevices().find((item) => item.ip === button.dataset.actionDevice);
+        if (device) bulkActions([device], refresh, true);
+      };
+    });
     tbody.querySelectorAll("[data-device-id]").forEach((checkbox) => {
       checkbox.onchange = () => {
         const id = Number(checkbox.dataset.deviceId);
@@ -822,13 +1235,17 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
     count.setAttribute("aria-live", "polite");
     const rename = document.createElement("button");
     rename.id = "bulk-rename";
-    rename.onclick = () => bulkRename([...selectedIds], refresh);
+    rename.onclick = () => bulkActions([...selectedIds].flatMap((id) => {
+      const device = currentDevices().find((item) => item.id === id);
+      return device ? [device] : [];
+    }), refresh);
     toolbar.append(search, count, rename);
     const error = document.createElement("p");
     error.id = "device-load-error";
     error.setAttribute("role", "alert");
     toolbar.append(error);
     table.parentElement.before(toolbar);
+    matchesFilters = initializeDeviceFilters(toolbar, renderTable);
     const header = document.createElement("th");
     const all = document.createElement("input");
     all.type = "checkbox";

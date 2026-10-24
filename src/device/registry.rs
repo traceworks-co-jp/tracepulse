@@ -25,6 +25,12 @@ impl DeviceRegistry {
             )));
         }
 
+        if self.devices.len() >= super::MAX_MONITORED_NODES {
+            return Err(AppError::Validation(format!(
+                "Device registration limit reached ({} nodes per instance)",
+                super::MAX_MONITORED_NODES
+            )));
+        }
         self.devices.push(device);
         Ok(())
     }

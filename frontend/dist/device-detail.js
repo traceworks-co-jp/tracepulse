@@ -58,7 +58,7 @@ var TracePulseDeviceDetail = (() => {
         .metadata-dialog form,.metadata-dialog label{display:grid;gap:8px}
         .metadata-dialog p,.metadata-dialog li{overflow-wrap:anywhere}
         .metadata-dialog input,.metadata-dialog select,.device-toolbar input{box-sizing:border-box;width:100%;padding:8px;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px;min-width:0}
-        .metadata-dialog button,.device-toolbar button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
+        .metadata-dialog button,.device-toolbar button,.device-action-button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
         .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
         .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
         .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
@@ -66,7 +66,7 @@ var TracePulseDeviceDetail = (() => {
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
         :root[data-theme=light] .metadata-dialog{background:#fff;color:#1e293b}
-        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
+        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-action-button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
     `;
     document.head.append(style);
   }
@@ -101,7 +101,16 @@ var TracePulseDeviceDetail = (() => {
       failed: "Request failed",
       missing: "Select at least one device",
       tagHint: "Enter a tag, then press Add tag or Enter.",
-      clear: "Leave the display name empty to use sysName or IP."
+      clear: "Leave the display name empty to use sysName or IP.",
+      bulk: "Bulk actions",
+      actions: "Actions",
+      bulkTags: "Add tags",
+      bulkNames: "Set / change device names",
+      unregister: "Unregister",
+      targets: "Selected devices",
+      appendHint: "Existing tags are retained. Duplicate tags are ignored.",
+      unregisterHint: "Unregister these devices and delete their monitoring history? This cannot be undone.",
+      confirm: "Confirm"
     },
     ja: {
       edit: "\u8868\u793A\u540D\u30FB\u30BF\u30B0\u3092\u7DE8\u96C6",
@@ -128,7 +137,16 @@ var TracePulseDeviceDetail = (() => {
       failed: "\u51E6\u7406\u306B\u5931\u6557\u3057\u307E\u3057\u305F",
       missing: "\u6A5F\u5668\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044",
       tagHint: "\u30BF\u30B0\u3092\u5165\u529B\u3057\u3001\u8FFD\u52A0\u30DC\u30BF\u30F3\u307E\u305F\u306FEnter\u3067\u78BA\u5B9A\u3057\u307E\u3059\u3002",
-      clear: "\u8868\u793A\u540D\u3092\u7A7A\u306B\u3059\u308B\u3068sysName\u307E\u305F\u306FIP\u3092\u8868\u793A\u3057\u307E\u3059\u3002"
+      clear: "\u8868\u793A\u540D\u3092\u7A7A\u306B\u3059\u308B\u3068sysName\u307E\u305F\u306FIP\u3092\u8868\u793A\u3057\u307E\u3059\u3002",
+      bulk: "\u4E00\u62EC\u64CD\u4F5C",
+      actions: "\u64CD\u4F5C",
+      bulkTags: "\u30BF\u30B0\u4ED8\u3051",
+      bulkNames: "\u6A5F\u5668\u540D\u306E\u8A2D\u5B9A\u30FB\u5909\u66F4",
+      unregister: "\u767B\u9332\u89E3\u9664",
+      targets: "\u9078\u629E\u3057\u305F\u6A5F\u5668",
+      appendHint: "\u65E2\u5B58\u30BF\u30B0\u3092\u4FDD\u6301\u3057\u3066\u8FFD\u52A0\u3057\u307E\u3059\u3002\u91CD\u8907\u3059\u308B\u30BF\u30B0\u306F\u8FFD\u52A0\u3057\u307E\u305B\u3093\u3002",
+      unregisterHint: "\u4EE5\u4E0B\u306E\u6A5F\u5668\u306E\u767B\u9332\u3068\u76E3\u8996\u5C65\u6B74\u3092\u524A\u9664\u3057\u307E\u3059\u3002\u5143\u306B\u623B\u305B\u307E\u305B\u3093\u3002\u5B9F\u884C\u3057\u307E\u3059\u304B\uFF1F",
+      confirm: "\u78BA\u5B9A"
     }
   };
   function metadataText(key) {

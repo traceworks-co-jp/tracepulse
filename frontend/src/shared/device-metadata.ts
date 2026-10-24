@@ -9,7 +9,7 @@ if (!document.getElementById("metadata-styles")) {
         .metadata-dialog form,.metadata-dialog label{display:grid;gap:8px}
         .metadata-dialog p,.metadata-dialog li{overflow-wrap:anywhere}
         .metadata-dialog input,.metadata-dialog select,.device-toolbar input{box-sizing:border-box;width:100%;padding:8px;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px;min-width:0}
-        .metadata-dialog button,.device-toolbar button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
+        .metadata-dialog button,.device-toolbar button,.device-action-button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
         .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
         .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
         .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
@@ -17,7 +17,7 @@ if (!document.getElementById("metadata-styles")) {
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
         :root[data-theme=light] .metadata-dialog{background:#fff;color:#1e293b}
-        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
+        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-action-button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
     `;
     document.head.append(style);
 }
@@ -44,6 +44,10 @@ const copy = {
         preview: "Preview", apply: "Apply names", search: "Search alias, hostname, IP or tags", select: "Select device",
         all: "Select visible devices", selected: "selected", failed: "Request failed", missing: "Select at least one device",
         tagHint: "Enter a tag, then press Add tag or Enter.", clear: "Leave the display name empty to use sysName or IP.",
+        bulk: "Bulk actions", actions: "Actions", bulkTags: "Add tags", bulkNames: "Set / change device names",
+        unregister: "Unregister", targets: "Selected devices", appendHint: "Existing tags are retained. Duplicate tags are ignored.",
+        unregisterHint: "Unregister these devices and delete their monitoring history? This cannot be undone.",
+        confirm: "Confirm",
     },
     ja: {
         edit: "表示名・タグを編集", alias: "表示名", tags: "タグ", add: "タグを追加", remove: "削除",
@@ -52,6 +56,10 @@ const copy = {
         preview: "プレビュー", apply: "名称を適用", search: "表示名・ホスト名・IP・タグで検索", select: "機器を選択",
         all: "表示中の機器をすべて選択", selected: "件選択", failed: "処理に失敗しました", missing: "機器を選択してください",
         tagHint: "タグを入力し、追加ボタンまたはEnterで確定します。", clear: "表示名を空にするとsysNameまたはIPを表示します。",
+        bulk: "一括操作", actions: "操作", bulkTags: "タグ付け", bulkNames: "機器名の設定・変更",
+        unregister: "登録解除", targets: "選択した機器", appendHint: "既存タグを保持して追加します。重複するタグは追加しません。",
+        unregisterHint: "以下の機器の登録と監視履歴を削除します。元に戻せません。実行しますか？",
+        confirm: "確定",
     },
 };
 export function metadataText(key: keyof typeof copy.en): string {
@@ -150,6 +158,85 @@ export function editDeviceMetadata(device: DeviceIdentity, saved: () => void): v
 }
 
 interface RenameItem { id: number; ip: string; display_name: string; }
+export function bulkActions(devices: DeviceIdentity[], saved: () => void, individual = false): void {
+    const ids = devices.map((device) => device.id).filter((id): id is number => typeof id === "number");
+    const chooser = dialog("bulk-actions-dialog", metadataText(individual ? "actions" : "bulk"));
+    const list = (): string => `<p>${esc(metadataText("targets"))}: ${devices.length}</p><ul>${devices.map((device) =>
+        `<li>${esc(device.ip || "")} — ${esc(deviceLabel(device))}</li>`).join("")}</ul>`;
+    chooser.insertAdjacentHTML("beforeend", `${list()}<div class="metadata-actions">
+        <button type="button" data-action="tags">${esc(metadataText("bulkTags"))}</button>
+        <button type="button" data-action="names">${esc(metadataText("bulkNames"))}</button>
+        <button type="button" data-action="unregister">${esc(metadataText("unregister"))}</button>
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button></div>`);
+    chooser.querySelector<HTMLButtonElement>("[data-cancel]")!.onclick = () => chooser.close();
+    chooser.querySelector<HTMLButtonElement>("[data-action=names]")!.onclick = () => {
+        chooser.close();
+        if (individual) editDeviceMetadata(devices[0], saved);
+        else bulkRename(ids, saved);
+    };
+    const actionDialog = (action: "add_tags" | "unregister"): void => {
+        chooser.close();
+        const tags = action === "add_tags";
+        const element = dialog("bulk-action-confirm", metadataText(tags ? "bulkTags" : "unregister"));
+        element.insertAdjacentHTML("beforeend", `<form>${list()}
+            <p>${esc(metadataText(tags ? "appendHint" : "unregisterHint"))}</p>
+            ${tags ? `<div id="bulk-tag-chips" class="device-tags"></div>${field("bulk-tag-input", metadataText("tags"), "", "text", "maxlength=64")}
+                <p>${esc(metadataText("tagHint"))}</p><button type="button" id="bulk-tag-add">${esc(metadataText("add"))}</button>` : ""}
+            <p role="alert"></p><div class="metadata-actions"><button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
+            <button type="submit">${esc(metadataText("confirm"))}</button></div></form>`);
+        let busy = false;
+        const additions: string[] = [];
+        const error = element.querySelector<HTMLElement>("[role=alert]")!;
+        const input = element.querySelector<HTMLInputElement>("#bulk-tag-input");
+        const renderTags = (): void => {
+            const chips = element.querySelector<HTMLElement>("#bulk-tag-chips")!;
+            chips.replaceChildren();
+            additions.forEach((tag, index) => {
+                const chip = document.createElement("span");
+                chip.className = "device-tag";
+                chip.append(document.createTextNode(tag));
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.textContent = "×";
+                remove.setAttribute("aria-label", `${metadataText("remove")} ${tag}`);
+                remove.onclick = () => { additions.splice(index, 1); renderTags(); };
+                chip.append(remove); chips.append(chip);
+            });
+        };
+        const addTag = (): void => {
+            const tag = input!.value.trim();
+            if (tag && !additions.includes(tag)) additions.push(tag);
+            input!.value = ""; renderTags(); input!.focus();
+        };
+        if (input) {
+            element.querySelector<HTMLButtonElement>("#bulk-tag-add")!.onclick = addTag;
+            input.onkeydown = (event) => {
+                if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); addTag(); }
+            };
+        }
+        element.querySelector<HTMLButtonElement>("[data-cancel]")!.onclick = () => element.close();
+        element.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+        element.querySelector<HTMLFormElement>("form")!.onsubmit = async (event) => {
+            event.preventDefault();
+            if (busy) return;
+            if (input?.value.trim()) addTag();
+            if (tags && additions.length === 0) { input?.reportValidity(); input?.focus(); error.textContent = metadataText("tagHint"); return; }
+            busy = true; error.textContent = "";
+            const controls = element.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button");
+            controls.forEach((control) => { control.disabled = true; });
+            try {
+                await post("/api/devices/bulk-action", { action, device_ids: ids, ...(tags ? { tags: additions } : {}) });
+                element.close(); saved();
+            } catch (failure) { error.textContent = String(failure); }
+            finally { busy = false; controls.forEach((control) => { control.disabled = false; }); }
+        };
+        element.showModal();
+    };
+    chooser.querySelector<HTMLButtonElement>("[data-action=tags]")!.onclick = () => actionDialog("add_tags");
+    chooser.querySelector<HTMLButtonElement>("[data-action=unregister]")!.onclick = () => actionDialog("unregister");
+    chooser.showModal();
+}
+
 export function bulkRename(ids: number[], saved: () => void): void {
     const element = dialog("bulk-rename-dialog", metadataText("rename"));
     element.insertAdjacentHTML("beforeend", `<form>

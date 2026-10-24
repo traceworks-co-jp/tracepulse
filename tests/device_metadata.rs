@@ -3,7 +3,7 @@ use tracepulse::{
     db::{repository::Repository, sqlite::initialize_database},
     device::{
         DeviceConfig,
-        metadata::{BulkRename, DeviceMetadata, rename_plan},
+        metadata::{BulkAction, BulkRename, DeviceMetadata, rename_plan},
     },
 };
 
@@ -23,6 +23,110 @@ fn request() -> BulkRename {
         "suffix": "-本館", "sort_by": "ip_asc"
     }))
     .unwrap()
+}
+
+#[test]
+fn bulk_tags_append_uniquely_preserve_aliases_and_roll_back_on_limits() {
+    let repo = repository();
+    repo.update_device_metadata(
+        "192.0.2.10",
+        DeviceMetadata {
+            display_name: Some("東京SW".into()),
+            tags: vec!["Core".into()],
+        },
+    )
+    .unwrap();
+    let request = BulkAction::AddTags {
+        device_ids: vec![1, 2],
+        tags: vec!["Core".into(), " 東京 ".into(), "東京".into()],
+    };
+    assert_eq!(repo.bulk_action(&request).unwrap(), 2);
+    repo.bulk_action(&request).unwrap();
+    let first = repo.find_device_by_ip("192.0.2.10").unwrap().unwrap();
+    assert_eq!(first.tags, ["Core", "東京"]);
+    assert_eq!(first.display_name.as_deref(), Some("東京SW"));
+    assert_eq!(first.community, "private");
+    repo.update_device_metadata(
+        "192.0.2.2",
+        DeviceMetadata {
+            display_name: None,
+            tags: (0..64).map(|n| format!("tag-{n}")).collect(),
+        },
+    )
+    .unwrap();
+    assert!(
+        repo.bulk_action(&BulkAction::AddTags {
+            device_ids: vec![1, 2],
+            tags: vec!["overflow".into()]
+        })
+        .is_err()
+    );
+    assert_eq!(
+        repo.find_device_by_ip("192.0.2.10").unwrap().unwrap().tags,
+        ["Core", "東京"]
+    );
+    for ids in [vec![], vec![1, 1], vec![0], vec![1, 999], vec![1; 1001]] {
+        assert!(
+            repo.bulk_action(&BulkAction::Unregister { device_ids: ids })
+                .is_err()
+        );
+        assert_eq!(repo.list_devices().unwrap().len(), 4);
+    }
+    for tags in [
+        vec![],
+        vec![" ".into()],
+        vec!["bad\n".into(), "x".repeat(65)],
+    ] {
+        assert!(
+            repo.bulk_action(&BulkAction::AddTags {
+                device_ids: vec![1],
+                tags
+            })
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn bulk_unregister_deletes_related_history_atomically() {
+    let connection = initialize_database(Path::new(":memory:")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER block_delete BEFORE DELETE ON devices WHEN OLD.id=2
+         BEGIN SELECT RAISE(ABORT, 'test deletion failure'); END;",
+        )
+        .unwrap();
+    let repo = Repository::new(connection).unwrap();
+    for ip in ["192.0.2.1", "192.0.2.2", "192.0.2.3"] {
+        repo.save_device_config(&DeviceConfig::new(ip, "private"))
+            .unwrap();
+    }
+    let metrics = tracepulse::db::models::DeviceMetrics {
+        id: None,
+        device_id: 1,
+        cpu_usage: Some(20),
+        memory_usage: None,
+        memory_used_bytes: None,
+        sampled_at: "2026-10-24 13:00:00".into(),
+    };
+    repo.save_device_metrics(&metrics).unwrap();
+    assert!(
+        repo.bulk_action(&BulkAction::Unregister {
+            device_ids: vec![1, 2]
+        })
+        .is_err()
+    );
+    assert_eq!(repo.list_devices().unwrap().len(), 3);
+    assert_eq!(repo.count_rows("device_metrics").unwrap(), 1);
+    assert_eq!(
+        repo.bulk_action(&BulkAction::Unregister {
+            device_ids: vec![1, 3]
+        })
+        .unwrap(),
+        2
+    );
+    assert_eq!(repo.list_devices().unwrap().len(), 1);
+    assert_eq!(repo.count_rows("device_metrics").unwrap(), 0);
 }
 
 #[test]

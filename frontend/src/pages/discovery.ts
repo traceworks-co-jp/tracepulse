@@ -1,4 +1,5 @@
 import { esc } from "../shared/escape";
+import { addSecretVisibility } from "../shared/secret-visibility";
 
 interface DiscoveryDevice {
     ip: string;
@@ -220,3 +221,7 @@ export async function addManual(): Promise<void> {
 
 window.addManual = addManual; window.cancelScan = cancelScan; window.hideManual = hideManual; window.registerSelected = registerSelected; window.runTopologyOnly = runTopologyOnly; window.showManual = showManual; window.startScan = startScan; window.toggleAll = toggleAll; window.updateHint = updateHint; window.updateRegisterBtn = updateRegisterBtn;
 window.applyPageLanguage = applyPageLanguage;
+for (const id of ["community", "manual-community"]) {
+    const input = document.getElementById(id);
+    if (input instanceof HTMLInputElement) addSecretVisibility(input);
+}

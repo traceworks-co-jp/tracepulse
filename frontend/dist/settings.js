@@ -32,6 +32,59 @@ var TracePulseSettings = (() => {
     return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/\x27/g, "&#39;");
   }
 
+  // frontend/src/shared/secret-visibility.ts
+  var eye = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="secret-eye-slash" d="m3 3 18 18"/></svg>`;
+  function addSecretVisibility(input) {
+    if (input.parentElement?.classList.contains("secret-input")) return;
+    if (!document.getElementById("secret-visibility-style")) {
+      const style = document.createElement("style");
+      style.id = "secret-visibility-style";
+      style.textContent = `
+            .secret-input{position:relative;display:block;min-width:0}
+            .secret-input input{padding-right:44px!important}
+            .secret-input .secret-toggle{position:absolute;right:2px;top:2px;bottom:2px;width:40px;padding:0;display:flex;align-items:center;justify-content:center;border:0;border-radius:4px;background:transparent;color:inherit;cursor:pointer}
+            .secret-toggle:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
+            .secret-toggle:hover{background:rgb(127 127 127 / .15)}
+            .secret-toggle .secret-eye-slash{display:none}
+            .secret-toggle[aria-pressed=true] .secret-eye-slash{display:block}
+        `;
+      document.head.append(style);
+    }
+    const wrapper = document.createElement("span");
+    wrapper.className = "secret-input";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secret-toggle";
+    button.setAttribute("aria-controls", input.id);
+    button.innerHTML = eye;
+    const update = () => {
+      const visible = input.type === "text";
+      const key = visible ? "hide_community" : "show_community";
+      const fallback = visible ? "Hide community" : "Show community";
+      const label = window.t?.(key) || fallback;
+      button.setAttribute("aria-label", label);
+      button.setAttribute("aria-pressed", String(visible));
+      button.title = label;
+    };
+    button.addEventListener("click", () => {
+      input.type = input.type === "password" ? "text" : "password";
+      update();
+    });
+    input.before(wrapper);
+    wrapper.append(input, button);
+    update();
+  }
+  window.addEventListener("tracepulse-language-change", () => {
+    document.querySelectorAll(".secret-toggle").forEach((button) => {
+      const key = button.getAttribute("aria-pressed") === "true" ? "hide_community" : "show_community";
+      const label = window.t?.(key);
+      if (label) {
+        button.setAttribute("aria-label", label);
+        button.title = label;
+      }
+    });
+  });
+
   // frontend/src/shared/onboarding.ts
   var storageKey = "tracepulse-onboarding-v1";
   var copy = {
@@ -202,6 +255,8 @@ var TracePulseSettings = (() => {
       const titles = ["welcome", "discovery", "alerts"];
       dialog.innerHTML = `<div class="setup-step">${text("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text(titles[step])}</h2>` + (step === 0 ? `<p>${text("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text("privacy")}</p><button class="setup-primary" type="submit">${text("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text("alertInfo")}</p><a href="/settings" id="setup-settings">${text("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
       dialog.querySelector("#setup-title")?.focus();
+      const communityInput = dialog.querySelector("#setup-community");
+      if (communityInput) addSecretVisibility(communityInput);
       dialog.querySelector("#setup-settings")?.addEventListener("click", close);
       dialog.querySelector("form")?.addEventListener("submit", (event) => {
         event.preventDefault();

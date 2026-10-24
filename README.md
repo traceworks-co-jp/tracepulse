@@ -446,11 +446,34 @@ rewritten, preserving unrecognized TOML sections (formatting/comments may change
 Old backups, filesystem snapshots, and deleted filesystem blocks are **not**
 securely erased by this migration; protect or retire those separately.
 
-Device APIs return `community: "********"` and/or `community_configured`, never
+The dashboard supports column filters for IP, display name, sysName, tags, status,
+and health score. Device name (alias with hostname/IP fallback), original hostname,
+and tags are displayed in separate sortable columns.
+Use **Add condition** to combine conditions with AND; the
+existing text search is also applied. Text comparisons are case-insensitive,
+tags are compared individually, and blank filter values are ignored. Health
+score comparisons accept numbers from 0 to 100 and exclude devices without a
+measurement. **Clear conditions** removes column filters, not the text search.
+Filters remain active during automatic refresh; they do not clear selected devices.
+Use **Bulk actions** for selected devices to add tags, set/change display names
+(with sequential numbering and preview), or unregister devices. Tagging appends
+unique tags without replacing existing tags or aliases. Unregistering requires
+confirmation of the target list and removes the devices' monitoring history.
+Bulk tagging and unregistering are transactional: an error rolls back the entire
+operation. Selection includes checked devices hidden by the current filters;
+review the target list before confirming.
+Each device row also has an **Actions** button with the same choices, scoped
+only to that device regardless of checkbox selection. Row-level name changes
+open the direct alias/tag editor instead of sequential bulk naming.
+
+The dashboard device list omits the community column. Device APIs return
+`community: "********"` and/or `community_configured`, never
 the stored plaintext or envelope. Settings return an empty secret field plus a
 configured flag; blank updates retain the existing secret. Type a new community
-to replace it. Password inputs mask typed values, and SNMP diagnostic credentials
-are sent in POST bodies rather than query strings. Discovery results no longer
+to replace it. Password inputs mask typed values. Discovery, manual registration,
+and setup-guide community inputs include an eye button to show or hide the typed
+value; they are hidden by default. SNMP diagnostic credentials are sent in POST
+bodies rather than query strings. Discovery results no longer
 echo communities; the browser retains the typed secret in memory for that scan's
 registrations, not in result HTML attributes. Generic device/config serialization omits secrets, and Debug
 representations redact them.
@@ -562,11 +585,11 @@ third-party license notice page.
 
 ## Community Edition and Enterprise Features
 
-The public repository provides the Community edition. It applies a 25-device registration limit and restricts CIDR discovery to a single `/24` subnet. These limits are part of the Community product policy; because the Community implementation is open source and self-hosted, a user who modifies and rebuilds the source can technically remove them.
+The public repository provides the Community edition. Both Community and Enterprise have a system ceiling of **200 monitored nodes per instance**, rather than an edition-specific registration cap. Enterprise integrations continue to supply the licensed `max_nodes` through `WebLimits.max_devices`; the effective limit is the smaller of that value and 200. Unset limits also use the 200-node ceiling. Community CIDR discovery remains restricted to a single `/24` subnet.
 
 Enterprise-only analytics and bundled assets are not included in the public repository. Enterprise integrations are supplied through private provider implementations using the public extension interfaces. Changing the Community edition flag alone therefore does not provide the Enterprise implementation.
 
-Modified builds must not be represented as official TracePulse Enterprise products or use TracePulse trademarks without permission. Organizations requiring unlimited monitoring, Enterprise integrations, support, or updates should use the official Enterprise offering or a separately agreed commercial contract.
+Modified builds must not be represented as official TracePulse Enterprise products or use TracePulse trademarks without permission. Choose Enterprise for automated predictive monitoring, automated security management and trust scoring, automatically saved topology with last-known-good (LKG) retention during failures, status-aware highlighting/filtering, integrations, support, and updates—not to unlock additional nodes beyond the instance ceiling.
 
 ---
 
@@ -800,11 +823,11 @@ history_days = 7
 
 ### Community 版と Enterprise 機能
 
-公開リポジトリで提供するのは Community 版です。Community 版には登録機器数 25 台の上限と、CIDR 自動探索を単一の `/24` サブネットに制限する機能制限があります。これらは Community 版の製品ポリシーです。Community 版はソースコードが公開されたセルフホスト型のソフトウェアであるため、利用者がソースコードを改変して再ビルドすれば、技術的には制限を解除できます。
+公開リポジトリで提供するのは Community 版です。Community 版固有の台数制限を廃止し、Community・Enterprise 共通のシステム上限を **1インスタンスあたり最大200監視ノード** とします。Enterprise 連携では、引き続きライセンスの `max_nodes` を `WebLimits.max_devices` に指定し、その値と200の小さい方を適用します。上限未指定時も200ノードです。Community 版の CIDR 自動探索範囲は、引き続き単一の `/24` サブネットです。
 
 Enterprise 専用の分析機能およびバンドル済みアセットは公開リポジトリには含めません。Enterprise 連携は、公開されている拡張インターフェースを通じて非公開のプロバイダー実装から提供します。そのため、Community 版のエディションフラグを変更するだけでは Enterprise 実装を利用できません。
 
-改変版を公式の TracePulse Enterprise と表示したり、許可なく TracePulse の商標を使用したりすることは禁止します。無制限監視、Enterprise 連携、サポート、アップデートが必要な場合は、公式 Enterprise 版または別途合意した商用契約を利用してください。
+改変版を公式の TracePulse Enterprise と表示したり、許可なく TracePulse の商標を使用したりすることは禁止します。おまかせ予兆監視・おまかせセキュリティ管理／信用スコア・自動保存トポロジ（障害時LKG保持）・ステータス連動ハイライト＆フィルタリング、Enterprise 連携、サポート、アップデートをご利用の場合は公式 Enterprise 版をご検討ください。Enterprise への移行でインスタンス上限が増えるものではありません。
 
 本プロジェクトは、以下のいずれかのライセンスの下で提供されます。
 

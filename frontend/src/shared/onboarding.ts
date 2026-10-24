@@ -1,4 +1,5 @@
 import { esc } from "./escape";
+import { addSecretVisibility } from "./secret-visibility";
 
 interface FoundDevice { ip: string; name?: string; community?: string; }
 interface ScanResult { status?: string; error?: string; scanned?: number; total?: number; devices?: FoundDevice[]; }
@@ -119,6 +120,8 @@ export function initializeOnboarding(auto = false): void {
                 `<p>${text("alertInfo")}</p><a href="/settings" id="setup-settings">${text("settings")}</a>`) +
             `<div class="setup-actions"><button type="button" data-action="skip">${text("skip")}</button>${step > 0 || (step === 0 && languageChoiceEnabled) ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
         dialog.querySelector<HTMLElement>("#setup-title")?.focus();
+        const communityInput = dialog.querySelector<HTMLInputElement>("#setup-community");
+        if (communityInput) addSecretVisibility(communityInput);
         dialog.querySelector("#setup-settings")?.addEventListener("click", close);
         dialog.querySelector("form")?.addEventListener("submit", (event) => { event.preventDefault(); void scan(); });
     };

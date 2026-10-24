@@ -503,7 +503,8 @@ test("dashboard health score remains separate from metric alarm status", async (
     const untrustedRow = page.locator("#dash-tbody tr").filter({ hasText: "router' onmouseover='alert(1)" });
     await expect(untrustedRow.locator("[onmouseover]")).toHaveCount(0);
     await expect(untrustedRow.locator(".status-unknown")).toHaveCount(2);
-    await expect(untrustedRow.locator("button")).toHaveAttribute("data-name", "router'%20onmouseover%3D'alert(1)");
+    await expect(untrustedRow.locator("button")).toHaveAttribute("data-action-device", "192.0.2.3' onmouseover='alert(1)");
+    await expect(untrustedRow.locator("button")).toHaveText("Actions");
 });
 
 test("health score legend follows boundaries and language changes", async ({ page }) => {
@@ -658,6 +659,29 @@ test("discovery loads TypeScript discovery and topology bundles", async ({ page 
     await expect(page.locator("script[src='/static/js/discovery.js']")).toHaveCount(1);
     await expect(page.locator("script[src='/static/js/topology.js']")).toHaveCount(1);
     expect(consoleErrors).toEqual([]);
+});
+
+test("CIDR hints do not move the discovery scan button", async ({ page }) => {
+    for (const width of [1280, 700, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto("/discovery");
+        for (const language of ["en", "ja"]) {
+            await page.evaluate((lang) => window.setLanguage?.(lang), language);
+            const cidr = page.locator("#cidr");
+            await cidr.fill("");
+            const before = (await page.locator("#scan-btn").boundingBox())!;
+            for (const value of ["172.20.20.0/24", "172.20.0.0/16", "invalid", ""]) {
+                await cidr.fill(value);
+                if (value.endsWith("/24")) await expect(page.locator("#host-hint")).toContainText("254");
+                if (value === "invalid" || value === "") await expect(page.locator("#host-hint")).toBeEmpty();
+                const after = (await page.locator("#scan-btn").boundingBox())!;
+                expect(after.x).toBeCloseTo(before.x, 1);
+                expect(after.y).toBeCloseTo(before.y, 1);
+                expect(after.width).toBeCloseTo(before.width, 1);
+                expect(after.height).toBeCloseTo(before.height, 1);
+            }
+        }
+    }
 });
 
 test("flow analytics endpoint returns a valid JSON response", async ({ request }) => {
