@@ -48,6 +48,190 @@ var TracePulseDeviceDetail = (() => {
     return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/\x27/g, "&#39;");
   }
 
+  // frontend/src/shared/device-metadata.ts
+  if (!document.getElementById("metadata-styles")) {
+    const style = document.createElement("style");
+    style.id = "metadata-styles";
+    style.textContent = `
+        .metadata-dialog{box-sizing:border-box;width:min(640px,calc(100% - 24px));max-height:calc(100dvh - 24px);overflow:auto;margin:auto;padding:24px;border:1px solid var(--tp-border,#475569);border-radius:8px;background:var(--tp-surface,#1e293b);color:var(--tp-text,#e2e8f0)}
+        .metadata-dialog::backdrop{background:rgb(0 0 0 / .6)}
+        .metadata-dialog form,.metadata-dialog label{display:grid;gap:8px}
+        .metadata-dialog p,.metadata-dialog li{overflow-wrap:anywhere}
+        .metadata-dialog input,.metadata-dialog select,.device-toolbar input{box-sizing:border-box;width:100%;padding:8px;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px;min-width:0}
+        .metadata-dialog button,.device-toolbar button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
+        .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
+        .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+        .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
+        .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
+        .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
+        .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
+        :root[data-theme=light] .metadata-dialog{background:#fff;color:#1e293b}
+        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
+    `;
+    document.head.append(style);
+  }
+  function deviceLabel(device) {
+    if (device.display_name?.trim()) return device.display_name;
+    if (device.name?.trim()) return device.name;
+    return device.ip || "";
+  }
+  var copy = {
+    en: {
+      edit: "Edit alias and tags",
+      alias: "Display name",
+      tags: "Tags",
+      add: "Add tag",
+      remove: "Remove",
+      cancel: "Cancel",
+      save: "Save",
+      rename: "Bulk rename",
+      prefix: "Prefix",
+      start: "Start number",
+      padding: "Padding",
+      suffix: "Suffix",
+      order: "Sort order",
+      ip: "IP ascending",
+      selection: "Selection order",
+      preview: "Preview",
+      apply: "Apply names",
+      search: "Search alias, hostname, IP or tags",
+      select: "Select device",
+      all: "Select visible devices",
+      selected: "selected",
+      failed: "Request failed",
+      missing: "Select at least one device",
+      tagHint: "Enter a tag, then press Add tag or Enter.",
+      clear: "Leave the display name empty to use sysName or IP."
+    },
+    ja: {
+      edit: "\u8868\u793A\u540D\u30FB\u30BF\u30B0\u3092\u7DE8\u96C6",
+      alias: "\u8868\u793A\u540D",
+      tags: "\u30BF\u30B0",
+      add: "\u30BF\u30B0\u3092\u8FFD\u52A0",
+      remove: "\u524A\u9664",
+      cancel: "\u30AD\u30E3\u30F3\u30BB\u30EB",
+      save: "\u4FDD\u5B58",
+      rename: "\u4E00\u62EC\u30EA\u30CD\u30FC\u30E0\uFF08\u9023\u756A\u4ED8\u4E0E\uFF09",
+      prefix: "\u63A5\u982D\u8F9E",
+      start: "\u958B\u59CB\u756A\u53F7",
+      padding: "\u30BC\u30ED\u57CB\u3081\u6841\u6570",
+      suffix: "\u63A5\u5C3E\u8F9E",
+      order: "\u4E26\u3073\u9806",
+      ip: "IP\u30A2\u30C9\u30EC\u30B9\u6607\u9806",
+      selection: "\u9078\u629E\u9806",
+      preview: "\u30D7\u30EC\u30D3\u30E5\u30FC",
+      apply: "\u540D\u79F0\u3092\u9069\u7528",
+      search: "\u8868\u793A\u540D\u30FB\u30DB\u30B9\u30C8\u540D\u30FBIP\u30FB\u30BF\u30B0\u3067\u691C\u7D22",
+      select: "\u6A5F\u5668\u3092\u9078\u629E",
+      all: "\u8868\u793A\u4E2D\u306E\u6A5F\u5668\u3092\u3059\u3079\u3066\u9078\u629E",
+      selected: "\u4EF6\u9078\u629E",
+      failed: "\u51E6\u7406\u306B\u5931\u6557\u3057\u307E\u3057\u305F",
+      missing: "\u6A5F\u5668\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044",
+      tagHint: "\u30BF\u30B0\u3092\u5165\u529B\u3057\u3001\u8FFD\u52A0\u30DC\u30BF\u30F3\u307E\u305F\u306FEnter\u3067\u78BA\u5B9A\u3057\u307E\u3059\u3002",
+      clear: "\u8868\u793A\u540D\u3092\u7A7A\u306B\u3059\u308B\u3068sysName\u307E\u305F\u306FIP\u3092\u8868\u793A\u3057\u307E\u3059\u3002"
+    }
+  };
+  function metadataText(key) {
+    return copy[document.documentElement.lang === "ja" ? "ja" : "en"][key];
+  }
+  async function post(url, body) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok || data.error || data.ok !== true) throw new Error(data.error || metadataText("failed"));
+    return data;
+  }
+  function dialog(id, title) {
+    const existing = document.getElementById(id);
+    if (existing instanceof HTMLDialogElement) existing.remove();
+    const element = document.createElement("dialog");
+    element.id = id;
+    element.className = "metadata-dialog";
+    element.setAttribute("aria-labelledby", `${id}-title`);
+    element.innerHTML = `<h2 id="${id}-title">${esc(title)}</h2>`;
+    document.body.append(element);
+    return element;
+  }
+  function field(id, label, value, type = "text", limits = "") {
+    return `<label for="${id}">${esc(label)}<input id="${id}" type="${type}" value="${esc(value)}" ${limits}></label>`;
+  }
+  function editDeviceMetadata(device, saved) {
+    if (!device.ip) return;
+    const element = dialog("device-metadata-dialog", metadataText("edit"));
+    let tags = [...device.tags || []];
+    element.insertAdjacentHTML("beforeend", `<form>
+        <p>${esc(device.name || "")} (${esc(device.ip)})</p>
+        ${field("device-alias", metadataText("alias"), device.display_name || "", "text", "maxlength=512")}
+        <p>${esc(metadataText("clear"))}</p>
+        <label for="device-tag-input">${esc(metadataText("tags"))}</label>
+        <div id="device-tag-chips" class="device-tags"></div>
+        <input id="device-tag-input" maxlength="64" aria-describedby="device-tag-hint">
+        <p id="device-tag-hint">${esc(metadataText("tagHint"))}</p>
+        <button type="button" id="device-add-tag">${esc(metadataText("add"))}</button>
+        <p role="alert"></p><div class="metadata-actions">
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
+        <button type="submit">${esc(metadataText("save"))}</button></div></form>`);
+    const input = element.querySelector("#device-tag-input");
+    const error = element.querySelector("[role=alert]");
+    const renderTags = () => {
+      const chips = element.querySelector("#device-tag-chips");
+      chips.replaceChildren();
+      tags.forEach((tag) => {
+        const chip = document.createElement("span");
+        chip.className = "device-tag";
+        chip.append(document.createTextNode(tag));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "\xD7";
+        remove.setAttribute("aria-label", `${metadataText("remove")} ${tag}`);
+        remove.onclick = () => {
+          tags = tags.filter((value) => value !== tag);
+          renderTags();
+        };
+        chip.append(remove);
+        chips.append(chip);
+      });
+    };
+    const addTag = () => {
+      const tag = input.value.trim();
+      if (tag && !tags.includes(tag)) tags.push(tag);
+      input.value = "";
+      renderTags();
+    };
+    element.querySelector("#device-add-tag").onclick = addTag;
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.isComposing) {
+        event.preventDefault();
+        addTag();
+      }
+    });
+    element.querySelector("[data-cancel]").onclick = () => element.close();
+    element.querySelector("form").onsubmit = async (event) => {
+      event.preventDefault();
+      addTag();
+      const submit = element.querySelector("[type=submit]");
+      submit.disabled = true;
+      error.textContent = "";
+      try {
+        await post(`/api/device/${encodeURIComponent(device.ip)}/metadata`, {
+          display_name: element.querySelector("#device-alias").value || null,
+          tags
+        });
+        element.close();
+        saved();
+      } catch (failure) {
+        error.textContent = String(failure);
+      } finally {
+        submit.disabled = false;
+      }
+    };
+    renderTags();
+    element.showModal();
+  }
+
   // frontend/src/shared/format.ts
   function formatBps(value) {
     const numericValue = Number(value || 0);
@@ -577,14 +761,28 @@ var TracePulseDeviceDetail = (() => {
   }
   function renderHeader(device) {
     const title = document.getElementById("dev-title");
-    if (title) title.textContent = `${device.name || ""} (${device.ip || ""})`;
+    if (title) {
+      title.textContent = `${deviceLabel(device)} (${device.ip || ""})`;
+      let metadata = document.getElementById("device-identity");
+      if (!metadata) {
+        metadata = document.createElement("div");
+        metadata.id = "device-identity";
+        title.parentElement.after(metadata);
+      }
+      metadata.innerHTML = `<div class="device-original">sysName: ${esc(device.name || "-")}</div>
+            <div class="device-tags">${(device.tags || []).map((tag) => `<span class="device-tag">${esc(tag)}</span>`).join("")}</div>
+            <button type="button" id="edit-device-metadata">${esc(metadataText("edit"))}</button>`;
+      metadata.querySelector("button").onclick = () => {
+        if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, loadDeviceDetail);
+      };
+    }
     const status = document.getElementById("dev-status");
     if (status) {
       const classMap = { online: "status-online", offline: "status-offline", warning: "status-warning", critical: "status-critical" };
       status.className = classMap[device.status || ""] || "status-unknown";
       status.textContent = device.status || "unknown";
     }
-    document.title = `TracePulse - ${device.name || device.ip || "Device"}`;
+    document.title = `TracePulse - ${deviceLabel(device) || "Device"}`;
   }
   function updateLastRefreshed() {
     const element = document.getElementById("device-refresh");
@@ -677,6 +875,7 @@ var TracePulseDeviceDetail = (() => {
   window.toggleInterfaceSelection = toggleInterfaceSelection;
   window.tracePulseTimeZone = tracePulseTimeZone;
   window.applyPageLanguage = () => {
+    if (lastDeviceDetail) renderHeader(lastDeviceDetail);
     updateLastRefreshed();
     refreshTrafficProtocols();
   };

@@ -141,12 +141,30 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
         "#,
     )?;
 
+    ensure_device_metadata_columns(&connection)?;
     ensure_interface_sample_columns(&connection)?;
     ensure_device_metrics_nullable(&connection)?;
     ensure_device_metrics_columns(&connection)?;
     ensure_flow_record_columns(&connection)?;
 
     Ok(connection)
+}
+
+fn ensure_device_metadata_columns(connection: &Connection) -> Result<(), AppError> {
+    let mut stmt = connection.prepare("PRAGMA table_info(devices)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "display_name") {
+        connection.execute("ALTER TABLE devices ADD COLUMN display_name TEXT", [])?;
+    }
+    if !columns.iter().any(|column| column == "tags") {
+        connection.execute(
+            "ALTER TABLE devices ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn ensure_flow_record_columns(connection: &Connection) -> Result<(), AppError> {

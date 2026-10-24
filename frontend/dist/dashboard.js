@@ -162,11 +162,11 @@ var TracePulseDashboard = (() => {
         @media(max-width:480px){.setup-dialog{padding:16px}.setup-actions button{flex:1 1 auto}}
     `;
     document.head.append(style);
-    const dialog = document.createElement("dialog");
-    dialog.className = "setup-dialog";
-    dialog.id = "setup-guide";
-    dialog.setAttribute("aria-labelledby", "setup-title");
-    document.body.append(dialog);
+    const dialog2 = document.createElement("dialog");
+    dialog2.className = "setup-dialog";
+    dialog2.id = "setup-guide";
+    dialog2.setAttribute("aria-labelledby", "setup-title");
+    document.body.append(dialog2);
     let step = 0;
     let choosingLanguage = false;
     let languageChoiceEnabled = false;
@@ -200,8 +200,8 @@ var TracePulseDashboard = (() => {
     const close = () => {
       stop();
       remember();
-      dialog.close();
-      dialog.replaceChildren();
+      dialog2.close();
+      dialog2.replaceChildren();
       devices = [];
       if (previousFocus?.hidden) {
         const heading = document.querySelector("main h1");
@@ -211,7 +211,7 @@ var TracePulseDashboard = (() => {
       window.refreshDashboard?.();
     };
     const status = (message, error = false) => {
-      const node = dialog.querySelector("#setup-status");
+      const node = dialog2.querySelector("#setup-status");
       if (node) {
         node.textContent = message;
         node.setAttribute("role", error ? "alert" : "status");
@@ -219,10 +219,10 @@ var TracePulseDashboard = (() => {
     };
     const setBusy = (value) => {
       busy = value;
-      dialog.querySelectorAll("button:not([data-action=skip])").forEach((button) => {
+      dialog2.querySelectorAll("button:not([data-action=skip])").forEach((button) => {
         button.disabled = value;
       });
-      dialog.querySelectorAll("input").forEach((input) => {
+      dialog2.querySelectorAll("input").forEach((input) => {
         input.disabled = value;
       });
     };
@@ -237,11 +237,11 @@ var TracePulseDashboard = (() => {
     };
     const render = () => {
       if (choosingLanguage) {
-        dialog.innerHTML = `<h2 id="setup-title" tabindex="-1">Choose Language</h2><form id="setup-language-form"><label for="setup-language">Language</label><select id="setup-language" required><option value="" disabled selected>Select a language</option><option value="ja">Japanese</option><option value="en">English</option></select><div class="setup-actions"><button type="submit" class="setup-primary">Continue</button></div></form>`;
-        dialog.querySelector("#setup-language")?.focus();
-        dialog.querySelector("form")?.addEventListener("submit", (event) => {
+        dialog2.innerHTML = `<h2 id="setup-title" tabindex="-1">Choose Language</h2><form id="setup-language-form"><label for="setup-language">Language</label><select id="setup-language" required><option value="" disabled selected>Select a language</option><option value="ja">Japanese</option><option value="en">English</option></select><div class="setup-actions"><button type="submit" class="setup-primary">Continue</button></div></form>`;
+        dialog2.querySelector("#setup-language")?.focus();
+        dialog2.querySelector("form")?.addEventListener("submit", (event) => {
           event.preventDefault();
-          const language = dialog.querySelector("#setup-language").value;
+          const language = dialog2.querySelector("#setup-language").value;
           if (language !== "ja" && language !== "en") return;
           choosingLanguage = false;
           window.setLanguage?.(language);
@@ -251,18 +251,18 @@ var TracePulseDashboard = (() => {
         return;
       }
       const titles = ["welcome", "discovery", "alerts"];
-      dialog.innerHTML = `<div class="setup-step">${text("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text(titles[step])}</h2>` + (step === 0 ? `<p>${text("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text("privacy")}</p><button class="setup-primary" type="submit">${text("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text("alertInfo")}</p><a href="/settings" id="setup-settings">${text("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
-      dialog.querySelector("#setup-title")?.focus();
-      dialog.querySelector("#setup-settings")?.addEventListener("click", close);
-      dialog.querySelector("form")?.addEventListener("submit", (event) => {
+      dialog2.innerHTML = `<div class="setup-step">${text("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text(titles[step])}</h2>` + (step === 0 ? `<p>${text("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text("privacy")}</p><button class="setup-primary" type="submit">${text("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text("alertInfo")}</p><a href="/settings" id="setup-settings">${text("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
+      dialog2.querySelector("#setup-title")?.focus();
+      dialog2.querySelector("#setup-settings")?.addEventListener("click", close);
+      dialog2.querySelector("form")?.addEventListener("submit", (event) => {
         event.preventDefault();
         void scan();
       });
     };
     const scan = async () => {
       if (busy) return;
-      const cidr = dialog.querySelector("#setup-cidr").value.trim();
-      const community = dialog.querySelector("#setup-community").value;
+      const cidr = dialog2.querySelector("#setup-cidr").value.trim();
+      const community = dialog2.querySelector("#setup-community").value;
       const match = cidr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
       if (!match || match[1].split(".").some((part) => Number(part) > 255) || Number(match[2]) < 24 || Number(match[2]) > 32) {
         status(text("rangeError"), true);
@@ -271,12 +271,12 @@ var TracePulseDashboard = (() => {
       stop();
       devices = [];
       registered = false;
-      dialog.querySelector("#setup-results").replaceChildren();
-      dialog.querySelector("[data-action=register]").hidden = true;
+      dialog2.querySelector("#setup-results").replaceChildren();
+      dialog2.querySelector("[data-action=register]").hidden = true;
       const signal = controller.signal;
       setBusy(true);
       status(text("scanning"));
-      const progress = dialog.querySelector("#setup-progress");
+      const progress = dialog2.querySelector("#setup-progress");
       progress.hidden = false;
       progress.removeAttribute("value");
       const fail = (error) => {
@@ -313,8 +313,8 @@ var TracePulseDashboard = (() => {
             setBusy(false);
             progress.hidden = true;
             status(devices.length ? text("selected") : text("empty"));
-            dialog.querySelector("#setup-results").innerHTML = devices.map((device, index) => `<label class="setup-device"><input type="checkbox" value="${index}" checked><span>${esc(device.ip)} ${esc(device.name || "")}</span></label>`).join("");
-            dialog.querySelector("[data-action=register]").hidden = devices.length === 0;
+            dialog2.querySelector("#setup-results").innerHTML = devices.map((device, index) => `<label class="setup-device"><input type="checkbox" value="${index}" checked><span>${esc(device.ip)} ${esc(device.name || "")}</span></label>`).join("");
+            dialog2.querySelector("[data-action=register]").hidden = devices.length === 0;
           } catch (error) {
             fail(error);
           }
@@ -326,7 +326,7 @@ var TracePulseDashboard = (() => {
     };
     const register = async () => {
       if (busy) return;
-      const selected = Array.from(dialog.querySelectorAll("#setup-results input:checked")).map((input) => devices[Number(input.value)]);
+      const selected = Array.from(dialog2.querySelectorAll("#setup-results input:checked")).map((input) => devices[Number(input.value)]);
       if (!selected.length) {
         status(text("selected"), true);
         return;
@@ -337,21 +337,21 @@ var TracePulseDashboard = (() => {
         const result = await request("/api/discovery/register", signal, selected);
         if (signal.aborted) return;
         const accepted = /* @__PURE__ */ new Set([...result.registered, ...result.skipped]);
-        dialog.querySelectorAll("#setup-results input").forEach((input) => {
+        dialog2.querySelectorAll("#setup-results input").forEach((input) => {
           if (accepted.has(devices[Number(input.value)].ip)) input.closest("label")?.remove();
         });
         registered = result.registered.length > 0 || result.skipped.length > 0;
         status(result.errors.length ? result.errors.join("\n") : registered ? text("registered") : text("failure"), result.errors.length > 0 || !registered);
         window.refreshDashboard?.();
-        dialog.querySelector("[data-action=next]").textContent = text(registered ? "next" : "continue");
-        dialog.querySelector("[data-action=register]").hidden = dialog.querySelectorAll("#setup-results input").length === 0;
+        dialog2.querySelector("[data-action=next]").textContent = text(registered ? "next" : "continue");
+        dialog2.querySelector("[data-action=register]").hidden = dialog2.querySelectorAll("#setup-results input").length === 0;
       } catch (error) {
         if (!signal.aborted) status(error instanceof Error ? error.message : text("failure"), true);
       } finally {
         if (!signal.aborted) setBusy(false);
       }
     };
-    dialog.addEventListener("click", (event) => {
+    dialog2.addEventListener("click", (event) => {
       const action = event.target.closest("[data-action]")?.dataset.action;
       if (action === "skip") close();
       else if (action === "language-back" && languageChoiceEnabled) {
@@ -369,19 +369,19 @@ var TracePulseDashboard = (() => {
         render();
       }
     });
-    dialog.addEventListener("cancel", (event) => {
+    dialog2.addEventListener("cancel", (event) => {
       event.preventDefault();
       close();
     });
     const open = (selectLanguage = false) => {
-      if (dialog.open) return;
+      if (dialog2.open) return;
       previousFocus = document.activeElement;
       stop();
       step = 0;
       registered = false;
       languageChoiceEnabled = selectLanguage;
       choosingLanguage = selectLanguage;
-      dialog.showModal();
+      dialog2.showModal();
       render();
     };
     const launch = document.createElement("button");
@@ -393,7 +393,7 @@ var TracePulseDashboard = (() => {
     document.querySelector("main h1")?.after(launch);
     window.addEventListener("tracepulse-language-change", () => {
       launch.textContent = text("guide");
-      if (dialog.open && step !== 1) render();
+      if (dialog2.open && step !== 1) render();
     });
     if (auto) {
       if (!dismissed) void request("/api/devices", controller.signal).then((existing) => {
@@ -403,11 +403,246 @@ var TracePulseDashboard = (() => {
     }
   }
 
+  // frontend/src/shared/device-metadata.ts
+  if (!document.getElementById("metadata-styles")) {
+    const style = document.createElement("style");
+    style.id = "metadata-styles";
+    style.textContent = `
+        .metadata-dialog{box-sizing:border-box;width:min(640px,calc(100% - 24px));max-height:calc(100dvh - 24px);overflow:auto;margin:auto;padding:24px;border:1px solid var(--tp-border,#475569);border-radius:8px;background:var(--tp-surface,#1e293b);color:var(--tp-text,#e2e8f0)}
+        .metadata-dialog::backdrop{background:rgb(0 0 0 / .6)}
+        .metadata-dialog form,.metadata-dialog label{display:grid;gap:8px}
+        .metadata-dialog p,.metadata-dialog li{overflow-wrap:anywhere}
+        .metadata-dialog input,.metadata-dialog select,.device-toolbar input{box-sizing:border-box;width:100%;padding:8px;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px;min-width:0}
+        .metadata-dialog button,.device-toolbar button,#edit-device-metadata{padding:8px 12px;cursor:pointer;background:var(--tp-bg,#0f172a);color:inherit;border:1px solid #64748b;border-radius:4px}
+        .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
+        .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+        .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
+        .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
+        .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
+        .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
+        :root[data-theme=light] .metadata-dialog{background:#fff;color:#1e293b}
+        :root[data-theme=light] .metadata-dialog input,:root[data-theme=light] .metadata-dialog select,:root[data-theme=light] .metadata-dialog button,:root[data-theme=light] .device-toolbar input,:root[data-theme=light] .device-toolbar button,:root[data-theme=light] .device-tag,:root[data-theme=light] #edit-device-metadata{background:#f1f5f9;color:#1e293b}
+    `;
+    document.head.append(style);
+  }
+  function deviceLabel(device) {
+    if (device.display_name?.trim()) return device.display_name;
+    if (device.name?.trim()) return device.name;
+    return device.ip || "";
+  }
+  var copy2 = {
+    en: {
+      edit: "Edit alias and tags",
+      alias: "Display name",
+      tags: "Tags",
+      add: "Add tag",
+      remove: "Remove",
+      cancel: "Cancel",
+      save: "Save",
+      rename: "Bulk rename",
+      prefix: "Prefix",
+      start: "Start number",
+      padding: "Padding",
+      suffix: "Suffix",
+      order: "Sort order",
+      ip: "IP ascending",
+      selection: "Selection order",
+      preview: "Preview",
+      apply: "Apply names",
+      search: "Search alias, hostname, IP or tags",
+      select: "Select device",
+      all: "Select visible devices",
+      selected: "selected",
+      failed: "Request failed",
+      missing: "Select at least one device",
+      tagHint: "Enter a tag, then press Add tag or Enter.",
+      clear: "Leave the display name empty to use sysName or IP."
+    },
+    ja: {
+      edit: "\u8868\u793A\u540D\u30FB\u30BF\u30B0\u3092\u7DE8\u96C6",
+      alias: "\u8868\u793A\u540D",
+      tags: "\u30BF\u30B0",
+      add: "\u30BF\u30B0\u3092\u8FFD\u52A0",
+      remove: "\u524A\u9664",
+      cancel: "\u30AD\u30E3\u30F3\u30BB\u30EB",
+      save: "\u4FDD\u5B58",
+      rename: "\u4E00\u62EC\u30EA\u30CD\u30FC\u30E0\uFF08\u9023\u756A\u4ED8\u4E0E\uFF09",
+      prefix: "\u63A5\u982D\u8F9E",
+      start: "\u958B\u59CB\u756A\u53F7",
+      padding: "\u30BC\u30ED\u57CB\u3081\u6841\u6570",
+      suffix: "\u63A5\u5C3E\u8F9E",
+      order: "\u4E26\u3073\u9806",
+      ip: "IP\u30A2\u30C9\u30EC\u30B9\u6607\u9806",
+      selection: "\u9078\u629E\u9806",
+      preview: "\u30D7\u30EC\u30D3\u30E5\u30FC",
+      apply: "\u540D\u79F0\u3092\u9069\u7528",
+      search: "\u8868\u793A\u540D\u30FB\u30DB\u30B9\u30C8\u540D\u30FBIP\u30FB\u30BF\u30B0\u3067\u691C\u7D22",
+      select: "\u6A5F\u5668\u3092\u9078\u629E",
+      all: "\u8868\u793A\u4E2D\u306E\u6A5F\u5668\u3092\u3059\u3079\u3066\u9078\u629E",
+      selected: "\u4EF6\u9078\u629E",
+      failed: "\u51E6\u7406\u306B\u5931\u6557\u3057\u307E\u3057\u305F",
+      missing: "\u6A5F\u5668\u3092\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044",
+      tagHint: "\u30BF\u30B0\u3092\u5165\u529B\u3057\u3001\u8FFD\u52A0\u30DC\u30BF\u30F3\u307E\u305F\u306FEnter\u3067\u78BA\u5B9A\u3057\u307E\u3059\u3002",
+      clear: "\u8868\u793A\u540D\u3092\u7A7A\u306B\u3059\u308B\u3068sysName\u307E\u305F\u306FIP\u3092\u8868\u793A\u3057\u307E\u3059\u3002"
+    }
+  };
+  function metadataText(key) {
+    return copy2[document.documentElement.lang === "ja" ? "ja" : "en"][key];
+  }
+  async function post(url, body) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json();
+    if (!response.ok || data.error || data.ok !== true) throw new Error(data.error || metadataText("failed"));
+    return data;
+  }
+  function dialog(id, title) {
+    const existing = document.getElementById(id);
+    if (existing instanceof HTMLDialogElement) existing.remove();
+    const element = document.createElement("dialog");
+    element.id = id;
+    element.className = "metadata-dialog";
+    element.setAttribute("aria-labelledby", `${id}-title`);
+    element.innerHTML = `<h2 id="${id}-title">${esc(title)}</h2>`;
+    document.body.append(element);
+    return element;
+  }
+  function field(id, label, value, type = "text", limits = "") {
+    return `<label for="${id}">${esc(label)}<input id="${id}" type="${type}" value="${esc(value)}" ${limits}></label>`;
+  }
+  function bulkRename(ids, saved) {
+    const element = dialog("bulk-rename-dialog", metadataText("rename"));
+    element.insertAdjacentHTML("beforeend", `<form>
+        ${field("rename-prefix", metadataText("prefix"), "", "text", "maxlength=512")}
+        ${field("rename-start", metadataText("start"), "1", "number", "min=0 max=4294967295 required")}
+        ${field("rename-padding", metadataText("padding"), "2", "number", "min=0 max=10 required")}
+        ${field("rename-suffix", metadataText("suffix"), "", "text", "maxlength=512")}
+        <label for="rename-sort">${esc(metadataText("order"))}<select id="rename-sort">
+        <option value="ip_asc">${esc(metadataText("ip"))}</option>
+        <option value="selection_order">${esc(metadataText("selection"))}</option></select></label>
+        <p role="alert"></p><ol id="rename-preview" aria-live="polite"></ol>
+        <div class="metadata-actions"><button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
+        <button type="button" id="rename-preview-button">${esc(metadataText("preview"))}</button>
+        <button type="submit" disabled>${esc(metadataText("apply"))}</button></div></form>`);
+    const form = element.querySelector("form");
+    const submit = element.querySelector("[type=submit]");
+    const previewButton = element.querySelector("#rename-preview-button");
+    const error = element.querySelector("[role=alert]");
+    const preview = element.querySelector("#rename-preview");
+    let approved = null;
+    let revision = 0;
+    let busy = false;
+    const invalidate = () => {
+      revision++;
+      approved = null;
+      submit.disabled = true;
+      preview.replaceChildren();
+    };
+    form.addEventListener("input", invalidate);
+    form.addEventListener("change", invalidate);
+    element.querySelector("[data-cancel]").onclick = () => {
+      revision++;
+      element.close();
+    };
+    element.addEventListener("cancel", () => {
+      revision++;
+    });
+    previewButton.onclick = async () => {
+      if (busy || !form.reportValidity()) return;
+      invalidate();
+      const version = revision;
+      const payload = {
+        device_ids: ids,
+        prefix: element.querySelector("#rename-prefix").value,
+        start_number: Number(element.querySelector("#rename-start").value),
+        padding: Number(element.querySelector("#rename-padding").value),
+        suffix: element.querySelector("#rename-suffix").value,
+        sort_by: element.querySelector("#rename-sort").value
+      };
+      busy = true;
+      previewButton.disabled = true;
+      error.textContent = "";
+      try {
+        const data = await post("/api/devices/bulk-rename/preview", payload);
+        if (version !== revision || !element.open) return;
+        data.devices.forEach((device) => {
+          const row = document.createElement("li");
+          row.textContent = `${device.ip} \u2192 ${device.display_name}`;
+          preview.append(row);
+        });
+        approved = payload;
+        submit.disabled = false;
+      } catch (failure) {
+        error.textContent = String(failure);
+      } finally {
+        busy = false;
+        previewButton.disabled = false;
+      }
+    };
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!approved || busy) return;
+      busy = true;
+      submit.disabled = true;
+      previewButton.disabled = true;
+      error.textContent = "";
+      const inputs = form.querySelectorAll("input,select");
+      inputs.forEach((input) => {
+        input.disabled = true;
+      });
+      try {
+        await post("/api/devices/bulk-rename", approved);
+        element.close();
+        saved();
+      } catch (failure) {
+        error.textContent = String(failure);
+        invalidate();
+      } finally {
+        busy = false;
+        previewButton.disabled = false;
+        inputs.forEach((input) => {
+          input.disabled = false;
+        });
+      }
+    };
+    element.showModal();
+  }
+
   // frontend/src/pages/dashboard.ts
   var columns = ["ip", "name", "status", "health_score", "community", "last_seen"];
   var sortColumn = "ip";
   var sortAscending = true;
   var deletingIps = /* @__PURE__ */ new Set();
+  var selectedIds = /* @__PURE__ */ new Set();
+  var searchQuery = "";
+  function visibleDevices() {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    return currentDevices().filter((device) => !query || [device.ip, device.name, device.display_name, ...device.tags || []].some((value) => value?.toLocaleLowerCase().includes(query)));
+  }
+  function renderSelection() {
+    const count = document.getElementById("device-selection-count");
+    if (count) count.textContent = `${selectedIds.size} ${metadataText("selected")}`;
+    const button = document.getElementById("bulk-rename");
+    if (button) {
+      button.textContent = metadataText("rename");
+      button.disabled = selectedIds.size === 0;
+    }
+    const all = document.getElementById("select-visible-devices");
+    const visible = visibleDevices().filter((device) => typeof device.id === "number");
+    if (all) {
+      all.checked = visible.length > 0 && visible.every((device) => selectedIds.has(device.id));
+      all.indeterminate = !all.checked && visible.some((device) => selectedIds.has(device.id));
+      all.setAttribute("aria-label", metadataText("all"));
+    }
+    const search = document.getElementById("device-search");
+    if (search) {
+      search.placeholder = metadataText("search");
+      search.setAttribute("aria-label", metadataText("search"));
+    }
+  }
   function t(key) {
     return typeof window.t === "function" ? window.t(key) : key;
   }
@@ -438,8 +673,8 @@ var TracePulseDashboard = (() => {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
     if (column === "status") return statusOrder(a.status) - statusOrder(b.status);
     if (column === "health_score") return (a.health_score ?? -1) - (b.health_score ?? -1);
-    const left = String(a[column] || "").toLowerCase();
-    const right = String(b[column] || "").toLowerCase();
+    const left = String(column === "name" ? deviceLabel(a) : a[column] || "").toLowerCase();
+    const right = String(column === "name" ? deviceLabel(b) : b[column] || "").toLowerCase();
     return left < right ? -1 : left > right ? 1 : 0;
   }
   function currentDevices() {
@@ -460,21 +695,26 @@ var TracePulseDashboard = (() => {
       if (device.status === "offline") reasons.push(t("offline"));
       else if (device.status === "critical") reasons.push("Critical");
       else if (device.status === "warning") reasons.push(t("warning"));
-      return `<li class='attention-item'><a href='/device/${encodeURIComponent(device.ip)}'>${esc(device.name || device.ip)}</a><span class='attention-reason'>${esc(reasons.join(" / "))}</span></li>`;
+      return `<li class='attention-item'><a href='/device/${encodeURIComponent(device.ip)}'>${esc(deviceLabel(device))}</a><span class='attention-reason'>${esc(reasons.join(" / "))}</span></li>`;
     }).join("");
     element.innerHTML = `<h2>${t("attention_devices")}</h2><ul class='attention-list'>${items}</ul>`;
   }
   function renderTable() {
     const tbody = document.getElementById("dash-tbody");
     if (!tbody) return;
-    const sorted = currentDevices().slice().sort((a, b) => {
+    const validIds = new Set(currentDevices().map((device) => device.id));
+    selectedIds.forEach((id) => {
+      if (!validIds.has(id)) selectedIds.delete(id);
+    });
+    renderSelection();
+    const sorted = visibleDevices().slice().sort((a, b) => {
       if (a.error_spike && !b.error_spike) return -1;
       if (!a.error_spike && b.error_spike) return 1;
       const result = compareValue(a, b, sortColumn);
       return sortAscending ? result : -result;
     });
     if (sorted.length === 0) {
-      tbody.innerHTML = `<tr><td colspan=7 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
+      tbody.innerHTML = `<tr><td colspan=8 class=empty>${t("no_devices")} <a href=/discovery>${t("nav_discovery")}</a></td></tr>`;
       return;
     }
     tbody.innerHTML = sorted.map((device) => {
@@ -484,13 +724,24 @@ var TracePulseDashboard = (() => {
       const deleting = deletingIps.has(device.ip);
       const actionLabel = deleting ? t("unregistering") : t("unregister");
       const encodedIp = encodeURIComponent(device.ip);
-      const encodedName = encodeURIComponent(device.name || device.ip);
+      const encodedName = encodeURIComponent(deviceLabel(device));
       const actionButton = `<button class='btn-row-danger' data-ip="${esc(encodedIp)}" data-name="${esc(encodedName)}" onclick='unregisterDevice(this.dataset.ip,this.dataset.name)' ${deleting ? "disabled" : ""}>${actionLabel}</button>`;
       const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
       const healthBadgeClass = statusClass(device.health_status);
       const health = typeof device.health_score === "number" ? `<span class="${esc(healthBadgeClass)}">${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label="${esc(t("health_score"))}" style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
-      return `<tr${rowClass}><td><a href="/device/${esc(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${esc(device.ip)}</a></td><td>${esc(device.name || "")}${spikeBadge}</td><td><span class="${esc(statusBadgeClass)}">${esc(device.status)}</span></td><td>${health}</td><td>${esc(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
+      const checkbox = typeof device.id === "number" ? `<input type="checkbox" data-device-id="${device.id}" aria-label="${esc(`${metadataText("select")} ${device.ip}`)}" ${selectedIds.has(device.id) ? "checked" : ""}>` : "";
+      const original = device.display_name ? `<div class="device-original">${esc(device.name || device.ip)}</div>` : "";
+      const tags = (device.tags || []).map((tag) => `<span class="device-tag">${esc(tag)}</span>`).join("");
+      return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${esc(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${esc(device.ip)}</a></td><td>${esc(deviceLabel(device))}${spikeBadge}${original}<div class="device-tags">${tags}</div></td><td><span class="${esc(statusBadgeClass)}">${esc(device.status)}</span></td><td>${health}</td><td>${esc(device.community)}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;
     }).join("");
+    tbody.querySelectorAll("[data-device-id]").forEach((checkbox) => {
+      checkbox.onchange = () => {
+        const id = Number(checkbox.dataset.deviceId);
+        if (checkbox.checked) selectedIds.add(id);
+        else selectedIds.delete(id);
+        renderSelection();
+      };
+    });
   }
   function updateSortIndicators() {
     columns.forEach((column) => {
@@ -554,6 +805,41 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
     const element = document.getElementById("last-refreshed");
     if (element) element.textContent = `${t("updated")}: ${formatTracePulseClock(/* @__PURE__ */ new Date())}`;
   }
+  function initializeManagement() {
+    const table = document.getElementById("dash-table");
+    if (!table || document.getElementById("device-search")) return;
+    const toolbar = document.createElement("div");
+    toolbar.className = "device-toolbar";
+    const search = document.createElement("input");
+    search.id = "device-search";
+    search.type = "search";
+    search.oninput = () => {
+      searchQuery = search.value;
+      renderTable();
+    };
+    const count = document.createElement("span");
+    count.id = "device-selection-count";
+    count.setAttribute("aria-live", "polite");
+    const rename = document.createElement("button");
+    rename.id = "bulk-rename";
+    rename.onclick = () => bulkRename([...selectedIds], refresh);
+    toolbar.append(search, count, rename);
+    table.parentElement.before(toolbar);
+    const header = document.createElement("th");
+    const all = document.createElement("input");
+    all.type = "checkbox";
+    all.id = "select-visible-devices";
+    all.onchange = () => {
+      visibleDevices().forEach((device) => {
+        if (typeof device.id !== "number") return;
+        if (all.checked) selectedIds.add(device.id);
+        else selectedIds.delete(device.id);
+      });
+      renderTable();
+    };
+    header.append(all);
+    table.querySelector("thead tr").prepend(header);
+  }
   function refresh() {
     fetch("/api/devices").then((response) => response.json()).then((devices) => {
       window.DEVICES = devices;
@@ -568,6 +854,7 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
   window.refreshDashboard = refresh;
   window.sortBy = sortBy;
   window.unregisterDevice = unregisterDevice;
+  initializeManagement();
   renderTable();
   renderSummary();
   renderAttention();
@@ -575,5 +862,9 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
   updateLastRefreshed();
   window.setInterval(refresh, 3e4);
   document.addEventListener("DOMContentLoaded", () => initializeOnboarding(true));
+  window.addEventListener("tracepulse-language-change", () => {
+    renderTable();
+    renderAttention();
+  });
   return __toCommonJS(dashboard_exports);
 })();

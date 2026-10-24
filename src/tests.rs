@@ -131,6 +131,8 @@ mod tests {
                 CREATE TABLE IF NOT EXISTS devices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
+                    display_name TEXT,
+                    tags TEXT NOT NULL DEFAULT '[]',
                     ip TEXT NOT NULL UNIQUE,
                     community TEXT NOT NULL,
                     device_type TEXT NOT NULL,
@@ -163,6 +165,8 @@ mod tests {
                 CREATE TABLE IF NOT EXISTS devices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
+                    display_name TEXT,
+                    tags TEXT NOT NULL DEFAULT '[]',
                     ip TEXT NOT NULL UNIQUE,
                     community TEXT NOT NULL,
                     device_type TEXT NOT NULL,

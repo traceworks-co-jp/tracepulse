@@ -107,6 +107,9 @@ declare global {
     }
 
     interface DashboardDevice {
+        id?: number | null;
+        display_name?: string | null;
+        tags?: string[];
         ip: string;
         health_score?: number | null;
         health_status?: string | null;
@@ -156,6 +159,9 @@ declare global {
     }
 
     interface DeviceDetail {
+        id?: number | null;
+        display_name?: string | null;
+        tags?: string[];
         name?: string;
         ip?: string;
         status?: string;

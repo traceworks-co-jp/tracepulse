@@ -1,4 +1,5 @@
 import { esc as escapeHtml } from "../shared/escape";
+import { deviceLabel, editDeviceMetadata, metadataText } from "../shared/device-metadata";
 import {
     fmtNum,
     fmtTime,
@@ -62,6 +63,9 @@ interface DeviceInterface {
 }
 
 interface DeviceDetail {
+    id?: number | null;
+    display_name?: string | null;
+    tags?: string[];
     name?: string;
     ip?: string;
     status?: string;
@@ -785,14 +789,28 @@ export function renderSysChart(metrics: SystemMetric[] = []): void {
 
 function renderHeader(device: DeviceDetail): void {
     const title = document.getElementById("dev-title");
-    if (title) title.textContent = `${device.name || ""} (${device.ip || ""})`;
+    if (title) {
+        title.textContent = `${deviceLabel(device)} (${device.ip || ""})`;
+        let metadata = document.getElementById("device-identity");
+        if (!metadata) {
+            metadata = document.createElement("div");
+            metadata.id = "device-identity";
+            title.parentElement!.after(metadata);
+        }
+        metadata.innerHTML = `<div class="device-original">sysName: ${escapeHtml(device.name || "-")}</div>
+            <div class="device-tags">${(device.tags || []).map((tag) => `<span class="device-tag">${escapeHtml(tag)}</span>`).join("")}</div>
+            <button type="button" id="edit-device-metadata">${escapeHtml(metadataText("edit"))}</button>`;
+        metadata.querySelector<HTMLButtonElement>("button")!.onclick = () => {
+            if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, loadDeviceDetail);
+        };
+    }
     const status = document.getElementById("dev-status");
     if (status) {
         const classMap: Record<string, string> = { online: "status-online", offline: "status-offline", warning: "status-warning", critical: "status-critical" };
         status.className = classMap[device.status || ""] || "status-unknown";
         status.textContent = device.status || "unknown";
     }
-    document.title = `TracePulse - ${device.name || device.ip || "Device"}`;
+    document.title = `TracePulse - ${deviceLabel(device) || "Device"}`;
 }
 
 function updateLastRefreshed(): void {
@@ -893,6 +911,7 @@ window.sparkline = sparkline;
 window.toggleInterfaceSelection = toggleInterfaceSelection;
 window.tracePulseTimeZone = tracePulseTimeZone;
 window.applyPageLanguage = () => {
+    if (lastDeviceDetail) renderHeader(lastDeviceDetail);
     updateLastRefreshed();
     refreshTrafficProtocols();
 };

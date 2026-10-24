@@ -5,6 +5,10 @@ use std::net::IpAddr;
 pub struct Device {
     pub id: Option<i64>,
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub ip: String,
     pub community: String,
     pub device_type: String,
@@ -12,6 +16,16 @@ pub struct Device {
     pub last_seen_at: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+impl Device {
+    pub fn label(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| (!self.name.trim().is_empty()).then_some(self.name.as_str()))
+            .unwrap_or(&self.ip)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

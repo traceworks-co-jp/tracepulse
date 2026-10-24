@@ -332,6 +332,61 @@ The Traffic tab is a compact, terminal-width-friendly view containing:
 
 ---
 
+### Device aliases, tags, and sequential naming
+
+Device detail pages provide **Edit alias and tags**. Display names and tags support
+Unicode (including Japanese); an empty alias falls back to the original SNMP
+hostname (`sysName`), then the IP address. Tags can be added with Enter or **Add
+tag**, and removed individually. These fields do not change the device's
+hostname, IP, SNMP community, or monitoring configuration.
+
+On the dashboard, search incrementally across aliases, original hostnames, IPs,
+and tags. Select devices with the row checkboxes, then choose **Bulk rename**.
+Enter a prefix, start number (default `1`), minimum zero-padding width, and
+optional suffix. **Preview** shows the exact IP-to-name mapping before **Apply
+names** saves every name atomically. Changing an input requires a fresh preview.
+Selection survives filtering and sorting; the header checkbox selects or clears
+only the visible devices. `selection_order` preserves the order in which devices
+were checked; `ip_asc` sorts addresses numerically (IPv4 before IPv6).
+
+The TUI prioritizes aliases, displays compact tag badges, and shows the original
+hostname/IP for the selected device. Metadata is preserved by discovery and
+polling updates. Existing databases migrate automatically at startup.
+
+API endpoints (subject to the same authorization/CSRF rules as other mutations):
+
+- `POST /api/device/{ip}/metadata` replaces metadata, for example
+  `{"display_name":"大阪支店SW-01","tags":["大阪","Core"]}`. Use `null` or an
+  empty display name and `[]` to clear the fields.
+- `POST /api/devices/bulk-rename/preview` validates without modifying the DB.
+- `POST /api/devices/bulk-rename` applies the same request atomically:
+
+  ```json
+  {
+    "device_ids": [2, 1],
+    "prefix": "大阪支店SW-",
+    "start_number": 1,
+    "padding": 2,
+    "suffix": "",
+    "sort_by": "ip_asc"
+  }
+  ```
+
+Both bulk endpoints return `{"ok":true,"devices":[...]}`, with one
+`{"id":2,"ip":"192.0.2.2","display_name":"大阪支店SW-01"}` entry per selected device.
+Single-device edits return `{"ok":true,"devices":null}`. Invalid requests return
+HTTP 400 with an `error`; persistence errors return HTTP 500. Device list/detail
+responses include numeric `id`, nullable `display_name`, and `tags`, while `name`
+remains the original hostname and the detail endpoint's legacy `device_id`
+remains the IP string.
+
+Limits: aliases/generated names are at most 512 Unicode characters without
+control characters; at most 64 tags of 1–64 characters each. Alias/tag outer
+whitespace is trimmed; tags are deduplicated case-sensitively. Bulk requests
+accept 1–1,000 distinct existing IDs, padding `0`–`10`, and unsigned 32-bit
+sequence numbers (overflow is rejected). Padding never truncates larger numbers.
+Aliases need not be unique.
+
 ## Configuration & File Structure
 
 Configuration files and database are created and referenced in the same directory as the executable:

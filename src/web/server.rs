@@ -709,7 +709,7 @@ fn handle_connection(
 
     // Route: GET /api/device/<ip>  (IP に . を含むためパスマッチで処理)
     if req.method == "GET" && req.path.starts_with("/api/device/") {
-        let ip = req.path.trim_start_matches("/api/device/").to_string();
+        let ip = url_decode(clean_path.trim_start_matches("/api/device/"));
         let body = api_device_detail(&ip, &repo, &cfg, !passive);
         let body = if redact { strip_community(body) } else { body };
         return respond_json(stream, "200 OK", body);
@@ -725,14 +725,36 @@ fn handle_connection(
     }
 
     if req.method == "DELETE" && req.path.starts_with("/api/device/") {
-        let ip = req.path.trim_start_matches("/api/device/").to_string();
+        let ip = url_decode(clean_path.trim_start_matches("/api/device/"));
         let (status, body) = api_delete_device(&ip, &repo);
         return respond_mutation(stream, web_extension.as_deref(), &req, &status, body);
     }
 
+    if req.method == "POST"
+        && clean_path.starts_with("/api/device/")
+        && clean_path.ends_with("/metadata")
+    {
+        let ip = url_decode(
+            clean_path
+                .trim_start_matches("/api/device/")
+                .trim_end_matches("/metadata"),
+        );
+        let (status, body) = api_device_metadata(&ip, &req.body, &repo);
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+    if req.method == "POST"
+        && matches!(
+            clean_path,
+            "/api/devices/bulk-rename" | "/api/devices/bulk-rename/preview"
+        )
+    {
+        let (status, body) = api_bulk_rename(&req.body, &repo, clean_path.ends_with("/preview"));
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+
     // Route: GET /device/<ip>
     if req.method == "GET" && req.path.starts_with("/device/") {
-        let ip = req.path.trim_start_matches("/device/").to_string();
+        let ip = url_decode(clean_path.trim_start_matches("/device/"));
         return respond_html(
             stream,
             page_device_detail(&ip, &repo, web_extension.as_deref()),
@@ -1267,12 +1289,63 @@ fn dashboard_device_json(
         }
     });
     serde_json::json!({
-        "ip": device.ip, "name": device.name, "status": device.status,
+        "id": device.id, "ip": device.ip, "name": device.name, "status": device.status,
+        "display_name": device.display_name, "tags": device.tags,
         "community": if redact { "" } else { &device.community },
         "last_seen": device.last_seen_at.as_deref().unwrap_or(""), "error_spike": spike,
         "health_score": score, "health_status": health_status,
     })
     .to_string()
+}
+
+fn metadata_response<T: serde::Serialize>(result: Result<T, AppError>) -> (&'static str, String) {
+    match result {
+        Ok(value) => (
+            "200 OK",
+            serde_json::json!({ "ok": true, "devices": value }).to_string(),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "Device metadata request failed");
+            let status = if matches!(error, AppError::Validation(_)) {
+                "400 Bad Request"
+            } else {
+                "500 Internal Server Error"
+            };
+            (
+                status,
+                serde_json::json!({ "error": error.to_string() }).to_string(),
+            )
+        }
+    }
+}
+
+fn api_device_metadata(
+    ip: &str,
+    body: &str,
+    repo: &Arc<Mutex<Repository>>,
+) -> (&'static str, String) {
+    metadata_response((|| {
+        let metadata = serde_json::from_str::<crate::device::metadata::DeviceMetadata>(body)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        repo.lock()
+            .map_err(|error| AppError::Database(error.to_string()))?
+            .update_device_metadata(ip, metadata)?;
+        Ok(())
+    })())
+}
+
+fn api_bulk_rename(
+    body: &str,
+    repo: &Arc<Mutex<Repository>>,
+    preview: bool,
+) -> (&'static str, String) {
+    metadata_response((|| {
+        let request = serde_json::from_str::<crate::device::metadata::BulkRename>(body)
+            .map_err(|error| AppError::Validation(error.to_string()))?;
+        repo.lock()
+            .map_err(|error| AppError::Database(error.to_string()))?
+            .bulk_rename(&request, preview)
+    })())
 }
 
 fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String) {
@@ -1541,7 +1614,7 @@ fn api_device_detail(
     }).collect();
 
     format!(
-        r#"{{"device_id":"{}","ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","system_metrics":{},"interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}],"template_metrics":{},"template_metrics_error":{}}}"#,
+        r#"{{"device_id":"{}","ip":"{}","name":"{}","status":"{}","community":"{}","last_seen":"{}","system_metrics":{},"interfaces":[{}],"if_series":[{}],"metrics":[{}],"alerts":[{}],"spikes":[{}],"hardware_sensors":[{}],"template_metrics":{},"template_metrics_error":{},"id":{},"display_name":{},"tags":{}}}"#,
         escape_json(&device.ip),
         escape_json(&device.ip),
         escape_json(&device.name),
@@ -1562,6 +1635,9 @@ fn api_device_detail(
         serde_json::to_string(&template_metrics)
             .expect("template metrics contain only JSON numbers"),
         serde_json::to_string(&template_metrics_error).expect("error string is JSON serializable"),
+        serde_json::json!(device.id),
+        serde_json::json!(device.display_name),
+        serde_json::json!(device.tags),
     )
 }
 
@@ -2874,7 +2950,13 @@ fn page_dashboard(
     html.push_str("</tbody></table></section>");
     html.push_str("</main>");
     html.push_str("<script>\nvar DEVICES = [");
-    html.push_str(&devices_json.join(","));
+    html.push_str(
+        &devices_json
+            .join(",")
+            .replace('<', "\\u003c")
+            .replace('>', "\\u003e")
+            .replace('&', "\\u0026"),
+    );
     html.push_str("];\n");
     html.push_str("</script><script src='/static/js/i18n.js?v=2'></script><script src='/static/js/dashboard.js?v=2'></script>");
     if let Some(extension) = extension {
@@ -4472,7 +4554,7 @@ fn run_polling_loop_with_observer(
                     };
                     let dev_config = DeviceConfig {
                         id: device.id,
-                        name: device.name.clone(),
+                        name: device.label().to_string(),
                         ip: device.ip.clone(),
                         community: device.community.clone(),
                         device_type: device.device_type.clone(),
@@ -4510,7 +4592,7 @@ fn run_polling_loop_with_observer(
 
                     let mut result = PollResult {
                         ip: device.ip.clone(),
-                        name: device.name.clone(),
+                            name: device.label().to_string(),
                         community: device.community.clone(),
                         device_id,
                         previous_status: device.status.clone(),
@@ -4775,6 +4857,80 @@ impl PollResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn metadata_apis_validate_persist_preview_and_escape_embedded_json() {
+        use crate::{
+            db::{repository::Repository, sqlite::initialize_database},
+            device::DeviceConfig,
+        };
+        use std::{
+            path::Path,
+            sync::{Arc, Mutex},
+        };
+        let repository = Repository::new(initialize_database(Path::new(":memory:")).unwrap());
+        repository
+            .save_device_config(&DeviceConfig::new("192.0.2.1", "public"))
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repository));
+        let config = Arc::new(Mutex::new(crate::config::AppConfig::default()));
+        for body in ["{", r#"{"display_name":1,"tags":[]}"#, r#"{"tags":"bad"}"#] {
+            assert_eq!(
+                super::api_device_metadata("192.0.2.1", body, &repo).0,
+                "400 Bad Request"
+            );
+        }
+        let alias = "東京SW-01</script><script>alert(1)</script>";
+        let body = serde_json::json!({"display_name":alias, "tags":["東京HQ","Core"]}).to_string();
+        assert_eq!(
+            super::api_device_metadata("192.0.2.1", &body, &repo).0,
+            "200 OK"
+        );
+        assert_eq!(
+            super::api_device_metadata("192.0.2.99", &body, &repo).0,
+            "400 Bad Request"
+        );
+        let devices: serde_json::Value =
+            serde_json::from_str(&super::api_devices(&repo, &config)).unwrap();
+        assert_eq!(devices[0]["display_name"], alias);
+        assert_eq!(devices[0]["id"], 1);
+        assert_eq!(devices[0]["tags"], serde_json::json!(["東京HQ", "Core"]));
+        let detail: serde_json::Value = serde_json::from_str(&super::api_device_detail(
+            "192.0.2.1",
+            &repo,
+            &config,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(detail["display_name"], alias);
+        assert_eq!(detail["name"], "device-1");
+        assert_eq!(detail["device_id"], "192.0.2.1");
+        assert_eq!(detail["id"], 1);
+        let html = super::page_dashboard(&repo, &config, None, false);
+        assert!(!html.contains(alias));
+        assert!(html.contains("\\u003c/script\\u003e"));
+        let request = r#"{"device_ids":[1],"prefix":"大阪SW-","padding":2,"sort_by":"ip_asc"}"#;
+        let (status, preview) = super::api_bulk_rename(request, &repo, true);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            repo.lock().unwrap().list_devices().unwrap()[0]
+                .display_name
+                .as_deref(),
+            Some(alias)
+        );
+        assert_eq!(super::api_bulk_rename(request, &repo, false).1, preview);
+        assert_eq!(
+            super::api_bulk_rename("{}", &repo, false).0,
+            "400 Bad Request"
+        );
+        let broken = Arc::new(Mutex::new(Repository::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+        )));
+        assert_eq!(
+            super::api_device_metadata("192.0.2.1", &body, &broken).0,
+            "500 Internal Server Error"
+        );
+    }
+
     use super::{
         COMMUNITY_MAX_DEVICES, WebLimits, WebServer, WebTopologyEdge, WebTopologyInterface,
         WebTopologyReport, annotate_edge_health, api_flow_analytics, api_live_flow_analytics,
@@ -5140,6 +5296,8 @@ mod tests {
         repository
             .save_device(&Device {
                 id: None,
+                display_name: None,
+                tags: Vec::new(),
                 name: "router".to_string(),
                 ip: "192.0.2.1".to_string(),
                 community: "public".to_string(),
@@ -5268,6 +5426,8 @@ mod tests {
             .save_device(&Device {
                 id: None,
                 name: "exporter".to_string(),
+                display_name: None,
+                tags: Vec::new(),
                 ip: "192.0.2.10".to_string(),
                 community: "public".to_string(),
                 device_type: "router".to_string(),

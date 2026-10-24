@@ -722,7 +722,7 @@ fn start_poll_task(
             for dev in db_devices {
                 let cfg = DeviceConfig {
                     id: dev.id,
-                    name: dev.name.clone(),
+                    name: dev.label().to_string(),
                     ip: dev.ip.clone(),
                     community: if dev.community.is_empty() {
                         engine.config.snmp.default_community.clone()
@@ -1153,7 +1153,7 @@ impl TuiRenderer {
                             .take(chunks[2].height.saturating_sub(2) as usize)
                             .map(|item| format!(
                                 "{} ({})  {}  alerts: {}",
-                                item.device.name, item.device.ip, item.device.status, item.alert_count
+                                item.device.label(), item.device.ip, item.device.status, item.alert_count
                             ))
                             .collect::<Vec<_>>();
                         let attention = if attention.is_empty() {
@@ -1186,7 +1186,7 @@ impl TuiRenderer {
                         .height(1);
 
                     let visible_devices = devices.iter().enumerate().filter(|(_, item)| {
-                        tui_filter_matches(&filter_query, &[&item.device.ip, &item.device.name, &item.device.status])
+                        device_filter_matches(&filter_query, &item.device)
                     }).map(|(index, _)| index).collect::<Vec<_>>();
                     let rows = visible_devices.iter().map(|&index| {
                         let item = &devices[index];
@@ -1212,14 +1212,14 @@ impl TuiRenderer {
 
                         let cells = vec![
                             Cell::from(item.device.ip.clone()),
-                            Cell::from(item.device.name.clone()),
+                            device_identity_cell(&item.device),
                             Cell::from(item.device.status.clone()).style(status_style),
                             Cell::from(cpu_str),
                             Cell::from(mem_str),
                             Cell::from(ports_str),
                             Cell::from(alert_str).style(if item.alert_count > 0 { Style::default().fg(Color::LightRed) } else { Style::default() }),
                         ];
-                        Row::new(cells).height(1)
+                        Row::new(cells).height(if item.device.tags.is_empty() { 1 } else { 2 })
                     });
 
                     let device_table = Table::new(
@@ -1238,7 +1238,8 @@ impl TuiRenderer {
                     .block(
                         Block::default()
                             .borders(Borders::ALL)
-                            .title(format!(" 1. {} (Registered Devices) ", tui_text(tui_language, "device_list"))),
+                            .title(format!(" 1. {} (Registered Devices) ", tui_text(tui_language, "device_list")))
+                            .title_bottom(devices.get(selected_device_idx).map(|item| format!("sysName: {} / IP: {}", item.device.name, item.device.ip)).unwrap_or_default()),
                     )
                     .highlight_style(
                         Style::default()
@@ -1257,7 +1258,7 @@ impl TuiRenderer {
                     // 2. 中ペイン: Interface & Topology / Protocol View
                     let selected_device_name = devices
                         .get(selected_device_idx)
-                        .map(|d| format!("{} ({})", d.device.name, d.device.ip))
+                        .map(|d| format!("{} ({})", d.device.label(), d.device.ip))
                         .unwrap_or_else(|| "No Device Selected".to_string());
 
                     if show_middle_panel {
@@ -2201,14 +2202,7 @@ impl TuiRenderer {
                                 }
                                 KeyCode::Enter if active_tab == TuiTab::Devices => {
                                     if devices.get(selected_device_idx).is_some_and(|item| {
-                                        tui_filter_matches(
-                                            &filter_query,
-                                            &[
-                                                &item.device.ip,
-                                                &item.device.name,
-                                                &item.device.status,
-                                            ],
-                                        )
+                                        device_filter_matches(&filter_query, &item.device)
                                     }) {
                                         change_tui_tab(
                                             &mut active_tab,
@@ -2259,13 +2253,9 @@ impl TuiRenderer {
                                                 .iter()
                                                 .enumerate()
                                                 .filter(|(_, item)| {
-                                                    tui_filter_matches(
+                                                    device_filter_matches(
                                                         &filter_query,
-                                                        &[
-                                                            &item.device.ip,
-                                                            &item.device.name,
-                                                            &item.device.status,
-                                                        ],
+                                                        &item.device,
                                                     )
                                                 })
                                                 .map(|(index, _)| index)
@@ -2705,6 +2695,32 @@ impl TuiRenderer {
     }
 }
 
+fn device_filter_matches(filter: &str, device: &Device) -> bool {
+    tui_filter_matches(
+        filter,
+        &[
+            &device.ip,
+            &device.name,
+            device.label(),
+            &device.tags.join(" "),
+            &device.status,
+        ],
+    )
+}
+
+fn device_identity_cell(device: &Device) -> Cell<'static> {
+    Cell::from(Text::from(vec![
+        Line::from(device.label().to_string()),
+        Line::from(
+            device
+                .tags
+                .iter()
+                .map(|tag| Span::styled(format!("[{tag}] "), Style::default().fg(Color::Cyan)))
+                .collect::<Vec<_>>(),
+        ),
+    ]))
+}
+
 fn optical_power_cell(value: Option<f64>) -> Cell<'static> {
     match value.filter(|value| value.is_finite()) {
         Some(value) => Cell::from(format!("{value:.1} dBm")).style(if value <= -20.0 {
@@ -2719,6 +2735,47 @@ fn optical_power_cell(value: Option<f64>) -> Cell<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_metadata_renders_japanese_badges_and_uses_consistent_filtering() {
+        use ratatui::buffer::Buffer;
+        let device = Device {
+            id: Some(1),
+            name: "original-sysName".into(),
+            ip: "192.0.2.1".into(),
+            display_name: Some("東京SW-01".into()),
+            tags: vec!["東京HQ".into(), "Core".into()],
+            community: "public".into(),
+            device_type: "switch".into(),
+            status: "online".into(),
+            last_seen_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        for query in ["東京SW", "original", "192.0.2.1", "東京HQ", "core"] {
+            assert!(device_filter_matches(query, &device), "{query}");
+        }
+        assert!(!device_filter_matches("absent", &device));
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buffer = Buffer::empty(area);
+        ratatui::widgets::Widget::render(
+            Table::new(
+                [Row::new([device_identity_cell(&device)]).height(2)],
+                [Constraint::Length(40)],
+            ),
+            area,
+            &mut buffer,
+        );
+        let rendered = buffer
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() != " ")
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("東京SW-01"));
+        assert!(rendered.contains("[東京HQ][Core]"));
+        assert_eq!(buffer[(0, 1)].fg, Color::Cyan);
+    }
 
     #[test]
     fn dom_cells_show_dbm_and_warn_only_at_threshold() {

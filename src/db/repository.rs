@@ -12,6 +12,12 @@ pub struct Repository {
     connection: rusqlite::Connection,
 }
 
+fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
+    serde_json::from_str(&json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(error))
+    })
+}
+
 impl Repository {
     pub fn new(connection: rusqlite::Connection) -> Self {
         Self { connection }
@@ -19,8 +25,8 @@ impl Repository {
 
     pub fn save_device(&self, device: &Device) -> Result<i64, AppError> {
         let id = self.connection.execute(
-            "INSERT INTO devices (name, ip, community, device_type, status, last_seen_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            "INSERT INTO devices (name, ip, community, device_type, status, last_seen_at, created_at, updated_at, display_name, tags)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?7, ?8)
              ON CONFLICT(ip) DO UPDATE SET
                  name = excluded.name,
                  community = excluded.community,
@@ -34,7 +40,9 @@ impl Repository {
                 device.community,
                 device.device_type,
                 device.status,
-                device.last_seen_at
+                device.last_seen_at,
+                device.display_name,
+                serde_json::to_string(&device.tags).map_err(|error| AppError::Database(error.to_string()))?,
             ],
         )?;
 
@@ -73,7 +81,7 @@ impl Repository {
 
     pub fn find_device_by_ip(&self, ip: &str) -> Result<Option<Device>, AppError> {
         let mut stmt = self.connection.prepare(
-            "SELECT id, name, ip, community, device_type, status, last_seen_at, created_at, updated_at FROM devices WHERE ip = ?1",
+            "SELECT id, name, ip, community, device_type, status, last_seen_at, created_at, updated_at, display_name, tags FROM devices WHERE ip = ?1",
         )?;
 
         match stmt.query_row(params![ip], |row| {
@@ -87,6 +95,8 @@ impl Repository {
                 last_seen_at: row.get(6)?,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
+                display_name: row.get(9)?,
+                tags: parse_tags(row.get(10)?)?,
             })
         }) {
             Ok(device) => Ok(Some(device)),
@@ -132,7 +142,7 @@ impl Repository {
 
     pub fn list_devices(&self) -> Result<Vec<Device>, AppError> {
         let mut stmt = self.connection.prepare(
-            "SELECT id, name, ip, community, device_type, status, last_seen_at, created_at, updated_at FROM devices",
+            "SELECT id, name, ip, community, device_type, status, last_seen_at, created_at, updated_at, display_name, tags FROM devices",
         )?;
 
         let rows = stmt.query_map([], |row| {
@@ -146,6 +156,8 @@ impl Repository {
                 last_seen_at: row.get(6)?,
                 created_at: row.get(7)?,
                 updated_at: row.get(8)?,
+                display_name: row.get(9)?,
+                tags: parse_tags(row.get(10)?)?,
             })
         })?;
 
@@ -155,6 +167,49 @@ impl Repository {
         }
 
         Ok(devices)
+    }
+
+    pub fn update_device_metadata(
+        &self,
+        ip: &str,
+        metadata: crate::device::metadata::DeviceMetadata,
+    ) -> Result<(), AppError> {
+        let metadata = metadata.normalize()?;
+        let tags = serde_json::to_string(&metadata.tags)
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let changed = self.connection.execute(
+            "UPDATE devices SET display_name = ?1, tags = ?2, updated_at = CURRENT_TIMESTAMP WHERE ip = ?3",
+            params![metadata.display_name, tags, ip],
+        )?;
+        if changed != 1 {
+            return Err(AppError::Validation(format!("device {ip} was not found")));
+        }
+        Ok(())
+    }
+
+    pub fn bulk_rename(
+        &self,
+        request: &crate::device::metadata::BulkRename,
+        preview: bool,
+    ) -> Result<Vec<crate::device::metadata::RenameItem>, AppError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let plan = crate::device::metadata::rename_plan(request, &self.list_devices()?)?;
+        if !preview {
+            for item in &plan {
+                let changed = transaction.execute(
+                    "UPDATE devices SET display_name = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+                    params![item.display_name, item.id],
+                )?;
+                if changed != 1 {
+                    return Err(AppError::Database(format!(
+                        "device {} disappeared during rename",
+                        item.id
+                    )));
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(plan)
     }
 
     pub fn count_rows(&self, table: &str) -> Result<i64, AppError> {
@@ -1334,7 +1389,7 @@ impl Repository {
 
     pub fn get_recent_alerts(&self, limit: usize) -> Result<Vec<RecentAlert>, AppError> {
         let mut stmt = self.connection.prepare(
-            "SELECT a.id, a.device_id, d.name, d.ip, a.alert_type, a.severity, a.details, a.created_at
+            "SELECT a.id, a.device_id, COALESCE(NULLIF(d.display_name, ''), NULLIF(d.name, ''), d.ip), d.ip, a.alert_type, a.severity, a.details, a.created_at
              FROM alert_events a
              JOIN devices d ON d.id = a.device_id
              ORDER BY a.created_at DESC, a.id DESC
