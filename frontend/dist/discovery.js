@@ -32,6 +32,13 @@ var TracePulseDiscovery = (() => {
     updateHint: () => updateHint,
     updateRegisterBtn: () => updateRegisterBtn
   });
+
+  // frontend/src/shared/escape.ts
+  function esc(value) {
+    return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/\x27/g, "&#39;");
+  }
+
+  // frontend/src/pages/discovery.ts
   var scanTimeoutSeconds = 300;
   var pollIntervalMs = 1500;
   var currentJobId = null;
@@ -39,6 +46,7 @@ var TracePulseDiscovery = (() => {
   var elapsedTimer = null;
   var scanStartedAt = null;
   var cancelled = false;
+  var scanCommunity = "";
   function t(key) {
     return typeof window.t === "function" ? window.t(key) : key;
   }
@@ -93,6 +101,7 @@ var TracePulseDiscovery = (() => {
   async function startScan() {
     const cidr = el("cidr").value.trim();
     const community = el("community").value.trim() || "public";
+    scanCommunity = community;
     const seedIp = document.getElementById("seed-ip")?.value.trim() || "";
     if (!cidr) {
       showScanError("Please enter a CIDR range.");
@@ -223,7 +232,7 @@ var TracePulseDiscovery = (() => {
     devices.forEach((device) => {
       const registered = existingIps().has(device.ip);
       const row = document.createElement("tr");
-      row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip='${device.ip}' data-name='${device.name || ""}' data-community='${device.community || "public"}'${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${device.ip}</td><td>${device.name || ""}</td><td><span class='${device.status === "online" ? "status-online" : "status-unknown"}'>${device.status || "unknown"}</span></td><td>${registered ? "registered" : ""}</td>`;
+      row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${device.status === "online" ? "status-online" : "status-unknown"}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
       tbody.appendChild(row);
     });
     el("results-section").style.display = "block";
@@ -243,7 +252,7 @@ var TracePulseDiscovery = (() => {
     updateRegisterBtn();
   }
   async function registerSelected() {
-    const selected = Array.from(document.querySelectorAll(".row-cb:checked")).map((checkbox) => ({ ip: checkbox.dataset.ip, name: checkbox.dataset.name, community: checkbox.dataset.community }));
+    const selected = Array.from(document.querySelectorAll(".row-cb:checked")).map((checkbox) => ({ ip: checkbox.dataset.ip, name: checkbox.dataset.name, community: scanCommunity }));
     if (!selected.length) {
       window.alert(t("select_at_least_one_device"));
       return;

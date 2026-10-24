@@ -164,7 +164,7 @@ export function initializeOnboarding(auto = false): void {
                     if (signal.aborted) return;
                     window.clearTimeout(deadline);
                     const known = new Set(existing.map((device) => device.ip));
-                    devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community: device.community || community }));
+                    devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community }));
                     setBusy(false);
                     progress.hidden = true;
                     status(devices.length ? text("selected") : text("empty"));

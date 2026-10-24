@@ -802,6 +802,10 @@ fn handle_connection(
             },
         ),
         ("GET", "/api/settings") => respond_json(stream, "200 OK", api_get_settings(&cfg)),
+        ("POST", "/diagnostics") => respond_html(
+            stream,
+            page_diagnostics_from_params(parse_form(&req.body), &cfg, web_extension.as_deref()),
+        ),
         ("GET", "/api/alert-thresholds") => {
             respond_json(stream, "200 OK", api_alert_thresholds(&cfg))
         }
@@ -861,7 +865,13 @@ fn api_summary(repo: &Arc<Mutex<Repository>>) -> String {
     let Ok(repo) = repo.lock() else {
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
-    let devices = repo.list_devices().unwrap_or_default();
+    let devices = match repo.list_devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            tracing::error!(%error, "Device credentials could not be read");
+            return serde_json::json!({"error":"Device credentials could not be read; check the master key and database"}).to_string();
+        }
+    };
     let healthy = devices.iter().filter(|d| d.status == "online").count();
     let offline = devices.iter().filter(|d| d.status == "offline").count();
     let warning = devices.iter().filter(|d| d.status == "warning").count();
@@ -1226,7 +1236,13 @@ fn api_devices(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> St
     let Ok(repo) = repo.lock() else {
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
-    let devices = repo.list_devices().unwrap_or_default();
+    let devices = match repo.list_devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            tracing::error!(%error, "Device credentials could not be read");
+            return serde_json::json!({"error":"Device credentials could not be read; check the master key and database"}).to_string();
+        }
+    };
     let items: Vec<String> = devices
         .iter()
         .map(|d| {
@@ -1291,7 +1307,8 @@ fn dashboard_device_json(
     serde_json::json!({
         "id": device.id, "ip": device.ip, "name": device.name, "status": device.status,
         "display_name": device.display_name, "tags": device.tags,
-        "community": if redact { "" } else { &device.community },
+        "community": if redact { "" } else { crate::crypto::MASK },
+        "community_configured": !device.community.is_empty(),
         "last_seen": device.last_seen_at.as_deref().unwrap_or(""), "error_spike": spike,
         "health_score": score, "health_status": health_status,
     })
@@ -1619,7 +1636,7 @@ fn api_device_detail(
         escape_json(&device.ip),
         escape_json(&device.name),
         escape_json(&device.status),
-        escape_json(&device.community),
+        crate::crypto::MASK,
         escape_json(device.last_seen_at.as_deref().unwrap_or("")),
         system_metrics_json,
         ifaces_json.join(","),
@@ -1647,7 +1664,7 @@ fn api_get_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
     };
     serde_json::json!({
         "polling": { "interval_seconds": c.polling.interval_seconds },
-        "snmp": { "default_community": c.snmp.default_community },
+        "snmp": { "default_community": "", "community_configured": !c.snmp.default_community.is_empty() },
         "display": { "timezone": c.display.timezone },
         "alert": c.alert,
         "retention": { "history_days": c.retention.history_days },
@@ -1677,6 +1694,10 @@ fn api_post_settings(
                 _ => return r#"{"error":"interval_seconds must be 5-600"}"#.into(),
             },
             "default_community" => match value.as_str() {
+                Some("") => {}
+                Some(crate::crypto::MASK) => {
+                    return r#"{"error":"masked credentials cannot be saved"}"#.into();
+                }
                 Some(community) if !community.is_empty() => {
                     updated.snmp.default_community = community.into()
                 }
@@ -1855,10 +1876,39 @@ fn api_post_oid_overrides(
 
 fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), String> {
     // [notifier] や [license] など、AppConfig が管理しないセクションを壊さないようマージ保存する。
-    let mut root: toml::value::Table = std::fs::read_to_string(cfg_path)
-        .ok()
-        .and_then(|content| content.parse::<toml::Table>().ok())
-        .unwrap_or_default();
+    let mut root: toml::value::Table = match std::fs::read_to_string(cfg_path) {
+        Ok(content) => content
+            .parse::<toml::Table>()
+            .map_err(|_| "invalid configuration TOML (contents redacted)".to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let encrypted = root
+        .get("snmp")
+        .and_then(|snmp| snmp.get("default_community"))
+        .and_then(toml::Value::as_str)
+        .is_some_and(|value| value.starts_with("tpenc:"));
+    let parent = cfg_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let key =
+        crate::crypto::MasterKey::load(parent, !encrypted).map_err(|error| error.to_string())?;
+    if let Some(value) = root
+        .get("snmp")
+        .and_then(|snmp| snmp.get("default_community"))
+        .and_then(toml::Value::as_str)
+        && value.starts_with("tpenc:")
+    {
+        key.decrypt(value, crate::config::CONFIG_SECRET_CONTEXT)
+            .map_err(|error| error.to_string())?;
+    }
+    let envelope = key
+        .encrypt(
+            c.snmp.default_community.as_bytes(),
+            crate::config::CONFIG_SECRET_CONTEXT,
+        )
+        .map_err(|error| error.to_string())?;
 
     fn section<'a>(root: &'a mut toml::value::Table, name: &str) -> &'a mut toml::value::Table {
         let entry = root
@@ -1879,7 +1929,7 @@ fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), Strin
     let snmp = section(&mut root, "snmp");
     snmp.insert(
         "default_community".to_string(),
-        toml::Value::String(c.snmp.default_community.clone()),
+        toml::Value::String(envelope),
     );
     snmp.insert(
         "cpu_oid_override".to_string(),
@@ -1942,7 +1992,8 @@ fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), Strin
     );
 
     let toml_content = toml::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(cfg_path, &toml_content).map_err(|e| e.to_string())
+    crate::crypto::write_private_atomic(cfg_path, toml_content.as_bytes())
+        .map_err(|error| error.to_string())
 }
 
 fn extract_interface_from_alert(alert_type: &str, details: &str) -> String {
@@ -1967,6 +2018,7 @@ fn api_scan_start(body: &str, jobs: JobStore, limits: WebLimits) -> String {
     let cidr = params.get("cidr").cloned().unwrap_or_default();
     let community = params
         .get("community")
+        .filter(|value| !value.is_empty())
         .cloned()
         .unwrap_or_else(|| "public".to_string());
     // max_hosts is calculated by the client from the requested CIDRs.
@@ -2160,11 +2212,10 @@ fn api_scan_status(job_id: &str, jobs: &JobStore) -> String {
                 .iter()
                 .map(|d| {
                     format!(
-                        r#"{{"ip":"{}","name":"{}","status":"{}","community":"{}"}}"#,
+                        r#"{{"ip":"{}","name":"{}","status":"{}","community_configured":true}}"#,
                         escape_json(&d.ip),
                         escape_json(&d.name),
                         escape_json(&d.status),
-                        escape_json(&d.community),
                     )
                 })
                 .collect();
@@ -2762,7 +2813,10 @@ fn topology_edge(seed_ip: &str, neighbor: NormalizedNeighbor) -> WebTopologyEdge
 
 /// POST /api/discovery/register
 fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) -> String {
-    let devices = parse_register_body(body);
+    let devices = match parse_register_body(body) {
+        Ok(devices) => devices,
+        Err(error) => return serde_json::json!({"error":error.to_string()}).to_string(),
+    };
     if devices.is_empty() {
         return r#"{"error":"no devices provided"}"#.to_string();
     }
@@ -2771,7 +2825,13 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) ->
         return r#"{"error":"repository lock failed"}"#.to_string();
     };
 
-    let current_count = repo.list_devices().map(|d| d.len()).unwrap_or(0);
+    let current_count = match repo.list_devices() {
+        Ok(devices) => devices.len(),
+        Err(error) => {
+            tracing::error!(%error, "Registration blocked because device credentials could not be read");
+            return r#"{"error":"Device credentials could not be read"}"#.to_string();
+        }
+    };
     let mut remaining_slots = limits
         .max_devices
         .map(|limit| limit.saturating_sub(current_count));
@@ -2845,7 +2905,13 @@ fn page_dashboard(
     let alert_config = cfg.lock().map(|c| c.alert.clone()).unwrap_or_default();
     let (devices, spikes_count, devices_json, recent_alerts) = {
         if let Ok(r) = repo.lock() {
-            let devs = r.list_devices().unwrap_or_default();
+            let devs = match r.list_devices() {
+                Ok(devices) => devices,
+                Err(error) => {
+                    tracing::error!(%error, "Dashboard blocked because device credentials could not be read");
+                    return "<!doctype html><html><body><main><p role='alert'>Device credentials could not be read. Check the master key and database.</p></main></body></html>".to_string();
+                }
+            };
             let mut sc = 0usize;
             let json: Vec<String> = devs
                 .iter()
@@ -3009,7 +3075,7 @@ fn page_settings(
             html.push_str(&format!(
             "var INIT = {{interval:{},community:'{}',error_rate:{},spike:{},warn:{},crit:{},days:{},timezone:'{}',thresholds:{{cpu:{},memory:{},bandwidth:{},error_rate:{}}}}};\n",
             c.polling.interval_seconds,
-            escape_json(&c.snmp.default_community),
+            "",
             c.alert.error_rate_threshold,
             c.alert.spike_threshold,
             c.alert.health_warning_threshold,
@@ -3022,7 +3088,7 @@ fn page_settings(
             serde_json::to_string(&c.alert.error_rate).unwrap_or_default(),
         ));
         } else {
-            html.push_str("var INIT = {interval:30,community:'public',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
+            html.push_str("var INIT = {interval:30,community:'',error_rate:0.05,spike:10,warn:80,crit:60,days:7,timezone:'utc'};\n");
         }
         html.push_str("</script><script src='/static/js/i18n.js'></script><script src='/static/js/settings.js'></script>");
     } else {
@@ -3243,10 +3309,18 @@ fn page_diagnostics(
     cfg: &Arc<Mutex<AppConfig>>,
     extension: Option<&dyn WebExtensionProvider>,
 ) -> String {
-    use crate::snmp::SnmpClient;
-
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let params = parse_form(query);
+    let mut params = parse_form(query);
+    params.remove("community");
+    page_diagnostics_from_params(params, cfg, extension)
+}
+
+fn page_diagnostics_from_params(
+    params: HashMap<String, String>,
+    cfg: &Arc<Mutex<AppConfig>>,
+    extension: Option<&dyn WebExtensionProvider>,
+) -> String {
+    use crate::snmp::SnmpClient;
     let default_community = cfg
         .lock()
         .map(|c| c.snmp.default_community.clone())
@@ -3266,6 +3340,7 @@ fn page_diagnostics(
     let ip = params.get("ip").cloned().unwrap_or_default();
     let community = params
         .get("community")
+        .filter(|value| !value.is_empty())
         .cloned()
         .unwrap_or_else(|| default_community.clone());
 
@@ -3506,7 +3581,7 @@ fn page_diagnostics(
     html.push_str("<div class='settings-section'>");
     html.push_str("<h2 data-i18n='target_device'>Target Device</h2>");
     html.push_str(
-        "<form method='GET' action='/diagnostics' onsubmit='return startDiagnostics(event)'>",
+        "<form method='POST' action='/diagnostics' onsubmit='return startDiagnostics(event)'>",
     );
     html.push_str("<div class='field-row'>");
     html.push_str("<div class='field-group'>");
@@ -3519,8 +3594,8 @@ fn page_diagnostics(
     html.push_str("<div class='field-group'>");
     html.push_str("<label data-i18n='community'>Community</label>");
     html.push_str(&format!(
-        "<input type='text' name='community' value='{}' placeholder='public'>",
-        escape_html(&community)
+        "<input type='password' name='community' value='{}' autocomplete='new-password' placeholder='Leave blank to use configured community'>",
+        ""
     ));
     html.push_str("</div>");
     html.push_str("</div>");
@@ -3876,7 +3951,7 @@ const SETTINGS_HTML: &str = "<main>
   <div class='field-row'>
     <div class='field-group'>
       <label data-i18n='default_community'>Default Community String</label>
-      <input type='text' id='community' placeholder='public' data-i18n-placeholder='public_placeholder'>
+      <input type='password' id='community' autocomplete='new-password' placeholder='Leave blank to keep existing' data-i18n-placeholder='secret_keep_existing'>
       <div class='field-hint' data-i18n='default_community_hint'>Used when no community is specified per device</div>
     </div>
   </div>
@@ -4259,7 +4334,7 @@ const DISCOVERY_HTML: &str = "<main>
   <div class='scan-form' id='scan-form'>
         <div class='form-group discovery-community'>
       <label for='community' data-i18n='community'>Community</label>
-      <input id='community' type='text' value='public' data-i18n-placeholder='public_placeholder'>
+      <input id='community' type='password' autocomplete='new-password' value='public' data-i18n-placeholder='public_placeholder'>
     </div>
         <div class='discovery-workflows'>
             <div class='discovery-workflow'>
@@ -4308,7 +4383,7 @@ const DISCOVERY_HTML: &str = "<main>
       </div>
       <div class='form-group' style='flex:1;min-width:120px'>
         <label data-i18n='community'>Community</label>
-        <input id='manual-community' type='text' value='public' data-i18n-placeholder='public_placeholder'>
+        <input id='manual-community' type='password' autocomplete='new-password' value='public' data-i18n-placeholder='public_placeholder'>
       </div>
       <button class='btn' style='margin-top:1.45rem' onclick='addManual()' data-i18n='add'>Add</button>
       <button class='btn btn-secondary' style='margin-top:1.45rem' onclick='hideManual()' data-i18n='cancel'>Cancel</button>
@@ -4457,37 +4532,31 @@ fn escape_html(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Parse a JSON array of {ip, name, community} objects (minimal hand-rolled parser).
-fn parse_register_body(body: &str) -> Vec<DeviceConfig> {
-    let mut devices = Vec::new();
-    for chunk in body.split('}') {
-        let ip = extract_json_str(chunk, "ip");
-        let name = extract_json_str(chunk, "name");
-        let community = extract_json_str(chunk, "community");
-        if let Some(ip) = ip {
-            let name = name
-                .unwrap_or_else(|| format!("device-{}", ip.split('.').next_back().unwrap_or("x")));
-            let community = community.unwrap_or_else(|| "public".to_string());
-            let mut d = DeviceConfig::new(ip.clone(), community);
-            d.name = name;
-            devices.push(d);
-        }
+fn parse_register_body(body: &str) -> Result<Vec<DeviceConfig>, AppError> {
+    #[derive(serde::Deserialize)]
+    struct Registration {
+        ip: String,
+        name: Option<String>,
+        #[serde(default = "crate::config::defaults::default_snmp_community")]
+        community: String,
     }
-    devices
-}
-
-fn extract_json_str(chunk: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let pos = chunk.find(&needle)?;
-    let rest = &chunk[pos + needle.len()..];
-    let colon = rest.find(':')?;
-    let after_colon = rest[colon + 1..].trim_start();
-    if !after_colon.starts_with('"') {
-        return None;
-    }
-    let inner = &after_colon[1..];
-    let end = inner.find('"')?;
-    Some(inner[..end].to_string())
+    let requests: Vec<Registration> = serde_json::from_str(body).map_err(|_| {
+        AppError::Validation("invalid device registration JSON (contents redacted)".into())
+    })?;
+    requests
+        .into_iter()
+        .map(|request| {
+            request
+                .ip
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| AppError::Validation("invalid device IP address".into()))?;
+            let mut device = DeviceConfig::new(request.ip, request.community);
+            if let Some(name) = request.name {
+                device.name = name;
+            }
+            Ok(device)
+        })
+        .collect()
 }
 
 // ─── Background polling loop ──────────────────────────────────────────────────
@@ -4530,8 +4599,17 @@ fn run_polling_loop_with_observer(
         std::thread::sleep(Duration::from_secs(interval));
 
         let devices = match repo.lock() {
-            Ok(r) => r.list_devices().unwrap_or_default(),
-            Err(_) => continue,
+            Ok(r) => match r.list_devices() {
+                Ok(devices) => devices,
+                Err(error) => {
+                    tracing::error!(%error, "Polling skipped: device credentials could not be read");
+                    continue;
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, "Polling skipped: repository lock failed");
+                continue;
+            }
         };
 
         if devices.is_empty() {
@@ -4858,6 +4936,89 @@ impl PollResult {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn credential_responses_are_masked_and_empty_settings_preserve_encrypted_values() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let secret = "API-private-marker-471239";
+        let mut config = AppConfig::default();
+        config.snmp.default_community = secret.into();
+        persist_config(&config, &path).unwrap();
+        let cfg = Arc::new(Mutex::new(config));
+        let repo = Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+            .unwrap();
+        repo.save_device_config(&DeviceConfig::new("192.0.2.1", secret))
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repo));
+        for response in [
+            api_devices(&repo, &cfg),
+            api_device_detail("192.0.2.1", &repo, &cfg, false),
+            api_get_settings(&cfg),
+            page_dashboard(&repo, &cfg, None, false),
+            page_settings(&cfg, None, true),
+            page_diagnostics("/diagnostics", &cfg, None),
+        ] {
+            assert!(!response.contains(secret));
+        }
+        let devices: serde_json::Value = serde_json::from_str(&api_devices(&repo, &cfg)).unwrap();
+        assert_eq!(devices[0]["community"], crate::crypto::MASK);
+        assert_eq!(devices[0]["community_configured"], true);
+        let escaped_secret = "brace}quote\"backslash\\日本語";
+        let registration = serde_json::json!([{"ip":"192.0.2.2","community":escaped_secret}]);
+        assert!(
+            api_register(&registration.to_string(), &repo, WebLimits::community())
+                .contains("registered")
+        );
+        assert_eq!(
+            repo.lock()
+                .unwrap()
+                .find_device_by_ip("192.0.2.2")
+                .unwrap()
+                .unwrap()
+                .community,
+            escaped_secret
+        );
+        let invalid = api_register(
+            r#"[{"ip":"invalid","community":"must-not-be-echoed"}]"#,
+            &repo,
+            WebLimits::community(),
+        );
+        assert!(invalid.contains("error"));
+        assert!(!invalid.contains("must-not-be-echoed"));
+        let body = api_post_settings(
+            r#"{"default_community":"","interval_seconds":45}"#,
+            &cfg,
+            &path,
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["ok"],
+            true
+        );
+        assert_eq!(cfg.lock().unwrap().snmp.default_community, secret);
+        assert_eq!(
+            AppConfig::load(&path).unwrap().snmp.default_community,
+            secret
+        );
+        assert!(!std::fs::read_to_string(&path).unwrap().contains(secret));
+        let mut job = ScanJob::new(1);
+        job.state = ScanState::Done;
+        job.found.push(DeviceConfig::new("192.0.2.1", secret));
+        let jobs = Arc::new(Mutex::new(HashMap::from([("job".into(), job)])));
+        let result = api_scan_status("job", &jobs);
+        assert!(!result.contains(secret));
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&result).unwrap()["devices"][0]
+                .get("community")
+                .is_none()
+        );
+        std::fs::remove_file(directory.path().join("secret.key")).unwrap();
+        let encrypted = std::fs::read_to_string(&path).unwrap();
+        assert!(api_post_settings(r#"{"interval_seconds":60}"#, &cfg, &path).contains("error"));
+        assert_eq!(cfg.lock().unwrap().polling.interval_seconds, 45);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), encrypted);
+    }
+
+    #[test]
     fn metadata_apis_validate_persist_preview_and_escape_embedded_json() {
         use crate::{
             db::{repository::Repository, sqlite::initialize_database},
@@ -4867,7 +5028,8 @@ mod tests {
             path::Path,
             sync::{Arc, Mutex},
         };
-        let repository = Repository::new(initialize_database(Path::new(":memory:")).unwrap());
+        let repository =
+            Repository::new(initialize_database(Path::new(":memory:")).unwrap()).unwrap();
         repository
             .save_device_config(&DeviceConfig::new("192.0.2.1", "public"))
             .unwrap();
@@ -4922,9 +5084,9 @@ mod tests {
             super::api_bulk_rename("{}", &repo, false).0,
             "400 Bad Request"
         );
-        let broken = Arc::new(Mutex::new(Repository::new(
-            rusqlite::Connection::open_in_memory().unwrap(),
-        )));
+        let broken = Arc::new(Mutex::new(
+            Repository::new(rusqlite::Connection::open_in_memory().unwrap()).unwrap(),
+        ));
         assert_eq!(
             super::api_device_metadata("192.0.2.1", &body, &broken).0,
             "500 Internal Server Error"
@@ -4961,7 +5123,7 @@ mod tests {
             "127.0.0.1",
             0,
             AppConfig::default(),
-            Repository::new(connection),
+            Repository::new(connection).unwrap(),
         )
         .with_config_path(path.clone());
         assert_eq!(server.config_path, path);
@@ -5016,7 +5178,7 @@ mod tests {
             "127.0.0.1",
             0,
             AppConfig::default(),
-            Repository::new(connection),
+            Repository::new(connection).unwrap(),
             WebLimits::community(),
         );
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5119,10 +5281,10 @@ mod tests {
 
     #[test]
     fn flow_analytics_api_exposes_extended_contract() {
-        let path =
-            std::env::temp_dir().join(format!("tracepulse-flow-api-{}.db", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
         let connection = initialize_database(&path).expect("database should initialize");
-        let repository = Repository::new(connection);
+        let repository = Repository::new(connection).unwrap();
         repository
             .save_flow_record(&FlowRecord {
                 exporter_ip: Some("192.0.2.10".to_string()),
@@ -5156,12 +5318,11 @@ mod tests {
 
     #[test]
     fn dashboard_has_no_extension_without_provider() {
-        let path = std::env::temp_dir().join(format!(
-            "tracepulse-dashboard-edition-{}.db",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
         let repository =
-            Repository::new(initialize_database(&path).expect("database should initialize"));
+            Repository::new(initialize_database(&path).expect("database should initialize"))
+                .unwrap();
         let repository = Arc::new(Mutex::new(repository));
         let config = Arc::new(Mutex::new(AppConfig::default()));
 
@@ -5287,12 +5448,11 @@ mod tests {
             }
         }
 
-        let path = std::env::temp_dir().join(format!(
-            "tracepulse-device-traffic-section-{}.db",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
         let repository =
-            Repository::new(initialize_database(&path).expect("database should initialize"));
+            Repository::new(initialize_database(&path).expect("database should initialize"))
+                .unwrap();
         repository
             .save_device(&Device {
                 id: None,
@@ -5338,7 +5498,8 @@ mod tests {
     #[test]
     fn dom_device_api_exposes_nullable_tx_rx_power_from_persisted_samples() {
         let repository =
-            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap());
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+                .unwrap();
         let device = crate::device::types::DeviceConfig::new("192.0.2.77", "public");
         let id = repository.save_device_config(&device).unwrap();
         let mut interface = crate::monitor::interface::InterfaceMonitor::new(7, "xe-0/0/0");
@@ -5416,12 +5577,10 @@ mod tests {
 
     #[test]
     fn long_window_rollup_preserves_flags_and_exporter_interface_names() {
-        let path = std::env::temp_dir().join(format!(
-            "tracepulse-flow-rollup-api-{}.db",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
         let connection = initialize_database(&path).expect("database should initialize");
-        let repository = Repository::new(connection);
+        let repository = Repository::new(connection).unwrap();
         let device_id = repository
             .save_device(&Device {
                 id: None,
@@ -5494,10 +5653,8 @@ mod tests {
 
     #[test]
     fn persist_config_preserves_unmanaged_toml_keys() {
-        let path = std::env::temp_dir().join(format!(
-            "tracepulse-config-merge-{}.toml",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
         std::fs::write(
         &path,
         "[polling]\ninterval_seconds = 10\ncustom_polling_key = true\n\n[notifier]\nendpoint = 'https://example.invalid'\n",
@@ -5531,10 +5688,8 @@ mod tests {
 
     #[test]
     fn metric_settings_save_reload_and_reject_invalid_updates_atomically() {
-        let path = std::env::temp_dir().join(format!(
-            "tracepulse-metric-settings-{}.toml",
-            std::process::id()
-        ));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
         let config = Arc::new(Mutex::new(AppConfig::default()));
         let result = super::api_post_settings(
             r#"{"interval_seconds":45,"cpu":{"warning":70,"critical":95},"error_rate":{"warning":1,"critical":2}}"#,
@@ -5595,9 +5750,10 @@ mod tests {
 
     #[test]
     fn discovery_page_exposes_unrestricted_limits_to_browser_js() {
-        let repo = Arc::new(Mutex::new(Repository::new(
-            Connection::open_in_memory().expect("in-memory db should open"),
-        )));
+        let repo = Arc::new(Mutex::new(
+            Repository::new(Connection::open_in_memory().expect("in-memory db should open"))
+                .unwrap(),
+        ));
 
         let html = page_discovery(&repo, WebLimits::unrestricted(), None);
 
@@ -5614,9 +5770,10 @@ mod tests {
 
     #[test]
     fn discovery_page_exposes_default_limits_to_browser_js() {
-        let repo = Arc::new(Mutex::new(Repository::new(
-            Connection::open_in_memory().expect("in-memory db should open"),
-        )));
+        let repo = Arc::new(Mutex::new(
+            Repository::new(Connection::open_in_memory().expect("in-memory db should open"))
+                .unwrap(),
+        ));
 
         let html = page_discovery(&repo, WebLimits::community(), None);
 

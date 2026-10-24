@@ -231,8 +231,15 @@ export function startDiagnostics(event: SubmitEvent): boolean {
     const progress = document.getElementById("diag-progress");
     if (button) button.disabled = true;
     if (progress) progress.textContent = t("diagnostics_running");
-    const url = `${form.action}?${new URLSearchParams(new FormData(form) as any).toString()}`;
-    fetch(url, { cache: "no-store" })
+    const body = new URLSearchParams();
+    new FormData(form).forEach((value, key) => {
+        if (typeof value === "string") body.append(key, value);
+    });
+    fetch(form.action, {
+        method: "POST", cache: "no-store",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" },
+        body: body.toString(),
+    })
         .then((response) => response.text())
         .then((html) => { document.open(); document.write(html); document.close(); })
         .catch((error: unknown) => {

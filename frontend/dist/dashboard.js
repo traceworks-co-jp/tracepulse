@@ -309,7 +309,7 @@ var TracePulseDashboard = (() => {
             if (signal.aborted) return;
             window.clearTimeout(deadline);
             const known = new Set(existing.map((device) => device.ip));
-            devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community: device.community || community }));
+            devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community }));
             setBusy(false);
             progress.hidden = true;
             status(devices.length ? text("selected") : text("empty"));
@@ -824,6 +824,10 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
     rename.id = "bulk-rename";
     rename.onclick = () => bulkRename([...selectedIds], refresh);
     toolbar.append(search, count, rename);
+    const error = document.createElement("p");
+    error.id = "device-load-error";
+    error.setAttribute("role", "alert");
+    toolbar.append(error);
     table.parentElement.before(toolbar);
     const header = document.createElement("th");
     const all = document.createElement("input");
@@ -841,13 +845,23 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
     table.querySelector("thead tr").prepend(header);
   }
   function refresh() {
-    fetch("/api/devices").then((response) => response.json()).then((devices) => {
+    fetch("/api/devices").then(async (response) => {
+      const data = await response.json();
+      if (!response.ok || !Array.isArray(data)) throw new Error(!Array.isArray(data) ? data.error || "Device request failed" : "Device request failed");
+      return data;
+    }).then((devices) => {
       window.DEVICES = devices;
+      const error = document.getElementById("device-load-error");
+      if (error) error.textContent = "";
       renderTable();
       renderSummary(devices);
       renderAttention(devices);
       updateLastRefreshed();
-    }).catch((error) => console.warn("refresh failed", error));
+    }).catch((error) => {
+      const message = document.getElementById("device-load-error");
+      if (message) message.textContent = String(error);
+      console.warn("refresh failed", error);
+    });
   }
   window.renderTable = renderTable;
   window.renderSummary = renderSummary;

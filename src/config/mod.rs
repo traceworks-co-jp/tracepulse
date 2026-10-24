@@ -9,9 +9,10 @@ pub struct PollingConfig {
     pub interval_seconds: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SnmpConfig {
     #[serde(default = "defaults::default_snmp_community")]
+    #[serde(skip_serializing)]
     pub default_community: String,
     #[serde(default = "defaults::default_cpu_oid_override")]
     pub cpu_oid_override: String,
@@ -21,6 +22,17 @@ pub struct SnmpConfig {
     /// 各要素は "sensor_type|oid" 形式(sensor_type は temperature / power / fan のいずれか)。
     #[serde(default = "defaults::default_hardware_oid_overrides")]
     pub hardware_oid_overrides: Vec<String>,
+}
+
+impl std::fmt::Debug for SnmpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnmpConfig")
+            .field("default_community", &"[REDACTED]")
+            .field("cpu_oid_override", &self.cpu_oid_override)
+            .field("memory_oid_override", &self.memory_oid_override)
+            .field("hardware_oid_overrides", &self.hardware_oid_overrides)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -105,14 +117,66 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
-    pub fn load(path: &std::path::Path) -> Result<Self, crate::error::AppError> {
-        if !path.exists() {
-            return Ok(Self::default());
+    pub(crate) fn verify_stored_key(path: &std::path::Path) -> Result<(), crate::error::AppError> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => zeroize::Zeroizing::new(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let root: toml::Value = toml::from_str(&content).map_err(|_| {
+            crate::error::AppError::Config("invalid TOML configuration (contents redacted)".into())
+        })?;
+        if let Some(value) = root
+            .get("snmp")
+            .and_then(|snmp| snmp.get("default_community"))
+            .and_then(toml::Value::as_str)
+            .filter(|value| value.starts_with("tpenc:"))
+        {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            crate::crypto::MasterKey::load(directory, false)?
+                .decrypt(value, CONFIG_SECRET_CONTEXT)?;
         }
+        Ok(())
+    }
 
-        let content = std::fs::read_to_string(path)?;
-        let mut config: AppConfig = toml::from_str(&content)?;
-        let root: toml::Value = toml::from_str(&content)?;
+    pub fn load(path: &std::path::Path) -> Result<Self, crate::error::AppError> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => zeroize::Zeroizing::new(content),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut root: toml::Value = toml::from_str(&content).map_err(|_| {
+            crate::error::AppError::Config("invalid TOML configuration (contents redacted)".into())
+        })?;
+        let stored = root
+            .get("snmp")
+            .and_then(|snmp| snmp.get("default_community"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string);
+        let mut migration = None;
+        if let Some(value) = &stored {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            let key = crate::crypto::MasterKey::load(directory, !value.starts_with("tpenc:"))?;
+            if value.starts_with("tpenc:") {
+                root["snmp"]["default_community"] =
+                    toml::Value::String(key.decrypt_string(value, CONFIG_SECRET_CONTEXT)?);
+            } else {
+                migration = Some(key.encrypt(value.as_bytes(), CONFIG_SECRET_CONTEXT)?);
+            }
+        }
+        let mut config: AppConfig = root.clone().try_into().map_err(|_| {
+            crate::error::AppError::Config(
+                "invalid configuration fields (contents redacted)".into(),
+            )
+        })?;
         if let Some(alert) = root.get("alert")
             && alert.get("error_rate").is_none()
             && alert.get("error_rate_threshold").is_some()
@@ -139,9 +203,18 @@ impl AppConfig {
                 "metric thresholds must satisfy 0 < warning < critical <= 100".into(),
             ));
         }
+        if let Some(envelope) = migration {
+            root["snmp"]["default_community"] = toml::Value::String(envelope);
+            let serialized = toml::to_string_pretty(&root).map_err(|_| {
+                crate::error::AppError::Config("configuration serialization failed".into())
+            })?;
+            crate::crypto::write_private_atomic(path, serialized.as_bytes())?;
+        }
         Ok(config)
     }
 }
+
+pub(crate) const CONFIG_SECRET_CONTEXT: &[u8] = b"TracePulse/config/snmp/default_community";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {

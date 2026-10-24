@@ -240,6 +240,10 @@ function initializeManagement(): void {
     rename.id = "bulk-rename";
     rename.onclick = () => bulkRename([...selectedIds], refresh);
     toolbar.append(search, count, rename);
+    const error = document.createElement("p");
+    error.id = "device-load-error";
+    error.setAttribute("role", "alert");
+    toolbar.append(error);
     table.parentElement!.before(toolbar);
     const header = document.createElement("th");
     const all = document.createElement("input");
@@ -258,15 +262,25 @@ function initializeManagement(): void {
 
 export function refresh(): void {
     fetch("/api/devices")
-        .then((response) => response.json() as Promise<DashboardDevice[]>)
+        .then(async (response) => {
+            const data: DashboardDevice[] | { error?: string } = await response.json();
+            if (!response.ok || !Array.isArray(data)) throw new Error(!Array.isArray(data) ? data.error || "Device request failed" : "Device request failed");
+            return data;
+        })
         .then((devices) => {
             window.DEVICES = devices;
+            const error = document.getElementById("device-load-error");
+            if (error) error.textContent = "";
             renderTable();
             renderSummary(devices);
             renderAttention(devices);
             updateLastRefreshed();
         })
-        .catch((error: unknown) => console.warn("refresh failed", error));
+        .catch((error: unknown) => {
+            const message = document.getElementById("device-load-error");
+            if (message) message.textContent = String(error);
+            console.warn("refresh failed", error);
+        });
 }
 
 window.renderTable = renderTable;

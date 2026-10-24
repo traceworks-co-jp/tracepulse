@@ -8,7 +8,7 @@ use tracepulse::{
 };
 
 fn repository() -> Repository {
-    let repository = Repository::new(initialize_database(Path::new(":memory:")).unwrap());
+    let repository = Repository::new(initialize_database(Path::new(":memory:")).unwrap()).unwrap();
     for ip in ["192.0.2.10", "192.0.2.2", "2001:db8::10", "2001:db8::2"] {
         repository
             .save_device_config(&DeviceConfig::new(ip, "private"))
@@ -222,10 +222,8 @@ fn metadata_validation_rejects_invalid_types_controls_and_limits() {
 
 #[test]
 fn legacy_database_migrates_idempotently_and_metadata_survives_reopen() {
-    let path = std::env::temp_dir().join(format!(
-        "tracepulse-metadata-migration-{}.db",
-        std::process::id()
-    ));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection
         .execute_batch(
@@ -239,7 +237,7 @@ fn legacy_database_migrates_idempotently_and_metadata_survives_reopen() {
         )
         .unwrap();
     drop(connection);
-    let repository = Repository::new(initialize_database(&path).unwrap());
+    let repository = Repository::new(initialize_database(&path).unwrap()).unwrap();
     let device = repository.list_devices().unwrap().remove(0);
     assert_eq!(device.label(), "original");
     assert!(device.tags.is_empty());
@@ -253,7 +251,7 @@ fn legacy_database_migrates_idempotently_and_metadata_survives_reopen() {
         )
         .unwrap();
     drop(repository);
-    let repository = Repository::new(initialize_database(&path).unwrap());
+    let repository = Repository::new(initialize_database(&path).unwrap()).unwrap();
     let device = repository.list_devices().unwrap().remove(0);
     assert_eq!(device.label(), "大阪支店SW-01");
     assert_eq!(device.tags, ["3F"]);
@@ -270,7 +268,7 @@ fn database_write_failure_rolls_back_prior_names_in_the_batch() {
          WHEN NEW.id = 2 BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END;",
         )
         .unwrap();
-    let repository = Repository::new(connection);
+    let repository = Repository::new(connection).unwrap();
     for ip in ["192.0.2.1", "192.0.2.2"] {
         repository
             .save_device_config(&DeviceConfig::new(ip, "public"))

@@ -8,3 +8,4 @@
 *.sqlite3
 *.log
 /custom_templates/
+secret.key

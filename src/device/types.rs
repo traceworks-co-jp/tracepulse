@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DeviceConfig {
     pub id: Option<i64>,
     pub name: String,
@@ -7,6 +7,16 @@ pub struct DeviceConfig {
     pub device_type: String,
     pub status: String,
     pub last_seen_at: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceConfig")
+            .field("id", &self.id)
+            .field("ip", &self.ip)
+            .field("community", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DeviceConfig {

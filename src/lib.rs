@@ -3,6 +3,7 @@ pub mod app;
 pub mod app_state;
 pub mod cleanup;
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod device;
 pub mod diagnostics;
@@ -28,11 +29,12 @@ pub fn run() -> Result<(), AppError> {
     std::fs::create_dir_all(&data_dir)?;
     crate::snmp::client::initialize_templates();
     let config_path = config_path();
+    AppConfig::verify_stored_key(&config_path)?;
+    let db_path = data_dir.join("data.db");
+    let mut conn = crate::db::sqlite::initialize_database(&db_path)?;
+    crate::db::credentials::protect(&mut conn)?;
     let mut config = AppConfig::load(&config_path)?;
     config.web.port = parse_web_port(&args, config.web.port)?;
-
-    let db_path = data_dir.join("data.db");
-    let conn = crate::db::sqlite::initialize_database(&db_path)?;
 
     let runner = AppRunner::new(config, conn).with_database_path(db_path);
     match mode {

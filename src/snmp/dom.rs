@@ -462,9 +462,10 @@ scale = 0.01
             db::{repository::Repository, sqlite::initialize_database},
             monitor::interface::InterfaceMonitor,
         };
-        let path = std::env::temp_dir().join(format!("tracepulse-dom-{}.db", std::process::id()));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
         {
-            let repo = Repository::new(initialize_database(&path).unwrap());
+            let repo = Repository::new(initialize_database(&path).unwrap()).unwrap();
             let device = DeviceConfig::new("192.0.2.77", "public");
             let id = repo.save_device_config(&device).unwrap();
             let mut interface = InterfaceMonitor::new(7, "xe-0/0/0");
@@ -498,7 +499,7 @@ scale = 0.01
                 .unwrap();
         }
         {
-            let repo = Repository::new(initialize_database(&path).unwrap());
+            let repo = Repository::new(initialize_database(&path).unwrap()).unwrap();
             let device = repo.find_device_by_ip("192.0.2.77").unwrap().unwrap();
             let sample = repo
                 .get_latest_interface_sample(device.id.unwrap(), 7)

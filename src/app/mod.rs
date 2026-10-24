@@ -97,7 +97,7 @@ impl AppRunner {
 
     pub fn run_web(self) -> Result<(), AppError> {
         println!("TracePulse WebGUI mode started");
-        let repository = Repository::new(self.connection);
+        let repository = Repository::new(self.connection)?;
         let host = std::env::var("TRACEPULSE_WEB_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let server = WebServer::new(&host, self.config.web.port.get(), self.config, repository);
         server.start()?;

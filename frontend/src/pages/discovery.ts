@@ -1,3 +1,5 @@
+import { esc } from "../shared/escape";
+
 interface DiscoveryDevice {
     ip: string;
     name?: string;
@@ -28,6 +30,7 @@ let pollTimer: number | null = null;
 let elapsedTimer: number | null = null;
 let scanStartedAt: number | null = null;
 let cancelled = false;
+let scanCommunity = "";
 
 function t(key: string): string { return typeof window.t === "function" ? window.t(key) : key; }
 function el<T extends HTMLElement>(id: string): T { return document.getElementById(id) as T; }
@@ -72,6 +75,7 @@ function applyPageLanguage(_lang?: string): void {
 export async function startScan(): Promise<void> {
     const cidr = el<HTMLInputElement>("cidr").value.trim();
     const community = el<HTMLInputElement>("community").value.trim() || "public";
+    scanCommunity = community;
     const seedIp = (document.getElementById("seed-ip") as HTMLInputElement | null)?.value.trim() || "";
     if (!cidr) { showScanError("Please enter a CIDR range."); return; }
     const entries = cidrEntries(cidr);
@@ -170,7 +174,7 @@ function renderResults(devices: DiscoveryDevice[], scanned: number, total: numbe
     devices.forEach((device) => {
         const registered = existingIps().has(device.ip);
         const row = document.createElement("tr");
-        row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip='${device.ip}' data-name='${device.name || ""}' data-community='${device.community || "public"}'${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${device.ip}</td><td>${device.name || ""}</td><td><span class='${device.status === "online" ? "status-online" : "status-unknown"}'>${device.status || "unknown"}</span></td><td>${registered ? "registered" : ""}</td>`;
+        row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${device.status === "online" ? "status-online" : "status-unknown"}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
         tbody.appendChild(row);
     });
     el<HTMLElement>("results-section").style.display = "block";
@@ -182,7 +186,7 @@ export function updateRegisterBtn(): void { const count = document.querySelector
 export function toggleAll(master: HTMLInputElement): void { document.querySelectorAll<HTMLInputElement>(".row-cb:not(:disabled)").forEach((checkbox) => { checkbox.checked = master.checked; }); updateRegisterBtn(); }
 
 export async function registerSelected(): Promise<void> {
-    const selected = Array.from(document.querySelectorAll<HTMLInputElement>(".row-cb:checked")).map((checkbox) => ({ ip: checkbox.dataset.ip, name: checkbox.dataset.name, community: checkbox.dataset.community }));
+    const selected = Array.from(document.querySelectorAll<HTMLInputElement>(".row-cb:checked")).map((checkbox) => ({ ip: checkbox.dataset.ip, name: checkbox.dataset.name, community: scanCommunity }));
     if (!selected.length) { window.alert(t("select_at_least_one_device")); return; }
     const button = el<HTMLButtonElement>("register-btn"); button.disabled = true; button.textContent = t("registering");
     try {

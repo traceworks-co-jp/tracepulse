@@ -10,6 +10,19 @@ SQLite 上の永続化対象を定義し、画面表示と監視ロジックで�
 
 - 機器基本情報
 - IP / name / community / status / last_seen_at
+- `community` は平文ではなく `tpenc:v1:` で始まるEnvelope Encryption形式のTEXT。
+  Repositoryでのみ復号し、IPとカラムを認証コンテキストに紐付ける。
+- `display_name` / `tags` はユーザー定義の表示用メタデータ。
+
+### credential_storage
+
+- 単一行の鍵検証用Envelope（`key_check`）と、旧平文ページの後処理状態（`cleanup_pending`）。
+- データ鍵はカラム値ごとのEnvelopeに内包され、このテーブルに平文鍵は保存しない。
+- EnvelopeのBase64内容は、鍵ラップ用Nonce（12バイト）、ラップ済みデータ鍵
+  （32バイト＋16バイト認証タグ）、値用Nonce（12バイト）、値の暗号文＋16バイト認証タグ。
+- マスターキーはDB外の `secret.key`（Unix `0600`）または `TRACEPULSE_MASTER_KEY`。
+- DBと同じデータディレクトリの設定ファイルにある `snmp.default_community` も
+  同一マスターキー・別認証コンテキストで暗号化する。
 
 ### interface_samples
 
@@ -83,6 +96,15 @@ SQLite 上の永続化対象を定義し、画面表示と監視ロジックで�
 - デバイス削除時は関連履歴も削除する
 - null を許容する項目は表示側で N/A に寄せる
 - SNMP 取得失敗は空値として保存せず、保存失敗と区別する
+- 暗号化対象は資格情報のみ。メトリクスのINSERTには暗号化・復号を介在させない。
+- 初回の平文移行は全件トランザクション。移行後にVACUUMとWAL切詰めを行い、
+  失敗時は起動エラーとする。中断した後処理は次回起動で再開する。
+- 鍵不一致・欠落・破損Envelopeを平文へフォールバックせず、明示的なエラーとする。
+- API・画面は資格情報をマスクまたは除外し、空入力更新では既存値を保持する。
+- 将来のパスワード認証向けにArgon2id処理を用意するが、現行にはusers／credentialsテーブル、
+  SNMP v3、WebGUIログインを新設しない。
+
+鍵のバックアップ・復元と制約は[README](../../README.md#credential-protection)を参照。
 
 ## 図: データ関係
 

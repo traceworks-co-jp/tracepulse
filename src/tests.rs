@@ -113,7 +113,7 @@ mod tests {
     fn app_state_uses_single_repository_connection() {
         let config = AppConfig::default();
         let connection = Connection::open_in_memory().unwrap();
-        let state = AppState::new(config.clone(), connection);
+        let state = AppState::new(config.clone(), connection).unwrap();
 
         assert_eq!(
             state.config.polling.interval_seconds,
@@ -145,7 +145,7 @@ mod tests {
             )
             .unwrap();
 
-        let repository = Repository::new(connection);
+        let repository = Repository::new(connection).unwrap();
         let device = DeviceConfig::new("192.168.1.30", "public");
 
         repository.save_device_config(&device).unwrap();
@@ -219,7 +219,7 @@ mod tests {
             )
             .unwrap();
 
-        let repository = Repository::new(connection);
+        let repository = Repository::new(connection).unwrap();
         let device = DeviceConfig::new("192.168.1.31", "public");
         let device_id = repository.save_device_config(&device).unwrap();
 

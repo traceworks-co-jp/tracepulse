@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Device {
     pub id: Option<i64>,
     pub name: String,
@@ -10,6 +10,7 @@ pub struct Device {
     #[serde(default)]
     pub tags: Vec<String>,
     pub ip: String,
+    #[serde(default, skip_serializing)]
     pub community: String,
     pub device_type: String,
     pub status: String,
@@ -25,6 +26,16 @@ impl Device {
             .filter(|name| !name.trim().is_empty())
             .or_else(|| (!self.name.trim().is_empty()).then_some(self.name.as_str()))
             .unwrap_or(&self.ip)
+    }
+}
+
+impl std::fmt::Debug for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Device")
+            .field("id", &self.id)
+            .field("ip", &self.ip)
+            .field("community", &"[REDACTED]")
+            .finish_non_exhaustive()
     }
 }
 

@@ -10,11 +10,11 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, connection: Connection) -> Self {
-        Self {
+    pub fn new(config: AppConfig, connection: Connection) -> Result<Self, crate::error::AppError> {
+        Ok(Self {
             config,
             registry: DeviceRegistry::new(),
-            repository: Repository::new(connection),
-        }
+            repository: Repository::new(connection)?,
+        })
     }
 }

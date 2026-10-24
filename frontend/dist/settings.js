@@ -258,7 +258,7 @@ var TracePulseSettings = (() => {
             if (signal.aborted) return;
             window.clearTimeout(deadline);
             const known = new Set(existing.map((device) => device.ip));
-            devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community: device.community || community }));
+            devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community }));
             setBusy(false);
             progress.hidden = true;
             status(devices.length ? text("selected") : text("empty"));
@@ -438,6 +438,7 @@ var TracePulseSettings = (() => {
     };
     fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
       if (data.ok) {
+        element("community").value = "";
         try {
           localStorage.setItem("tracepulse-timezone", timezone);
         } catch {

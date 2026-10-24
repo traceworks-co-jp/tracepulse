@@ -192,7 +192,7 @@ impl PortErrorBreakdownState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiscoveryModalState {
     pub active_field: usize, // 0: CIDR, 1: Community, 2: Version
     pub cidr: String,
@@ -200,6 +200,15 @@ pub struct DiscoveryModalState {
     pub version: String,
     pub cursor_position: usize,
     pub error_msg: Option<String>,
+}
+
+impl std::fmt::Debug for DiscoveryModalState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscoveryModalState")
+            .field("cidr", &self.cidr)
+            .field("community", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DiscoveryModalState {
@@ -701,7 +710,7 @@ fn start_poll_task(
 ) -> Result<PollTask, AppError> {
     let repository = Repository::new(
         rusqlite::Connection::open(database_path).map_err(|e| AppError::Database(e.to_string()))?,
-    );
+    )?;
     let db_devices = repository.list_devices()?;
     let total = db_devices.len();
 
@@ -890,8 +899,8 @@ impl TuiRenderer {
         if self.runner.flow_repository().is_none() {
             let repository = Repository::new(
                 rusqlite::Connection::open(self.runner.database_path())
-                    .expect("SQLite flow repository should open"),
-            );
+                    .map_err(|e| AppError::Database(e.to_string()))?,
+            )?;
             let repository = Arc::new(Mutex::new(repository));
             crate::flow::FlowCollector::start(
                 Arc::clone(&repository),
@@ -901,7 +910,7 @@ impl TuiRenderer {
         let repository = Repository::new(
             rusqlite::Connection::open(self.runner.database_path())
                 .map_err(|e| AppError::Database(e.to_string()))?,
-        );
+        )?;
 
         // TUI モードでも定期監視とアラート配信を行う（Web モードと同じポーリングループ）。
         {
@@ -909,7 +918,7 @@ impl TuiRenderer {
             let polling_repository = Arc::new(Mutex::new(Repository::new(
                 rusqlite::Connection::open(self.runner.database_path())
                     .map_err(|e| AppError::Database(e.to_string()))?,
-            )));
+            )?));
             let polling_alerts = self.runner.alert_broadcaster();
             std::thread::spawn(move || {
                 crate::web::server::run_polling_loop(
@@ -1694,7 +1703,7 @@ impl TuiRenderer {
                             } else {
                                 Style::default().fg(Color::Gray)
                             };
-                            let comm_input = Paragraph::new(modal.community.as_str())
+                            let comm_input = Paragraph::new("*".repeat(modal.community.chars().count()))
                                 .block(Block::default().borders(Borders::ALL).title(" SNMP Community ").style(comm_style));
                             f.render_widget(comm_input, inner_layout[1]);
 

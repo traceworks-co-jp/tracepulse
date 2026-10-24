@@ -4,12 +4,13 @@ use crate::db::models::{
     ProtocolShare, RecentAlert, TopTalker,
 };
 use crate::error::AppError;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Repository {
     connection: rusqlite::Connection,
+    key: crate::crypto::MasterKey,
 }
 
 fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
@@ -19,11 +20,13 @@ fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
 }
 
 impl Repository {
-    pub fn new(connection: rusqlite::Connection) -> Self {
-        Self { connection }
+    pub fn new(mut connection: rusqlite::Connection) -> Result<Self, AppError> {
+        let key = super::credentials::protect(&mut connection)?;
+        Ok(Self { connection, key })
     }
 
     pub fn save_device(&self, device: &Device) -> Result<i64, AppError> {
+        let community = self.protect_community(&device.ip, &device.community)?;
         let id = self.connection.execute(
             "INSERT INTO devices (name, ip, community, device_type, status, last_seen_at, created_at, updated_at, display_name, tags)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?7, ?8)
@@ -37,7 +40,7 @@ impl Repository {
             params![
                 device.name,
                 device.ip,
-                device.community,
+                community,
                 device.device_type,
                 device.status,
                 device.last_seen_at,
@@ -53,12 +56,13 @@ impl Repository {
         &self,
         device: &crate::device::types::DeviceConfig,
     ) -> Result<i64, AppError> {
+        let community = self.protect_community(&device.ip, &device.community)?;
         let maybe_existing = self.find_device_by_ip(&device.ip)?;
         let id = match maybe_existing {
             Some(existing) => {
                 self.connection.execute(
                     "UPDATE devices SET name = ?1, community = ?2, device_type = ?3, status = ?4, last_seen_at = ?5, updated_at = CURRENT_TIMESTAMP WHERE id = ?6",
-                    params![device.name, device.community, device.device_type, device.status, device.last_seen_at, existing.id.unwrap_or(0)],
+                    params![device.name, community, device.device_type, device.status, device.last_seen_at, existing.id.unwrap_or(0)],
                 )?;
                 existing.id.unwrap_or(0)
             }
@@ -66,7 +70,7 @@ impl Repository {
                 self.connection.execute(
                     "INSERT INTO devices (name, ip, community, device_type, status, last_seen_at, created_at, updated_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                    params![device.name, device.ip, device.community, device.device_type, device.status, device.last_seen_at],
+                    params![device.name, device.ip, community, device.device_type, device.status, device.last_seen_at],
                 )?;
                 self.connection.query_row(
                     "SELECT id FROM devices WHERE ip = ?1",
@@ -89,7 +93,7 @@ impl Repository {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 ip: row.get(2)?,
-                community: row.get(3)?,
+                community: self.read_community(row.get(3)?, ip)?,
                 device_type: row.get(4)?,
                 status: row.get(5)?,
                 last_seen_at: row.get(6)?,
@@ -150,7 +154,7 @@ impl Repository {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 ip: row.get(2)?,
-                community: row.get(3)?,
+                community: self.read_community(row.get(3)?, &row.get::<_, String>(2)?)?,
                 device_type: row.get(4)?,
                 status: row.get(5)?,
                 last_seen_at: row.get(6)?,
@@ -167,6 +171,44 @@ impl Repository {
         }
 
         Ok(devices)
+    }
+
+    fn protect_community(&self, ip: &str, value: &str) -> Result<String, AppError> {
+        if value == crate::crypto::MASK {
+            return Err(AppError::Validation(
+                "masked credentials cannot be saved".into(),
+            ));
+        }
+        if value.is_empty() {
+            if let Some(envelope) = self
+                .connection
+                .query_row("SELECT community FROM devices WHERE ip=?1", [ip], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?
+            {
+                self.key
+                    .decrypt(&envelope, super::credentials::context(ip).as_bytes())?;
+                return Ok(envelope);
+            }
+            return Err(AppError::Validation(
+                "community is required for a new device".into(),
+            ));
+        }
+        self.key
+            .encrypt(value.as_bytes(), super::credentials::context(ip).as_bytes())
+    }
+
+    fn read_community(&self, value: String, ip: &str) -> rusqlite::Result<String> {
+        self.key
+            .decrypt_string(&value, super::credentials::context(ip).as_bytes())
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })
     }
 
     pub fn update_device_metadata(
@@ -1652,5 +1694,123 @@ mod counter_tests {
     fn counter32_wrap_is_preserved_near_the_upper_boundary() {
         let previous = u32::MAX as u64 - 10;
         assert_eq!(counter32_delta(previous, 25), 36);
+    }
+
+    #[test]
+    fn high_frequency_metrics_never_invoke_encrypt_or_decrypt() {
+        use super::*;
+        use crate::{
+            crypto::CRYPTO_OPERATIONS, db::sqlite::initialize_database, device::DeviceConfig,
+        };
+        let repository =
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+                .unwrap();
+        let id = repository
+            .save_device_config(&DeviceConfig::new("192.0.2.1", "private"))
+            .unwrap();
+        let operations = CRYPTO_OPERATIONS.with(|count| count.get());
+        let metrics = DeviceMetrics {
+            id: None,
+            device_id: id,
+            cpu_usage: Some(42),
+            memory_usage: Some(53),
+            memory_used_bytes: Some(1024),
+            sampled_at: "2026-10-24 00:00:00".into(),
+        };
+        let mut interface =
+            crate::monitor::interface::InterfaceMonitor::new(1, "xe-0/0/0").into_sample(id);
+        interface.rx_optical_power_dbm = Some(-3.5);
+        interface.tx_power_dbm = Some(-4.2);
+        let transaction = repository.connection.unchecked_transaction().unwrap();
+        for _ in 0..1000 {
+            repository.save_device_metrics(&metrics).unwrap();
+            repository.save_sample(&interface).unwrap();
+        }
+        transaction.commit().unwrap();
+        assert_eq!(CRYPTO_OPERATIONS.with(|count| count.get()), operations);
+        let types: (String, String, String) = repository.connection.query_row(
+            "SELECT typeof(cpu_usage), typeof(memory_usage), typeof(memory_used_bytes) FROM device_metrics LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(
+            types,
+            ("integer".into(), "integer".into(), "integer".into())
+        );
+        assert_eq!(
+            repository
+                .get_latest_interface_sample(id, 1)
+                .unwrap()
+                .unwrap()
+                .rx_optical_power_dbm,
+            Some(-3.5)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual throughput comparison"]
+    fn metric_insert_throughput_matches_unencrypted_sql() {
+        use super::*;
+        use crate::{db::sqlite::initialize_database, device::DeviceConfig};
+        use std::time::Instant;
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            Repository::new(initialize_database(&directory.path().join("encrypted.db")).unwrap())
+                .unwrap();
+        let id = repository
+            .save_device_config(&DeviceConfig::new("192.0.2.1", "private"))
+            .unwrap();
+        let plain = initialize_database(&directory.path().join("plain.db")).unwrap();
+        plain.execute("INSERT INTO devices(id,name,ip,community,device_type) VALUES (1,'plain','192.0.2.1','private','switch')", []).unwrap();
+        let metrics = DeviceMetrics {
+            id: None,
+            device_id: id,
+            cpu_usage: Some(42),
+            memory_usage: Some(53),
+            memory_used_bytes: Some(1024),
+            sampled_at: "2026-10-24 00:00:00".into(),
+        };
+        let mut encrypted_times = Vec::new();
+        let mut plain_times = Vec::new();
+        for pass in 0..6 {
+            for encrypted in if pass % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let connection = if encrypted {
+                    &repository.connection
+                } else {
+                    &plain
+                };
+                let transaction = connection.unchecked_transaction().unwrap();
+                let start = Instant::now();
+                for _ in 0..10_000 {
+                    if encrypted {
+                        repository.save_device_metrics(&metrics).unwrap();
+                    } else {
+                        plain.execute(
+                            "INSERT INTO device_metrics (device_id, cpu_usage, memory_usage, memory_used_bytes, sampled_at)
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            params![id,42,53,1024,metrics.sampled_at],
+                        ).unwrap();
+                    }
+                }
+                transaction.commit().unwrap();
+                if encrypted {
+                    encrypted_times.push(start.elapsed());
+                } else {
+                    plain_times.push(start.elapsed());
+                }
+            }
+        }
+        encrypted_times.sort();
+        plain_times.sort();
+        println!(
+            "10,000 metric INSERTs median: protected repository {:?}; plain SQL {:?}; ratio {:.3}",
+            encrypted_times[3],
+            plain_times[3],
+            encrypted_times[3].as_secs_f64() / plain_times[3].as_secs_f64()
+        );
+        assert_eq!(repository.count_rows("device_metrics").unwrap(), 60_000);
     }
 }

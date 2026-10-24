@@ -14,10 +14,11 @@ services:
     # Remove the entire ports section when enabling host networking.
     # Docker Desktop requires host networking support to be enabled explicitly.
     volumes:
-      # Persists both data.db (including SQLite sidecars) and config.toml.
+      # Persists data.db, SQLite sidecars, encrypted config.toml, and secret.key.
       - tracepulse-data:/data
-      # Optional: mount an existing writable configuration file separately.
-      # - ./config.toml:/data/config.toml
+      # Alternative to the named volume: bind the whole writable data directory.
+      # - ./data:/data
+      # Do not bind config.toml alone: migration/settings use atomic replacement.
     cap_drop:
       - ALL
     cap_add:

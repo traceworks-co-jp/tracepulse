@@ -28,11 +28,20 @@ pub struct TemplateMetricReading {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SnmpClient {
     community: String,
     overrides: Option<SnmpConfig>,
     templates: std::sync::Arc<TemplateRegistry>,
+}
+
+impl std::fmt::Debug for SnmpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnmpClient")
+            .field("community", &"[REDACTED]")
+            .field("overrides", &self.overrides)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SnmpClient {
@@ -326,7 +335,7 @@ impl SnmpClient {
             .unwrap_or_else(|_| format!("{}-snmp", device.ip.replace('.', "-")));
 
         let sys_descr = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 1, 0])
-            .unwrap_or_else(|_| format!("reachable via SNMP v2c community '{}'", community));
+            .unwrap_or_else(|_| "reachable via SNMP v2c".to_string());
 
         let sys_object_id = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0]).ok();
 
@@ -399,7 +408,7 @@ impl SnmpClient {
         let sys_name = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 5, 0])
             .unwrap_or_else(|_| format!("{}-snmp", device.ip.replace('.', "-")));
         let sys_descr = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 1, 0])
-            .unwrap_or_else(|_| format!("reachable via SNMP v2c community '{}'", community));
+            .unwrap_or_else(|_| "reachable via SNMP v2c".to_string());
         let sys_object_id = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0]).ok();
         let vendor_enterprise_id = sys_object_id
             .as_deref()

@@ -195,19 +195,26 @@ and the Rust toolchain are not shipped.
 
 | Path / variable | Container default | Purpose |
 | --- | --- | --- |
-| `TRACEPULSE_DATA_DIR` | `/data` | Writable directory for `data.db`, SQLite sidecars, and `config.toml` |
+| `TRACEPULSE_DATA_DIR` | `/data` | Writable directory for `data.db`, SQLite sidecars, `config.toml`, and `secret.key` |
 | `TRACEPULSE_WEB_HOST` | `0.0.0.0` | Web UI bind address inside the container |
+| `TRACEPULSE_MASTER_KEY` | Unset | Optional 256-bit master key, encoded as 64 hex characters or standard padded Base64 |
+| `/data/secret.key` | Created automatically | Raw 32-byte master key when the environment override is absent; Unix mode `0600` |
 | `/data/custom_templates` | User TOML templates | Optional directory mount; loaded in addition to embedded RFC defaults at startup |
 | `/opt/tracepulse/config/services.toml` | Bundled service definitions | Optional file mount for custom service names |
 
 On first container startup, a default `config.toml` is copied into the data
 directory only if no configuration exists. Later starts preserve it, including
 changes saved from the Web UI. Both database and configuration are persisted by
-the single `/data` volume. To supply your own configuration, mount an existing
-file at `/data/config.toml` as shown in the Compose comments. Keep it writable
-if you want to save settings from the Web UI. Restart the container after
-manually editing the configuration. Keep `[web] port = 8080` when using the
+the single `/data` volume. To supply your own configuration, place it in a
+writable host data directory and mount that directory at `/data` instead of the
+named volume. Do not bind-mount `config.toml` alone: migration and settings saves
+atomically replace the file, which a single-file bind mount does not allow.
+Restart the container after manually editing the configuration.
+Keep `[web] port = 8080` when using the
 default port mapping, or update the mapping to match your configured port.
+Initial startup upgrades plaintext SNMP communities in the database and
+configuration to encrypted envelopes; see [Credential protection](#credential-protection)
+before upgrading, restoring a backup, or changing the master key.
 Without these environment variables, native binaries retain their existing
 executable-adjacent storage and loopback-only Web UI defaults.
 
@@ -386,6 +393,80 @@ whitespace is trimmed; tags are deduplicated case-sensitively. Bulk requests
 accept 1–1,000 distinct existing IDs, padding `0`–`10`, and unsigned 32-bit
 sequence numbers (overflow is rejected). Padding never truncates larger numbers.
 Aliases need not be unique.
+
+## Credential protection
+
+TracePulse encrypts **only `devices.community` and the persisted
+`[snmp].default_community` setting**. CPU, memory, interface counters, optical
+power, flow records, and other monitoring history remain ordinary SQLite values.
+No SQLCipher or OpenSSL is used.
+
+Each value has its own random 256-bit data key. ChaCha20-Poly1305 encrypts the
+value and wraps that data key with the master key, using separate random 12-byte
+nonces and authentication tags. Stored TEXT values start with `tpenc:v1:`.
+Authenticated context binds device secrets to their IP/column and separates
+configuration secrets. Copying an encrypted value to another device is rejected.
+Plaintext is recovered only in application memory for SNMP use. SNMP v1/v2c
+itself still transmits communities in plaintext on the network.
+
+### Keys and recovery
+
+- By default, first startup atomically creates `secret.key` beside `data.db`
+  and `config.toml` in the data directory. It contains **32 raw bytes**, not hex.
+  Unix files must have mode `0600`; generated Windows files have an owner-only
+  protected DACL. Keys and temporary configuration files are written with
+  restrictive permissions before secret bytes are written.
+- `TRACEPULSE_MASTER_KEY` takes precedence over the file. Supply exactly 32 bytes
+  encoded as 64 hex characters or standard padded Base64, ideally via a
+  container/Kubernetes secret manager. Invalid or empty overrides fail startup;
+  they never fall back to the file. An environment override does not generate a
+  replacement key file.
+- **Keep a recoverable copy of the correct master key separately from DB/config
+  backups.** Restoring a database or encrypted config requires that same key.
+  Losing it makes credentials unrecoverable. Missing, malformed, incorrect keys
+  or tampered envelopes stop startup rather than returning ciphertext as a
+  community or resetting credentials. Even an empty initialized database keeps
+  an authenticated key-verification envelope.
+- Do not simply replace the key or change the environment variable for existing
+  encrypted data: automatic key rotation is not implemented. To switch from a
+  file to the environment override, encode the **existing file's bytes**, not a
+  new random value. Keep all processes on the same key. Moving a DB/config to
+  another directory requires moving its key or configuring the matching override.
+
+### Upgrade and UI behavior
+
+Stop other TracePulse instances before the first upgrade. Database credential
+migration is transactional and authenticates existing envelopes. Once plaintext
+values are converted, a one-time SQLite `VACUUM` and WAL truncate checkpoint
+remove old plaintext from active database pages/sidecars. This requires free
+disk space and exclusive access; a durable cleanup marker makes interrupted
+cleanup retry on the next startup. Normal metric INSERTs do not call encryption
+or decryption and do not run this cleanup. The configuration file is atomically
+rewritten, preserving unrecognized TOML sections (formatting/comments may change).
+Old backups, filesystem snapshots, and deleted filesystem blocks are **not**
+securely erased by this migration; protect or retire those separately.
+
+Device APIs return `community: "********"` and/or `community_configured`, never
+the stored plaintext or envelope. Settings return an empty secret field plus a
+configured flag; blank updates retain the existing secret. Type a new community
+to replace it. Password inputs mask typed values, and SNMP diagnostic credentials
+are sent in POST bodies rather than query strings. Discovery results no longer
+echo communities; the browser retains the typed secret in memory for that scan's
+registrations, not in result HTML attributes. Generic device/config serialization omits secrets, and Debug
+representations redact them.
+
+This is encryption at rest, **not authentication or protection from a compromised
+running host**. An attacker with both the DB and key, or process-memory access,
+can decrypt credentials. A full `/data` backup includes the default key unless
+you separate it; prefer externally managed keys for DB-backup separation. Keep
+the data directory private, use TLS at your reverse proxy, and do not log HTTP
+request bodies or secret-bearing environment variables. Community edition still
+has no WebGUI login. `credentials`/`users` tables and SNMP v3 are not implemented;
+the reusable Argon2id hash/verify helpers are groundwork, not a new login system.
+
+Embedding integrations must handle the now-fallible `Repository::new` and
+`AppState::new` constructors so key or migration errors propagate instead of
+being ignored.
 
 ## Configuration & File Structure
 

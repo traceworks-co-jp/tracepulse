@@ -101,6 +101,7 @@ export function saveSettings(): void {
         .then((response) => response.json())
         .then((data: { ok?: boolean; error?: string }) => {
             if (data.ok) {
+                element<HTMLInputElement>("community").value = "";
                 try { localStorage.setItem("tracepulse-timezone", timezone); } catch { /* ignore */ }
                 showToast(true);
             } else showToast(false, data.error);

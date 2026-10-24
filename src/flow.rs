@@ -1598,11 +1598,12 @@ mod tests {
 
     #[test]
     fn rolls_ring_records_into_protocol_minute_aggregate() {
-        let path =
-            std::env::temp_dir().join(format!("tracepulse-flow-rollup-{}.db", std::process::id()));
-        let repository = Arc::new(Mutex::new(Repository::new(
-            initialize_database(&path).expect("database should initialize"),
-        )));
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
+        let repository = Arc::new(Mutex::new(
+            Repository::new(initialize_database(&path).expect("database should initialize"))
+                .unwrap(),
+        ));
         let observed_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let record = FlowRecord {
             exporter_ip: None,
