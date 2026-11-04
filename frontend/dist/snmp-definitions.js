@@ -635,10 +635,15 @@ var TracePulseSnmpDefinitions = (() => {
         { label: text("cpuCandidate"), path: `profile.cpu.candidates.${array(object(doc.cpu).candidates).length}`, value: "", commit: (next) => {
           doc.cpu = { ...object(doc.cpu), candidates: [...array(object(doc.cpu).candidates), next] };
         } },
-        { label: text("memorySource"), path: "profile.memory", value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false }, commit: (next) => {
-          if ("memory" in doc) object(doc.memory).fallbacks = [...array(object(doc.memory).fallbacks), next];
-          else doc.memory = next;
-        } },
+        {
+          label: text("memorySource"),
+          path: "profile.memory",
+          value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false },
+          commit: (next) => {
+            if ("memory" in doc) object(doc.memory).fallbacks = [...array(object(doc.memory).fallbacks), next];
+            else doc.memory = next;
+          }
+        },
         { label: text("customMetric"), path: `profile.metrics.${array(doc.metrics).length}`, value: arraySeed("profile.metrics", []), commit: (next) => {
           doc.metrics = [...array(doc.metrics), next];
         } }
