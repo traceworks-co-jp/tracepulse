@@ -4053,6 +4053,10 @@ pub fn shared_page_styles() -> &'static str {
     COMMON_CSS
 }
 
+pub fn shared_brand_head_html() -> &'static str {
+    BRAND_HEAD_HTML
+}
+
 pub fn shared_navigation_html(extension: &dyn WebExtensionProvider) -> String {
     navigation_html(Some(extension))
 }
