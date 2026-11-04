@@ -128,7 +128,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=TracePulse
             org.opencontainers.image.description=Portable SNMP network monitoring with an embedded Web UI
-            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push multi-architecture image
         uses: docker/build-push-action@v6

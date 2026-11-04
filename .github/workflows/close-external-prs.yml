@@ -1,0 +1,44 @@
+name: Close external pull requests
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  close-external-pr:
+    if: ${{ github.event.pull_request.state == 'open' && !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain policy and close pull request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pullNumber = context.issue.number;
+            const body = [
+              "Thank you for your interest in TracePulse Core.",
+              "",
+              "This repository accepts external contributions through GitHub Issues and Discussions, not code pull requests. This pull request has been closed without merging. Please open an Issue for bug reports, device/OID compatibility feedback, or feature requests.",
+              "",
+              "Please remove credentials, tokens, private addresses, serial numbers, and proprietary material from any report. For suspected security vulnerabilities, use the private reporting instructions in [SECURITY.md](https://github.com/traceworks-co-jp/trace-pulse/blob/main/SECURITY.md).",
+              "",
+              "See [CONTRIBUTING.md](https://github.com/traceworks-co-jp/trace-pulse/blob/main/CONTRIBUTING.md) for the contribution policy."
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: pullNumber,
+              body
+            });
+            await github.rest.pulls.update({
+              owner,
+              repo,
+              pull_number: pullNumber,
+              state: "closed"
+            });

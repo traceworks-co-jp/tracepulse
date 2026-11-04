@@ -409,15 +409,48 @@ var TracePulseSettings = (() => {
 
   // frontend/src/pages/settings.ts
   var metrics = ["cpu", "memory", "bandwidth", "error_rate"];
+  var validatedMetrics = /* @__PURE__ */ new Set();
+  var toastTimer;
   function element(id) {
     return document.getElementById(id);
   }
   function t(key) {
     return typeof window.t === "function" ? window.t(key) : key;
   }
+  function fieldError(input, message) {
+    const id = `${input.id}-error`;
+    let error = document.getElementById(id);
+    if (!error) {
+      error = document.createElement("p");
+      error.id = id;
+      error.className = "settings-field-error";
+      error.setAttribute("aria-live", "polite");
+      input.after(error);
+      const descriptions = new Set((input.getAttribute("aria-describedby") || "").split(" ").filter(Boolean));
+      descriptions.add(id);
+      input.setAttribute("aria-describedby", [...descriptions].join(" "));
+    }
+    error.textContent = message;
+    error.hidden = !message;
+    input.setAttribute("aria-invalid", String(Boolean(message)));
+  }
+  function validateMetric(metric) {
+    validatedMetrics.add(metric);
+    const warning = element(`${metric}_warning`);
+    const critical = element(`${metric}_critical`);
+    let warningError = !warning.value.trim() || !Number.isFinite(warning.valueAsNumber) || !warning.checkValidity() ? t("metric_threshold_range") : "";
+    let criticalError = !critical.value.trim() || !Number.isFinite(critical.valueAsNumber) || !critical.checkValidity() ? t("metric_threshold_range") : "";
+    if (!warningError && !criticalError && warning.valueAsNumber >= critical.valueAsNumber) {
+      warningError = t("metric_warning_order");
+      criticalError = t("metric_critical_order");
+    }
+    fieldError(warning, warningError);
+    fieldError(critical, criticalError);
+    return !warningError && !criticalError;
+  }
   function populateForm(values) {
+    validatedMetrics.clear();
     element("interval").value = String(values.interval);
-    element("community").value = values.community;
     element("timezone").value = values.timezone || "utc";
     try {
       localStorage.setItem("tracepulse-timezone", element("timezone").value);
@@ -427,6 +460,8 @@ var TracePulseSettings = (() => {
       const thresholds = values.thresholds?.[metric] || (metric === "error_rate" ? { warning: 5, critical: 10 } : { warning: 80, critical: 90 });
       element(`${metric}_warning`).value = String(thresholds.warning);
       element(`${metric}_critical`).value = String(thresholds.critical);
+      fieldError(element(`${metric}_warning`), "");
+      fieldError(element(`${metric}_critical`), "");
     }
     element("spike").value = String(values.spike);
     element("warn_t").value = String(values.warn);
@@ -449,19 +484,20 @@ var TracePulseSettings = (() => {
     }
   }
   function showToast(ok, message) {
+    window.clearTimeout(toastTimer);
     const success = element("toast-ok");
     const failure = element("toast-err");
     success.style.display = "none";
     failure.style.display = "none";
     if (ok) {
       success.style.display = "inline-block";
-      window.setTimeout(() => {
+      toastTimer = window.setTimeout(() => {
         success.style.display = "none";
       }, 3e3);
     } else {
-      failure.textContent = `x ${message || "Unknown error"}`;
+      failure.textContent = message || t("settings_save_failed");
       failure.style.display = "inline-block";
-      window.setTimeout(() => {
+      toastTimer = window.setTimeout(() => {
         failure.style.display = "none";
       }, 5e3);
     }
@@ -469,21 +505,25 @@ var TracePulseSettings = (() => {
   function saveSettings() {
     const timezone = element("timezone").value;
     const thresholds = {};
+    let firstInvalid;
     for (const metric of metrics) {
       const warningInput = element(`${metric}_warning`);
       const criticalInput = element(`${metric}_critical`);
       const warning = warningInput.valueAsNumber;
       const critical = criticalInput.valueAsNumber;
-      if (!warningInput.checkValidity() || !criticalInput.checkValidity() || !Number.isFinite(warning) || !Number.isFinite(critical) || warning >= critical) {
-        showToast(false, t("metric_threshold_invalid"));
-        warningInput.focus();
-        return;
+      if (!validateMetric(metric) && !firstInvalid) {
+        firstInvalid = warningInput.getAttribute("aria-invalid") === "true" ? warningInput : criticalInput;
       }
       thresholds[metric] = { warning, critical };
     }
+    if (firstInvalid) {
+      showToast(false, t("settings_invalid_input"));
+      firstInvalid.scrollIntoView({ block: "center" });
+      firstInvalid.focus({ preventScroll: true });
+      return;
+    }
     const payload = {
       interval_seconds: parseInt(element("interval").value, 10),
-      default_community: element("community").value,
       timezone,
       ...thresholds,
       spike_threshold: parseInt(element("spike").value, 10),
@@ -493,7 +533,6 @@ var TracePulseSettings = (() => {
     };
     fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
       if (data.ok) {
-        element("community").value = "";
         try {
           localStorage.setItem("tracepulse-timezone", timezone);
         } catch {
@@ -510,7 +549,19 @@ var TracePulseSettings = (() => {
   window.saveSettings = saveSettings;
   window.updateBar = updateBar;
   populateForm(window.INIT);
-  window.addEventListener("tracepulse-language-change", updateBar);
+  for (const metric of metrics) {
+    for (const level of ["warning", "critical"]) {
+      const input = element(`${metric}_${level}`);
+      input.addEventListener("blur", () => validateMetric(metric));
+      input.addEventListener("input", () => {
+        if (validatedMetrics.has(metric)) validateMetric(metric);
+      });
+    }
+  }
+  window.addEventListener("tracepulse-language-change", () => {
+    updateBar();
+    validatedMetrics.forEach((metric) => validateMetric(metric));
+  });
   document.addEventListener("DOMContentLoaded", () => initializeOnboarding());
   return __toCommonJS(settings_exports);
 })();

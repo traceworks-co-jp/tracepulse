@@ -2,7 +2,7 @@
 name = "tracepulse"
 version = "0.1.12"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [dependencies]
 tokio = { version = "1.53.1", features = ["full"] }
@@ -22,7 +22,7 @@ thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-snmp = "0.2.2"
+snmp2 = { version = "0.5.2", default-features = false, features = ["crypto-rust", "heap_buffers"] }
 ratatui = "0.28"
 crossterm = "0.28"
 socket2 = "0.5"

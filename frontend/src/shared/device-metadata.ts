@@ -1,4 +1,5 @@
 import { esc } from "./escape";
+import { credentialFields, credentialTitle, clearCredentials, readCredentials } from "./snmp-credentials";
 
 if (!document.getElementById("metadata-styles")) {
     const style = document.createElement("style");
@@ -105,10 +106,12 @@ export function editDeviceMetadata(device: DeviceIdentity, saved: () => void): v
         <input id="device-tag-input" maxlength="64" aria-describedby="device-tag-hint">
         <p id="device-tag-hint">${esc(metadataText("tagHint"))}</p>
         <button type="button" id="device-add-tag">${esc(metadataText("add"))}</button>
+        <button type="button" id="device-snmp-edit">${esc(credentialTitle())}</button>
         <p role="alert"></p><div class="metadata-actions">
         <button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
         <button type="submit">${esc(metadataText("save"))}</button></div></form>`);
     const input = element.querySelector<HTMLInputElement>("#device-tag-input")!;
+    element.querySelector<HTMLButtonElement>("#device-snmp-edit")!.onclick = () => editSnmpCredentials([device], saved);
     const error = element.querySelector<HTMLElement>("[role=alert]")!;
     const renderTags = (): void => {
         const chips = element.querySelector<HTMLElement>("#device-tag-chips")!;
@@ -158,6 +161,85 @@ export function editDeviceMetadata(device: DeviceIdentity, saved: () => void): v
 }
 
 interface RenameItem { id: number; ip: string; display_name: string; }
+export function editSnmpCredentials(devices: DeviceIdentity[], saved: () => void): void {
+    const element = dialog("device-snmp-dialog", credentialTitle());
+    element.insertAdjacentHTML("beforeend", `<form><p>${esc(metadataText("targets"))}: ${devices.length}</p>
+        <ul>${devices.map(device => `<li>${esc(device.ip || "")} ${esc(deviceLabel(device))}</li>`).join("")}</ul>
+        ${credentialFields("device-snmp")}
+        <p role="status" aria-live="polite"></p>
+        <p role="alert"></p><div class="metadata-actions"><button type="button" data-reset>${document.documentElement.lang === "ja" ? "共通設定へ戻す" : "Use global defaults"}</button>
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button><button type="submit">${esc(metadataText("save"))}</button></div></form>`);
+    element.querySelector<HTMLButtonElement>("[data-cancel]")!.onclick = () => { clearCredentials(element); element.close(); };
+    let busy = false;
+    let loading = false;
+    const individual = devices.length === 1 && Boolean(devices[0].ip);
+    const japanese = document.documentElement.lang === "ja";
+    const status = element.querySelector<HTMLElement>("[role=status]")!;
+    const failure = element.querySelector<HTMLElement>("[role=alert]")!;
+    const controls = element.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input,select,button");
+    const setBusy = (value: boolean): void => {
+        busy = value;
+        controls.forEach(control => { control.disabled = value; });
+    };
+    const controller = new AbortController();
+    element.addEventListener("cancel", event => { if (busy && !loading) event.preventDefault(); });
+    element.addEventListener("close", () => { controller.abort(); clearCredentials(element); });
+    const persist = async (defaults: boolean): Promise<void> => {
+        if (busy) return;
+        const credentials = defaults ? {} : readCredentials(element);
+        setBusy(true); failure.textContent = "";
+        try {
+            await post("/api/devices/snmp-credentials", { device_ids: devices.map(device => device.id), credentials, preserve_secrets: !defaults && individual });
+            clearCredentials(element); element.close(); saved();
+        } catch (reason) { failure.textContent = String(reason); }
+        finally { setBusy(false); }
+    };
+    element.querySelector<HTMLButtonElement>("[data-reset]")!.onclick = () => {
+        if (window.confirm(japanese ? "個別のSNMP認証情報を削除し、共通設定へ戻しますか？" : "Remove the device SNMP overrides and use global defaults?")) void persist(true);
+    };
+    element.querySelector<HTMLFormElement>("form")!.onsubmit = event => {
+        event.preventDefault(); void persist(false);
+    };
+    element.showModal();
+    if (individual) {
+        loading = true;
+        setBusy(true);
+        element.querySelector<HTMLButtonElement>("[data-cancel]")!.disabled = false;
+        status.textContent = japanese ? "設定を読み込んでいます…" : "Loading settings...";
+        const hint = element.querySelector<HTMLElement>("#device-snmp-hint")!;
+        hint.removeAttribute("data-i18n");
+        hint.textContent = japanese ? "保存済みのコミュニティとパスワードは表示しません。空欄のまま保存すると既存値を維持します。" : "Stored communities and passwords are not displayed. Leave them blank to keep existing values.";
+        void (async () => {
+            try {
+                const response = await fetch(`/api/device/${encodeURIComponent(devices[0].ip!)}/snmp-credentials`, { signal: controller.signal });
+                const data: { ok?: boolean; error?: string; devices?: { individual_configured: boolean; credentials: Record<string, string | null>; secret_configured: Record<string, boolean> } } = await response.json();
+                if (!response.ok || !data.ok || !data.devices) throw new Error(data.error || metadataText("failed"));
+                const view = data.devices;
+                for (const key of ["version", "v3_username", "v3_auth_protocol", "v3_priv_protocol"]) {
+                    const input = element.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-snmp=${key}]`)!;
+                    input.value = view.credentials[key] || "";
+                    if (key === "v3_username" && input instanceof HTMLInputElement) { input.type = "text"; input.autocomplete = "off"; }
+                }
+                for (const key of ["community", "v3_auth_password", "v3_priv_password"]) {
+                    const input = element.querySelector<HTMLInputElement>(`[data-snmp=${key}]`)!;
+                    input.removeAttribute("data-i18n-placeholder");
+                    input.placeholder = view.secret_configured[key]
+                        ? (japanese ? "設定済み（変更する場合のみ入力）" : "Configured (enter only to replace)")
+                        : (japanese ? "空欄の場合は共通設定を使用" : "Blank: use global defaults");
+                }
+                status.textContent = view.individual_configured
+                    ? (japanese ? "現在の設定：デバイス個別設定" : "Current settings: device overrides")
+                    : (japanese ? "現在の設定：共通設定を使用" : "Current settings: global defaults");
+                loading = false; setBusy(false);
+            } catch (reason) {
+                if (controller.signal.aborted) return;
+                status.textContent = ""; failure.textContent = String(reason);
+                element.querySelector<HTMLButtonElement>("[data-cancel]")!.disabled = false;
+            }
+        })();
+    }
+}
+
 export function bulkActions(devices: DeviceIdentity[], saved: () => void, individual = false): void {
     const ids = devices.map((device) => device.id).filter((id): id is number => typeof id === "number");
     const chooser = dialog("bulk-actions-dialog", metadataText(individual ? "actions" : "bulk"));
@@ -166,9 +248,11 @@ export function bulkActions(devices: DeviceIdentity[], saved: () => void, indivi
     chooser.insertAdjacentHTML("beforeend", `${list()}<div class="metadata-actions">
         <button type="button" data-action="tags">${esc(metadataText("bulkTags"))}</button>
         <button type="button" data-action="names">${esc(metadataText("bulkNames"))}</button>
+        <button type="button" data-action="snmp">${esc(credentialTitle())}</button>
         <button type="button" data-action="unregister">${esc(metadataText("unregister"))}</button>
         <button type="button" data-cancel>${esc(metadataText("cancel"))}</button></div>`);
     chooser.querySelector<HTMLButtonElement>("[data-cancel]")!.onclick = () => chooser.close();
+    chooser.querySelector<HTMLButtonElement>("[data-action=snmp]")!.onclick = () => { chooser.close(); editSnmpCredentials(devices, saved); };
     chooser.querySelector<HTMLButtonElement>("[data-action=names]")!.onclick = () => {
         chooser.close();
         if (individual) editDeviceMetadata(devices[0], saved);

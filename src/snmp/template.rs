@@ -108,6 +108,10 @@ pub struct NumericMetricTemplate {
     pub unit: String,
     pub label: String,
     pub data_type: NumericDataType,
+    #[serde(default = "default_metric_scale")]
+    pub scale: f64,
+    #[serde(default)]
+    pub aggregation: PercentageAggregation,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -472,12 +476,14 @@ impl VendorOidTemplate {
             if memory.mode == "direct" && memory.oid.is_empty() {
                 return Err("direct memory mode requires oid".into());
             }
-            if memory.mode == "calculated"
-                && (memory.used_prefix.is_empty()
-                    || (memory.free_prefix.is_empty() && memory.total_prefix.is_empty()))
-            {
+            let has_used_capacity = !memory.used_prefix.is_empty()
+                && (!memory.free_prefix.is_empty() || !memory.total_prefix.is_empty());
+            let has_free_total = memory.used_prefix.is_empty()
+                && !memory.free_prefix.is_empty()
+                && !memory.total_prefix.is_empty();
+            if memory.mode == "calculated" && !has_used_capacity && !has_free_total {
                 return Err(
-                    "calculated memory mode requires used_prefix and free_prefix or total_prefix"
+                    "calculated memory mode requires used plus free/total, or free plus total"
                         .into(),
                 );
             }
@@ -531,6 +537,9 @@ impl VendorOidTemplate {
                 || metric.label.trim().is_empty()
             {
                 return Err(format!("invalid or duplicate metric key '{}'", metric.key));
+            }
+            if !metric.scale.is_finite() || metric.scale <= 0.0 {
+                return Err(format!("invalid scale for metric '{}'", metric.key));
             }
             oids.push(&metric.oid);
         }
@@ -627,20 +636,60 @@ fn oid_has_prefix(oid: &str, prefix: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct TemplateRegistry {
     templates: Vec<VendorOidTemplate>,
+    sources: HashMap<String, String>,
 }
 
 impl TemplateRegistry {
+    pub fn templates(&self) -> &[VendorOidTemplate] {
+        &self.templates
+    }
+
+    pub fn source(&self, selector: &str) -> &str {
+        self.sources
+            .get(selector)
+            .map(String::as_str)
+            .unwrap_or("bundled")
+    }
+
+    pub fn from_templates(templates: Vec<VendorOidTemplate>) -> Result<Self, String> {
+        if templates.is_empty() || !templates[0].selector().is_empty() {
+            return Err("a generic fallback template is required".into());
+        }
+        let mut selectors = std::collections::HashSet::new();
+        for template in &templates {
+            template.validate()?;
+            if !selectors.insert(template.selector()) {
+                return Err("duplicate template selector".into());
+            }
+        }
+        Ok(Self {
+            templates,
+            sources: HashMap::new(),
+        })
+    }
+
     pub fn load(dir: &Path) -> Self {
         let templates = [
             include_str!("../../templates/generic.toml"),
             include_str!("../../templates/cisco.toml"),
             include_str!("../../templates/yamaha.toml"),
             include_str!("../../templates/juniper.toml"),
+            include_str!("../../templates/fortinet.toml"),
+            include_str!("../../templates/mikrotik.toml"),
+            include_str!("../../templates/arista.toml"),
+            include_str!("../../templates/paloalto.toml"),
+            include_str!("../../templates/ubiquiti.toml"),
+            include_str!("../../templates/hp_aos_s.toml"),
+            include_str!("../../templates/aruba_cx.toml"),
+            include_str!("../../templates/allied_telesis.toml"),
         ]
         .into_iter()
         .map(|content| toml::from_str(content).expect("bundled template must be valid"))
         .collect();
-        let mut registry = Self { templates };
+        let mut registry = Self {
+            templates,
+            sources: HashMap::new(),
+        };
         let mut paths = match std::fs::read_dir(dir) {
             Ok(entries) => entries
                 .filter_map(|entry| match entry {
@@ -690,6 +739,7 @@ impl TemplateRegistry {
                         continue;
                     }
                     tracing::info!("[Template] Loaded {:?}: {}", path, template.name);
+                    registry.sources.insert(selector.clone(), "byo".into());
                     if let Some(existing) = registry
                         .templates
                         .iter_mut()
@@ -728,7 +778,7 @@ impl TemplateRegistry {
 }
 
 impl VendorOidTemplate {
-    fn selector(&self) -> String {
+    pub fn selector(&self) -> String {
         self.sys_object_id_prefix
             .as_deref()
             .map(|prefix| prefix.trim_matches('.').to_string())
@@ -868,14 +918,14 @@ mod tests {
     }
 
     #[test]
-    fn bundles_standard_and_approved_vendor_definitions() {
+    fn bundles_standard_and_vendor_definitions() {
         let template_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
         let files: Vec<_> = std::fs::read_dir(template_dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
             .collect();
-        assert_eq!(files.len(), 4);
+        assert_eq!(files.len(), 12);
         for file in &files {
             toml::from_str::<VendorOidTemplate>(&std::fs::read_to_string(file).unwrap()).unwrap();
         }
@@ -899,12 +949,58 @@ mod tests {
             (9, "Cisco Network Device"),
             (1182, "Yamaha RT Series"),
             (2636, "Juniper Network Device"),
+            (14988, "MikroTik RouterOS"),
+            (25461, "Palo Alto Networks PAN-OS"),
+            (41112, "Ubiquiti UniFi / EdgeMAX"),
+            (11, "HPE ProCurve AOS-S"),
+            (47196, "Aruba AOS-CX"),
+            (207, "Allied Telesis CentreCOM"),
         ] {
             assert_eq!(
                 registry.select(Some(&format!("1.3.6.1.4.1.{id}.1"))).name,
                 name
             );
         }
+        assert_eq!(
+            registry.select(Some("1.3.6.1.4.1.12356.101.4.1.1.0")).name,
+            "Fortinet FortiGate"
+        );
+        assert_eq!(
+            registry.select(Some("1.3.6.1.4.1.30065.1.1.0")).name,
+            "Arista EOS"
+        );
+        let fortinet = registry.select(Some("1.3.6.1.4.1.12356.101.4.1.1.0"));
+        assert_eq!(fortinet.cpu.candidates[0], "1.3.6.1.4.1.12356.101.4.1.3.0");
+        assert_eq!(fortinet.memory.primary.oid, "1.3.6.1.4.1.12356.101.4.1.4.0");
+        assert_eq!(
+            fortinet.numeric_metrics[0].oid,
+            "1.3.6.1.4.1.12356.101.4.1.8.0"
+        );
+        let mikrotik = registry.select(Some("1.3.6.1.4.1.14988.1.1.1"));
+        assert_eq!(mikrotik.cpu.candidates[0], "1.3.6.1.2.1.25.3.3.1.2");
+        assert_eq!(mikrotik.numeric_metrics.len(), 2);
+        assert!(mikrotik.numeric_metrics.iter().any(|metric| {
+            metric.oid == "1.3.6.1.4.1.14988.1.1.3.8.0" && metric.unit == "V" && metric.scale == 0.1
+        }));
+        assert!(mikrotik.numeric_metrics.iter().any(|metric| {
+            metric.oid == "1.3.6.1.4.1.14988.1.1.3.10.0"
+                && metric.unit == "C"
+                && metric.scale == 0.1
+        }));
+        let arista = registry.select(Some("1.3.6.1.4.1.30065.1.1.0"));
+        assert_eq!(arista.cpu.candidates[0], "1.3.6.1.2.1.25.3.3.1.2");
+        assert!(arista.sensors.is_empty());
+        let paloalto = registry.select(Some("1.3.6.1.4.1.25461.2.1.2.3.1.0"));
+        assert_eq!(paloalto.cpu.candidates[0], "1.3.6.1.4.1.25461.2.1.2.3.1.0");
+        assert_eq!(paloalto.numeric_metrics.len(), 3);
+        let ubiquiti = registry.select(Some("1.3.6.1.4.1.41112.1.4.1.1.1.0"));
+        assert_eq!(ubiquiti.numeric_metrics.len(), 3);
+        let hp = registry.select(Some("1.3.6.1.4.1.11.2.14.11.5.1.9.6.1.0"));
+        assert_eq!(hp.numeric_metrics.len(), 2);
+        let aruba = registry.select(Some("1.3.6.1.4.1.47196.1.1.1"));
+        assert_eq!(aruba.name, "Aruba AOS-CX");
+        let allied = registry.select(Some("1.3.6.1.4.1.207.8.44.4.1.1.1.0"));
+        assert_eq!(allied.memory.primary.oid, "1.3.6.1.4.1.207.8.44.4.1.1.2.0");
         assert_eq!(
             registry.select(Some("1.3.6.1.4.1.999999.1")).enterprise_id,
             0
@@ -1040,7 +1136,7 @@ data_type = "gauge"
             "name = 'Bad'\nenterprise_id = 65001\n[cpu]\ncandidates = ['IF-MIB::ifIndex']",
         );
         let registry = TemplateRegistry::load(&dir.0);
-        assert_eq!(registry.templates.len(), 5);
+        assert_eq!(registry.templates.len(), 13);
         assert_eq!(registry.select(Some("1.3.6.1.4.1.65000.1")).name, "First");
         assert_eq!(
             registry.select(Some("1.3.6.1.4.1.65001.1")).enterprise_id,
@@ -1079,6 +1175,10 @@ data_type = "gauge"
                 metric.replace("'gauge'", "'unknown'")
             ))
             .is_err()
+        );
+        assert!(
+            toml::from_str::<VendorOidTemplate>(&format!("name = 'Bad'\n{metric}\nscale = 0"))
+                .is_err()
         );
         for suffix in [
             "sysObjectID_prefix = '1.3.x'",

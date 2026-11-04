@@ -11,6 +11,13 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
 
     connection.execute_batch(
         r#"
+        CREATE TABLE IF NOT EXISTS snmp_definitions (
+            id INTEGER PRIMARY KEY CHECK(id = 1),
+            generation INTEGER NOT NULL,
+            document TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS devices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -24,6 +31,11 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip);
+
+        CREATE TABLE IF NOT EXISTS device_snmp_credentials (
+            device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+            envelope TEXT NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS interface_samples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +76,21 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(device_id) REFERENCES devices(id)
         );
+
+        CREATE TABLE IF NOT EXISTS template_metric_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id INTEGER NOT NULL,
+            metric_key TEXT NOT NULL,
+            label TEXT NOT NULL,
+            unit TEXT NOT NULL,
+            data_type TEXT NOT NULL CHECK(data_type IN ('gauge', 'counter')),
+            value TEXT NOT NULL,
+            sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(device_id) REFERENCES devices(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_template_metric_samples_device_key_sampled
+            ON template_metric_samples(device_id, metric_key, sampled_at DESC);
 
         CREATE TABLE IF NOT EXISTS flow_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,6 +155,10 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
             ON device_metrics(device_id, sampled_at DESC);
         CREATE INDEX IF NOT EXISTS idx_interface_samples_device_sampled
             ON interface_samples(device_id, sampled_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_device_metrics_dashboard_latest
+            ON device_metrics(device_id, sampled_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_interface_samples_dashboard_latest
+            ON interface_samples(device_id, if_index, sampled_at DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_alert_events_device_created
             ON alert_events(device_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_flow_records_observed

@@ -1,24 +1,46 @@
 # Contributing to TracePulse
 
-Thank you for your interest in contributing to TracePulse. Contributions are welcome, including bug fixes, feature improvements, documentation updates, and vendor template changes.
+Thank you for your interest in TracePulse Core.
 
-## Before You Start: Issue First
+## Contribution Policy: Issues, Not External Code PRs
 
-For typos, documentation-only changes, and small, self-contained bug fixes, you may open a Pull Request directly.
+To keep code provenance and release review manageable, TracePulse Core accepts
+external contributions through GitHub Issues and Discussions, not code pull
+requests. Pull requests from external contributors are not accepted or merged
+and may be closed without review. Pull requests are reserved for the project
+owner and authorized maintainers/collaborators.
 
-For a new feature or a large specification, architectural, or behavioral change, please discuss it in a GitHub Issue or Discussion **before opening a Pull Request**. Early discussion helps confirm that the proposal fits TracePulse's goals, including its Rust implementation, portable single-binary distribution, and TUI/Web UI support. It also helps avoid rework or a rejected Pull Request.
+Reports and proposals are welcome, but an Issue does not guarantee that a
+change will be implemented. The maintainer may investigate and implement a
+change independently based on the reported behavior or requirements.
 
-For usage questions and environment-specific support, please use [GitHub Discussions](https://github.com/traceworks-co-jp/trace-pulse/discussions).
+## How You Can Help
+
+- **Bug reports**: Include the TracePulse version, operating system, steps to
+   reproduce, expected behavior, and actual behavior.
+- **Device and OID compatibility**: Include the vendor, exact model, firmware
+   version, affected OID or feature, and sanitized command output where useful.
+- **Feature requests**: Describe the problem, affected workflow, and expected
+   outcome rather than submitting code.
+
+Before posting logs or SNMP output, remove communities, passwords, tokens,
+private addresses, serial numbers, and other sensitive information. Do not
+upload proprietary MIB files or material you are not authorized to share.
+
+For usage questions and environment-specific support, use
+[GitHub Discussions](https://github.com/traceworks-co-jp/trace-pulse/discussions).
+For suspected security vulnerabilities, follow the private reporting
+instructions in [SECURITY.md](SECURITY.md); do not report them in a public Issue.
 
 ## Scope and Non-Goals of TracePulse Core
 
-TracePulse Core covers self-hosted SNMP monitoring of multiple devices, CIDR discovery, local alert recording and display, and interactive TUI and Web UI diagnostics. Contributions to these capabilities, including vendor templates, are welcome within the Community edition's documented limits.
+TracePulse Core covers self-hosted SNMP monitoring of multiple devices, CIDR discovery, local alert recording and display, and Web UI diagnostics. Issue reports about these capabilities, including vendor template compatibility, are welcome within the Community edition's documented limits.
 
 Outbound alert delivery (including Slack, Teams, and email), multi-user RBAC, SIEM integrations, and Enterprise-only analytics are outside Core's scope. These capabilities are considered separately for TracePulse Enterprise; their mention here does not mean they are currently available. See the [Community Edition and Enterprise Features](README.md#community-edition-and-enterprise-features) section for the implementation boundary and edition limits.
 
-Discuss new features or changes that could cross this boundary in a GitHub Issue or Discussion before submitting a Pull Request.
+Use a GitHub Issue or Discussion to ask whether a proposal fits this boundary.
 
-## Local Development Setup
+## Reproducing Issues Locally
 
 ### Prerequisites
 
@@ -49,23 +71,18 @@ Build the project with Cargo:
 cargo build
 ```
 
-Run the interactive terminal interface (TUI):
-
-```bash
-cargo run -- --cli
-```
-
 Run the embedded Web UI:
 
 ```bash
 cargo run -- --web
 ```
 
-When using Web UI mode, open `http://localhost:8080` in a browser after the server starts. TracePulse uses local configuration and SQLite data files during development; do not include local databases, credentials, or environment-specific secrets in a Pull Request.
+When using Web UI mode, open `http://localhost:8080` in a browser after the server starts. TracePulse uses local configuration and SQLite data files during development; do not include local databases, credentials, or environment-specific secrets in a public Issue.
 
-## Code Quality
+## Optional Local Validation
 
-Before submitting a Pull Request, run all of the following commands locally from the repository root and make sure they pass:
+If you build TracePulse to reproduce an Issue, these checks can help verify the
+local environment. They are not a request for an external code contribution.
 
 ```bash
 # Check formatting
@@ -78,49 +95,6 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
-Please keep changes focused and follow the existing Rust module structure and project conventions. Add or update tests when behavior changes. Documentation changes should describe the behavior that is actually implemented.
-
-## Commit Messages
-
-New commit messages are strongly recommended to be written in English. Use the [Conventional Commits](https://www.conventionalcommits.org/) format:
-
-```text
-<type>(optional scope): <short description>
-```
-
-Common types include:
-
-- `feat:` A new feature, such as `feat(snmp): add SNMPv3 support`
-- `fix:` A bug fix, such as `fix(tui): prevent layout overflow on narrow terminals`
-- `docs:` Documentation changes
-- `refactor:` Code changes that do not alter behavior
-- `test:` Adding or updating tests
-- `chore:` Maintenance changes
-
-Use a concise, imperative description and keep unrelated changes in separate commits when practical.
-
-## Pull Request Workflow
-
-1. Start from an up-to-date `main` branch and create a feature branch. Do not work directly on `main`.
-
-   ```bash
-   git switch main
-   git pull origin main
-   git switch -c feature/short-description
-   ```
-
-2. Make the smallest focused change that addresses the Issue or agreed proposal.
-3. Run the complete code quality checks listed above.
-4. Commit your changes using the commit message guidelines.
-5. Push the feature branch to your fork or working remote.
-
-   ```bash
-   git push -u origin feature/short-description
-   ```
-
-6. Open a Pull Request against the official repository's `main` branch.
-7. Respond to review feedback and keep the branch up to date if requested.
-
 ### Optical transceiver templates
 
 For optical transceiver templates, see the
@@ -129,18 +103,4 @@ Verify the actual power units, raw scale/sentinels, and mapping to ifIndex;
 never assume sensor indices are interface indices. Include model/firmware and
 sanitized validation evidence, and do not commit proprietary MIB source text.
 
-### Pull Request Checklist
-
-Before submitting your Pull Request, confirm that:
-
-- [ ] The change is linked to an existing Issue or prior Discussion when it is a new feature or large change.
-- [ ] The Pull Request description explains what changed and why.
-- [ ] The change is limited to the intended scope.
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy -- -D warnings` passes.
-- [ ] `cargo test` passes.
-- [ ] Tests or documentation have been updated where needed.
-- [ ] No credentials, local databases, generated build output, or unrelated files are included.
-- [ ] The target branch is `main`.
-
-Thank you for helping make TracePulse more useful and reliable.
+Thank you for helping improve TracePulse through clear, reproducible reports.

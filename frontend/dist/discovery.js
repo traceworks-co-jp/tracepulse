@@ -91,6 +91,71 @@ var TracePulseDiscovery = (() => {
     });
   });
 
+  // frontend/src/shared/snmp-credentials.ts
+  var japanese = () => document.documentElement.lang === "ja";
+  var text = (key, fallback) => window.t?.(key) || fallback;
+  var credentialTitle = () => text("snmp_credential_title", japanese() ? "SNMP\u8A8D\u8A3C\u60C5\u5831" : "SNMP credentials");
+  function credentialFields(prefix, global = false, includeCommunity = true) {
+    if (!document.getElementById("snmp-credential-styles")) {
+      const style = document.createElement("style");
+      style.id = "snmp-credential-styles";
+      style.textContent = `.snmp-credential-fields{display:grid;gap:12px;min-width:0;border:0;padding:0;margin:12px 0}
+            .snmp-credential-fields label{display:grid;gap:6px;font-size:.88rem;min-width:0}
+            .snmp-credential-fields input,.snmp-credential-fields select{box-sizing:border-box;width:100%;min-width:0;padding:8px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-bg,#0f172a);color:var(--tp-text,#e2e8f0)}
+            .snmp-credential-fields p{margin:0;font-size:.82rem;overflow-wrap:anywhere}
+            #snmp-connection-form{max-width:680px}#snmp-connection-form .field-row{grid-template-columns:1fr}
+            #snmp-connection-form .secret-input input{box-sizing:border-box;width:100%}
+            #manual-box .snmp-credential-fields{flex:1 1 100%}
+            html[data-theme=light] .snmp-credential-fields input,html[data-theme=light] .snmp-credential-fields select{background:#fff;color:#0f172a;border-color:#cbd5e1}`;
+      document.head.append(style);
+    }
+    const hintKey = global ? "snmp_credential_keep_hint" : "snmp_credential_inherit_hint";
+    const hint = text(hintKey, global ? "Leave blank to keep existing defaults." : "Blank fields inherit global defaults. Saving replaces the current device overrides.");
+    const optionKey = global ? "snmp_credential_unchanged" : "snmp_credential_global";
+    const label = (key, fallback) => `<span data-i18n="snmp_credential_${key}">${esc(text(`snmp_credential_${key}`, fallback))}</span>`;
+    const input = (key, fallback) => `<label for="${prefix}-${key}">${label(key, fallback)}<input id="${prefix}-${key}" data-snmp="${key}" type="password" autocomplete="new-password" maxlength="1024" placeholder="${esc(hint)}" data-i18n-placeholder="${hintKey}" aria-describedby="${prefix}-hint"></label>`;
+    const protocolLabels = { "2c": "SNMPv2c", "3": "SNMPv3", sha1: "SHA-1", sha256: "SHA-256", sha512: "SHA-512", aes128: "AES-128" };
+    const select = (key, fallback, options) => `<label for="${prefix}-${key}">${label(key, fallback)}<select id="${prefix}-${key}" data-snmp="${key}"><option value="" data-i18n="${optionKey}">${esc(text(optionKey, global ? "Unchanged" : "Global default"))}</option>${options.map((value) => value === "none" ? `<option value="none" data-i18n="snmp_credential_none">${esc(text("snmp_credential_none", "None"))}</option>` : `<option value="${value}">${esc(protocolLabels[value] || value)}</option>`).join("")}</select></label>`;
+    return `<fieldset class="snmp-credential-fields">
+        <legend data-i18n="snmp_credential_title">${esc(credentialTitle())}</legend><p id="${prefix}-hint" data-i18n="${hintKey}">${esc(hint)}</p>
+        ${select("version", "SNMP version", ["2c", "3"])}
+        ${includeCommunity ? input("community", "Community (SNMPv2c)") : ""}
+        ${input("v3_username", "v3 username")}
+        ${select("v3_auth_protocol", "v3 authentication", ["sha256", "sha512", "sha1", "none"])}
+        ${input("v3_auth_password", "v3 authentication password")}
+        ${select("v3_priv_protocol", "v3 privacy", ["aes128", "none"])}
+        ${input("v3_priv_password", "v3 privacy password")}
+    </fieldset>`;
+  }
+  function readCredentials(container) {
+    const credentials = {};
+    container.querySelectorAll("[data-snmp]").forEach((input) => {
+      if (input.value) credentials[input.dataset.snmp] = input.value;
+    });
+    return credentials;
+  }
+  function clearCredentials(container) {
+    container.querySelectorAll("[data-snmp]").forEach((input) => {
+      input.value = "";
+    });
+  }
+
+  // frontend/src/shared/status.ts
+  function deviceStatusClass(status) {
+    switch (status?.trim().toLowerCase()) {
+      case "online":
+        return "status-online";
+      case "offline":
+        return "status-offline";
+      case "warning":
+        return "status-warning";
+      case "critical":
+        return "status-critical";
+      default:
+        return "status-unknown";
+    }
+  }
+
   // frontend/src/pages/discovery.ts
   var scanTimeoutSeconds = 300;
   var pollIntervalMs = 1500;
@@ -285,7 +350,7 @@ var TracePulseDiscovery = (() => {
     devices.forEach((device) => {
       const registered = existingIps().has(device.ip);
       const row = document.createElement("tr");
-      row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${device.status === "online" ? "status-online" : "status-unknown"}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
+      row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${deviceStatusClass(device.status)}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
       tbody.appendChild(row);
     });
     el("results-section").style.display = "block";
@@ -339,20 +404,23 @@ var TracePulseDiscovery = (() => {
   async function addManual() {
     const ip = el("manual-ip").value.trim();
     const name = el("manual-name").value.trim() || `device-${ip.split(".").pop()}`;
-    const community = el("manual-community").value.trim() || "public";
+    const community = el("manual-community").value;
+    const snmp_credentials = readCredentials(el("manual-box"));
     const result = el("manual-result");
     if (!ip) {
       result.textContent = "! IP address is required.";
       return;
     }
     try {
-      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community }]) });
+      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community, snmp_credentials }]) });
       const data = await response.json();
-      result.textContent = data.error || data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`;
+      result.textContent = data.error || data.errors?.join("; ") || (data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`);
       if (data.registered.length) {
         existingIps().add(ip);
         el("manual-ip").value = "";
         el("manual-name").value = "";
+        el("manual-community").value = "";
+        clearCredentials(el("manual-box"));
       }
     } catch (error) {
       result.textContent = String(error);
@@ -369,6 +437,8 @@ var TracePulseDiscovery = (() => {
   window.updateHint = updateHint;
   window.updateRegisterBtn = updateRegisterBtn;
   window.applyPageLanguage = applyPageLanguage;
+  var manualCommunity = document.getElementById("manual-community");
+  manualCommunity?.parentElement?.insertAdjacentHTML("afterend", credentialFields("manual-snmp", false, false));
   for (const id of ["community", "manual-community"]) {
     const input = document.getElementById(id);
     if (input instanceof HTMLInputElement) addSecretVisibility(input);

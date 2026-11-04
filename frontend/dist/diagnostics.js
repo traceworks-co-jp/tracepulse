@@ -26,7 +26,6 @@ var TracePulseDiagnostics = (() => {
     openActiveDiagnostic: () => openActiveDiagnostic,
     openActiveDiagnosticWithPortPrompt: () => openActiveDiagnosticWithPortPrompt,
     registerDiagnosticExtension: () => registerDiagnosticExtension,
-    saveOidOverrides: () => saveOidOverrides,
     startDiagnostics: () => startDiagnostics
   });
   function t(key) {
@@ -73,6 +72,7 @@ var TracePulseDiagnostics = (() => {
     style.textContent += ".diag-port-dialog-backdrop{position:fixed;inset:0;z-index:1300;display:grid;place-items:center;background:#0008}.diag-port-dialog{width:min(320px,calc(100vw - 2rem));padding:1rem;border:1px solid #475569;border-radius:6px;background:#0f172a;color:#f8fafc;box-shadow:0 8px 24px #000}.diag-port-dialog h3{margin:0 0 1rem}.diag-port-dialog label{display:flex;flex-direction:column;gap:.5rem;color:#94a3b8}.diag-port-dialog input{padding:.55rem;background:#020617;border:1px solid #475569;color:#fff}.diag-port-dialog div{display:flex;justify-content:flex-end;gap:1rem;margin-top:1.25rem}.diag-port-dialog button{padding:.6rem 1rem;border:0;background:#334155;color:#fff;cursor:pointer;min-width:7rem}.diag-port-dialog button[type=submit]{background:#0ea5e9}";
     style.textContent += ".diag-error-hint{color:#fecaca;line-height:1.4}.diag-result-message{display:block!important;color:#cbd5e1;line-height:1.5}.diag-result-message strong{display:block!important;margin-top:.35rem;text-align:left!important;font-weight:400}.diag-result-verdict strong{color:#4ade80;font-size:.95rem}";
     style.textContent += ".diag-result-verdict.failed strong{color:#f87171}.diag-result-verdict.partial strong{color:#fbbf24}.diag-result-card{max-width:100%;overflow-wrap:anywhere}";
+    style.textContent += "html[data-theme='light'] #active-diagnostic-panel{background:#fff!important;color:#152337!important;box-shadow:-8px 0 24px #0002}html[data-theme='light'] #active-diagnostic-panel header,html[data-theme='light'] #active-diagnostic-panel footer,html[data-theme='light'] #active-diagnostic-panel .diag-tabs{border-color:#d5e0e8}html[data-theme='light'] #active-diagnostic-panel .diag-tabs button{background:#f1f5f9;color:#475569;border-right-color:#d5e0e8}html[data-theme='light'] #active-diagnostic-panel .diag-tabs button.active{background:#148f83;color:#fff}html[data-theme='light'] #active-diagnostic-target{color:#0f766e}html[data-theme='light'] #active-diagnostic-output{color:#334155}html[data-theme='light'] #active-diagnostic-output.connecting{color:#64748b}html[data-theme='light'] .diag-error-line{background:#fef2f2;color:#991b1b;border-left-color:#dc2626}html[data-theme='light'] .diag-result-card{background:#f8fafc;border-color:#d5e0e8}html[data-theme='light'] .diag-result-card h3{color:#152337}html[data-theme='light'] .diag-result-row{border-top-color:#e2e8f0}html[data-theme='light'] .diag-result-label{color:#64748b}html[data-theme='light'] .diag-result-row strong{color:#152337}html[data-theme='light'] .diag-result-message{color:#334155}html[data-theme='light'] .diag-result-verdict strong{color:#15803d}html[data-theme='light'] .diag-result-verdict.failed strong{color:#b91c1c}html[data-theme='light'] .diag-result-verdict.partial strong{color:#b45309}html[data-theme='light'] .diag-error-hint{color:#991b1b}html[data-theme='light'] .diag-port-dialog{background:#fff!important;border-color:#cbd5e1!important;color:#152337!important;box-shadow:0 8px 24px #0002!important}html[data-theme='light'] .diag-port-dialog h3{color:#152337}html[data-theme='light'] .diag-port-dialog label{color:#475569}html[data-theme='light'] .diag-port-dialog input{background:#fff;border-color:#cbd5e1;color:#152337}html[data-theme='light'] .diag-port-dialog button{background:#e2e8f0;color:#152337}html[data-theme='light'] .diag-port-dialog button[type=submit]{background:#148f83;color:#fff}";
     panel.querySelectorAll(".diag-tabs button").forEach((button) => button.addEventListener("click", () => {
       const kind = button.dataset.kind || "ping";
       const tab = diagnosticExtension?.tabs.find((entry) => entry.kind === kind);
@@ -268,39 +268,6 @@ ${JSON.stringify(result.data, null, 2)}`).join("\n\n")}`;
     });
     return false;
   }
-  function collectHardwareOids() {
-    return Array.from(document.querySelectorAll(".hardware-oid-input")).map((input) => {
-      const oid = input.value.trim();
-      const type = input.getAttribute("data-sensor-type") || "temperature";
-      return oid ? `${type}|${oid}` : "";
-    }).filter(Boolean);
-  }
-  function saveOidOverrides() {
-    const payload = {
-      cpu_oid_override: document.getElementById("cpu-oid-override")?.value || "",
-      memory_oid_override: document.getElementById("memory-oid-override")?.value || "",
-      hardware_oid_overrides: collectHardwareOids()
-    };
-    fetch("/api/diagnostics/oids", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
-      const element = document.getElementById("oid-save-result");
-      if (!element) return;
-      if (data.ok) {
-        element.className = "diag-note";
-        element.textContent = t("settings_saved");
-        window.setTimeout(() => window.location.reload(), 300);
-      } else {
-        element.textContent = data.error || "Save failed";
-        element.className = "diag-note diag-error";
-      }
-    }).catch((error) => {
-      const element = document.getElementById("oid-save-result");
-      if (element) {
-        element.textContent = String(error);
-        element.className = "diag-note diag-error";
-      }
-    });
-  }
-  window.saveOidOverrides = saveOidOverrides;
   window.startDiagnostics = startDiagnostics;
   window.openActiveDiagnostic = openActiveDiagnostic;
   window.openActiveDiagnosticWithPortPrompt = openActiveDiagnosticWithPortPrompt;

@@ -48,6 +48,67 @@ var TracePulseDeviceDetail = (() => {
     return String(value === null || value === void 0 ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\x22/g, "&quot;").replace(/\x27/g, "&#39;");
   }
 
+  // frontend/src/shared/secret-visibility.ts
+  window.addEventListener("tracepulse-language-change", () => {
+    document.querySelectorAll(".secret-toggle").forEach((button) => {
+      const key = button.getAttribute("aria-pressed") === "true" ? "hide_community" : "show_community";
+      const label = window.t?.(key);
+      if (label) {
+        button.setAttribute("aria-label", label);
+        button.title = label;
+      }
+    });
+  });
+
+  // frontend/src/shared/snmp-credentials.ts
+  var japanese = () => document.documentElement.lang === "ja";
+  var text = (key, fallback) => window.t?.(key) || fallback;
+  var credentialTitle = () => text("snmp_credential_title", japanese() ? "SNMP\u8A8D\u8A3C\u60C5\u5831" : "SNMP credentials");
+  function credentialFields(prefix, global = false, includeCommunity = true) {
+    if (!document.getElementById("snmp-credential-styles")) {
+      const style = document.createElement("style");
+      style.id = "snmp-credential-styles";
+      style.textContent = `.snmp-credential-fields{display:grid;gap:12px;min-width:0;border:0;padding:0;margin:12px 0}
+            .snmp-credential-fields label{display:grid;gap:6px;font-size:.88rem;min-width:0}
+            .snmp-credential-fields input,.snmp-credential-fields select{box-sizing:border-box;width:100%;min-width:0;padding:8px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-bg,#0f172a);color:var(--tp-text,#e2e8f0)}
+            .snmp-credential-fields p{margin:0;font-size:.82rem;overflow-wrap:anywhere}
+            #snmp-connection-form{max-width:680px}#snmp-connection-form .field-row{grid-template-columns:1fr}
+            #snmp-connection-form .secret-input input{box-sizing:border-box;width:100%}
+            #manual-box .snmp-credential-fields{flex:1 1 100%}
+            html[data-theme=light] .snmp-credential-fields input,html[data-theme=light] .snmp-credential-fields select{background:#fff;color:#0f172a;border-color:#cbd5e1}`;
+      document.head.append(style);
+    }
+    const hintKey = global ? "snmp_credential_keep_hint" : "snmp_credential_inherit_hint";
+    const hint = text(hintKey, global ? "Leave blank to keep existing defaults." : "Blank fields inherit global defaults. Saving replaces the current device overrides.");
+    const optionKey = global ? "snmp_credential_unchanged" : "snmp_credential_global";
+    const label = (key, fallback) => `<span data-i18n="snmp_credential_${key}">${esc(text(`snmp_credential_${key}`, fallback))}</span>`;
+    const input = (key, fallback) => `<label for="${prefix}-${key}">${label(key, fallback)}<input id="${prefix}-${key}" data-snmp="${key}" type="password" autocomplete="new-password" maxlength="1024" placeholder="${esc(hint)}" data-i18n-placeholder="${hintKey}" aria-describedby="${prefix}-hint"></label>`;
+    const protocolLabels = { "2c": "SNMPv2c", "3": "SNMPv3", sha1: "SHA-1", sha256: "SHA-256", sha512: "SHA-512", aes128: "AES-128" };
+    const select = (key, fallback, options) => `<label for="${prefix}-${key}">${label(key, fallback)}<select id="${prefix}-${key}" data-snmp="${key}"><option value="" data-i18n="${optionKey}">${esc(text(optionKey, global ? "Unchanged" : "Global default"))}</option>${options.map((value) => value === "none" ? `<option value="none" data-i18n="snmp_credential_none">${esc(text("snmp_credential_none", "None"))}</option>` : `<option value="${value}">${esc(protocolLabels[value] || value)}</option>`).join("")}</select></label>`;
+    return `<fieldset class="snmp-credential-fields">
+        <legend data-i18n="snmp_credential_title">${esc(credentialTitle())}</legend><p id="${prefix}-hint" data-i18n="${hintKey}">${esc(hint)}</p>
+        ${select("version", "SNMP version", ["2c", "3"])}
+        ${includeCommunity ? input("community", "Community (SNMPv2c)") : ""}
+        ${input("v3_username", "v3 username")}
+        ${select("v3_auth_protocol", "v3 authentication", ["sha256", "sha512", "sha1", "none"])}
+        ${input("v3_auth_password", "v3 authentication password")}
+        ${select("v3_priv_protocol", "v3 privacy", ["aes128", "none"])}
+        ${input("v3_priv_password", "v3 privacy password")}
+    </fieldset>`;
+  }
+  function readCredentials(container) {
+    const credentials = {};
+    container.querySelectorAll("[data-snmp]").forEach((input) => {
+      if (input.value) credentials[input.dataset.snmp] = input.value;
+    });
+    return credentials;
+  }
+  function clearCredentials(container) {
+    container.querySelectorAll("[data-snmp]").forEach((input) => {
+      input.value = "";
+    });
+  }
+
   // frontend/src/shared/device-metadata.ts
   if (!document.getElementById("metadata-styles")) {
     const style = document.createElement("style");
@@ -189,10 +250,12 @@ var TracePulseDeviceDetail = (() => {
         <input id="device-tag-input" maxlength="64" aria-describedby="device-tag-hint">
         <p id="device-tag-hint">${esc(metadataText("tagHint"))}</p>
         <button type="button" id="device-add-tag">${esc(metadataText("add"))}</button>
+        <button type="button" id="device-snmp-edit">${esc(credentialTitle())}</button>
         <p role="alert"></p><div class="metadata-actions">
         <button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
         <button type="submit">${esc(metadataText("save"))}</button></div></form>`);
     const input = element.querySelector("#device-tag-input");
+    element.querySelector("#device-snmp-edit").onclick = () => editSnmpCredentials([device], saved);
     const error = element.querySelector("[role=alert]");
     const renderTags = () => {
       const chips = element.querySelector("#device-tag-chips");
@@ -248,6 +311,117 @@ var TracePulseDeviceDetail = (() => {
     };
     renderTags();
     element.showModal();
+  }
+  function editSnmpCredentials(devices, saved) {
+    const element = dialog("device-snmp-dialog", credentialTitle());
+    element.insertAdjacentHTML("beforeend", `<form><p>${esc(metadataText("targets"))}: ${devices.length}</p>
+        <ul>${devices.map((device) => `<li>${esc(device.ip || "")} ${esc(deviceLabel(device))}</li>`).join("")}</ul>
+        ${credentialFields("device-snmp")}
+        <p role="status" aria-live="polite"></p>
+        <p role="alert"></p><div class="metadata-actions"><button type="button" data-reset>${document.documentElement.lang === "ja" ? "\u5171\u901A\u8A2D\u5B9A\u3078\u623B\u3059" : "Use global defaults"}</button>
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button><button type="submit">${esc(metadataText("save"))}</button></div></form>`);
+    element.querySelector("[data-cancel]").onclick = () => {
+      clearCredentials(element);
+      element.close();
+    };
+    let busy = false;
+    let loading = false;
+    const individual = devices.length === 1 && Boolean(devices[0].ip);
+    const japanese2 = document.documentElement.lang === "ja";
+    const status = element.querySelector("[role=status]");
+    const failure = element.querySelector("[role=alert]");
+    const controls = element.querySelectorAll("input,select,button");
+    const setBusy = (value) => {
+      busy = value;
+      controls.forEach((control) => {
+        control.disabled = value;
+      });
+    };
+    const controller = new AbortController();
+    element.addEventListener("cancel", (event) => {
+      if (busy && !loading) event.preventDefault();
+    });
+    element.addEventListener("close", () => {
+      controller.abort();
+      clearCredentials(element);
+    });
+    const persist = async (defaults) => {
+      if (busy) return;
+      const credentials = defaults ? {} : readCredentials(element);
+      setBusy(true);
+      failure.textContent = "";
+      try {
+        await post("/api/devices/snmp-credentials", { device_ids: devices.map((device) => device.id), credentials, preserve_secrets: !defaults && individual });
+        clearCredentials(element);
+        element.close();
+        saved();
+      } catch (reason) {
+        failure.textContent = String(reason);
+      } finally {
+        setBusy(false);
+      }
+    };
+    element.querySelector("[data-reset]").onclick = () => {
+      if (window.confirm(japanese2 ? "\u500B\u5225\u306ESNMP\u8A8D\u8A3C\u60C5\u5831\u3092\u524A\u9664\u3057\u3001\u5171\u901A\u8A2D\u5B9A\u3078\u623B\u3057\u307E\u3059\u304B\uFF1F" : "Remove the device SNMP overrides and use global defaults?")) void persist(true);
+    };
+    element.querySelector("form").onsubmit = (event) => {
+      event.preventDefault();
+      void persist(false);
+    };
+    element.showModal();
+    if (individual) {
+      loading = true;
+      setBusy(true);
+      element.querySelector("[data-cancel]").disabled = false;
+      status.textContent = japanese2 ? "\u8A2D\u5B9A\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059\u2026" : "Loading settings...";
+      const hint = element.querySelector("#device-snmp-hint");
+      hint.removeAttribute("data-i18n");
+      hint.textContent = japanese2 ? "\u4FDD\u5B58\u6E08\u307F\u306E\u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\u3068\u30D1\u30B9\u30EF\u30FC\u30C9\u306F\u8868\u793A\u3057\u307E\u305B\u3093\u3002\u7A7A\u6B04\u306E\u307E\u307E\u4FDD\u5B58\u3059\u308B\u3068\u65E2\u5B58\u5024\u3092\u7DAD\u6301\u3057\u307E\u3059\u3002" : "Stored communities and passwords are not displayed. Leave them blank to keep existing values.";
+      void (async () => {
+        try {
+          const response = await fetch(`/api/device/${encodeURIComponent(devices[0].ip)}/snmp-credentials`, { signal: controller.signal });
+          const data = await response.json();
+          if (!response.ok || !data.ok || !data.devices) throw new Error(data.error || metadataText("failed"));
+          const view = data.devices;
+          for (const key of ["version", "v3_username", "v3_auth_protocol", "v3_priv_protocol"]) {
+            const input = element.querySelector(`[data-snmp=${key}]`);
+            input.value = view.credentials[key] || "";
+            if (key === "v3_username" && input instanceof HTMLInputElement) {
+              input.type = "text";
+              input.autocomplete = "off";
+            }
+          }
+          for (const key of ["community", "v3_auth_password", "v3_priv_password"]) {
+            const input = element.querySelector(`[data-snmp=${key}]`);
+            input.removeAttribute("data-i18n-placeholder");
+            input.placeholder = view.secret_configured[key] ? japanese2 ? "\u8A2D\u5B9A\u6E08\u307F\uFF08\u5909\u66F4\u3059\u308B\u5834\u5408\u306E\u307F\u5165\u529B\uFF09" : "Configured (enter only to replace)" : japanese2 ? "\u7A7A\u6B04\u306E\u5834\u5408\u306F\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Blank: use global defaults";
+          }
+          status.textContent = view.individual_configured ? japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u30C7\u30D0\u30A4\u30B9\u500B\u5225\u8A2D\u5B9A" : "Current settings: device overrides" : japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Current settings: global defaults";
+          loading = false;
+          setBusy(false);
+        } catch (reason) {
+          if (controller.signal.aborted) return;
+          status.textContent = "";
+          failure.textContent = String(reason);
+          element.querySelector("[data-cancel]").disabled = false;
+        }
+      })();
+    }
+  }
+
+  // frontend/src/shared/status.ts
+  function interfaceStatusClass(status) {
+    switch (status?.trim().toLowerCase()) {
+      case "up":
+        return "link-up";
+      case "down":
+      case "lowerlayerdown":
+        return "link-down";
+      case "testing":
+        return "status-warning";
+      default:
+        return "status-unknown";
+    }
   }
 
   // frontend/src/shared/format.ts
@@ -504,11 +678,110 @@ var TracePulseDeviceDetail = (() => {
     if (!numericDelta) return totalText;
     return `${totalText}<span class='counter-delta duplex'> (+${fmtNum(numericDelta)})</span>`;
   }
-  function errorBreakdownPopoverHtml(errorBreakdown = {}, metrics = {}) {
-    return `<div class='err-pop'><div class='err-pop-title'>${t("error_breakdown_hover_title")}</div><div class='err-pop-row'><span class='n'>${t("in_errors")}</span><span class='v'>+${fmtNum(metrics.in_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("out_errors")}</span><span class='v'>+${fmtNum(metrics.out_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("in_discards")}</span><span class='v'>+${fmtNum(metrics.in_discards_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("out_discards")}</span><span class='v'>+${fmtNum(metrics.out_discards_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("late_collisions")}</span><span class='v'>+${fmtNum(metrics.late_collisions_delta)}</span></div><div class='err-pop-divider'></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_fcs_errors")}</span><span class='v'>+${fmtNum(errorBreakdown.fcs_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_alignment_errors")}</span><span class='v'>+${fmtNum(errorBreakdown.alignment_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_frame_too_longs")}</span><span class='v'>+${fmtNum(errorBreakdown.frame_too_longs_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_internal_mac_receive_errors")}</span><span class='v'>+${fmtNum(errorBreakdown.internal_mac_receive_errors_delta)}</span></div></div>`;
+  var activeErrorPopover;
+  var dismissedErrorPopoverTrigger;
+  var errorPopoverTimer;
+  var errorPopoverSequence = 0;
+  function closeErrorPopover() {
+    window.clearTimeout(errorPopoverTimer);
+    if (!activeErrorPopover) return;
+    const { trigger, popup } = activeErrorPopover;
+    if (typeof popup.hidePopover === "function" && popup.matches(":popover-open")) popup.hidePopover();
+    popup.classList.remove("is-open");
+    popup.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (trigger.isConnected) trigger.append(popup);
+    else popup.remove();
+    activeErrorPopover = void 0;
   }
-  function formatCounterWithBreakdown(total, delta, errorBreakdown, metrics, flipPopover = false) {
-    return `<span class='err-cell${flipPopover ? " flip" : ""}' tabindex='0'>${formatCounter(total, delta)}${errorBreakdownPopoverHtml(errorBreakdown, metrics)}</span>`;
+  function positionErrorPopover() {
+    if (!activeErrorPopover) return;
+    const { trigger, popup } = activeErrorPopover;
+    const bounds = trigger.getBoundingClientRect();
+    const scrollRegion = trigger.closest(".table-scroll")?.getBoundingClientRect();
+    if (!trigger.isConnected || bounds.bottom < 0 || bounds.top > window.innerHeight || scrollRegion && (bounds.bottom <= scrollRegion.top || bounds.top >= scrollRegion.bottom || bounds.right <= scrollRegion.left || bounds.left >= scrollRegion.right)) {
+      closeErrorPopover();
+      return;
+    }
+    const margin = 8, gap = 6;
+    popup.style.maxHeight = `${Math.max(0, window.innerHeight - margin * 2)}px`;
+    const naturalHeight = popup.getBoundingClientRect().height;
+    const below = window.innerHeight - bounds.bottom - gap - margin;
+    const above = bounds.top - gap - margin;
+    const openBelow = naturalHeight <= below || below >= above;
+    popup.style.maxHeight = `${Math.max(1, openBelow ? below : above)}px`;
+    const size = popup.getBoundingClientRect();
+    const top = openBelow ? bounds.bottom + gap : bounds.top - size.height - gap;
+    popup.style.left = `${Math.max(margin, Math.min(bounds.left, window.innerWidth - size.width - margin))}px`;
+    popup.style.top = `${Math.max(margin, Math.min(top, window.innerHeight - size.height - margin))}px`;
+  }
+  function bindErrorPopovers(container) {
+    container.querySelectorAll(".err-cell").forEach((trigger) => {
+      const popup = trigger.querySelector(".err-pop");
+      popup.id = `interface-error-breakdown-${++errorPopoverSequence}`;
+      trigger.setAttribute("aria-describedby", popup.id);
+      const show = () => {
+        window.clearTimeout(errorPopoverTimer);
+        if (activeErrorPopover?.trigger === trigger) return;
+        closeErrorPopover();
+        document.body.append(popup);
+        activeErrorPopover = { trigger, popup };
+        popup.hidden = false;
+        popup.classList.add("is-open");
+        if (typeof popup.showPopover === "function") {
+          popup.setAttribute("popover", "manual");
+          popup.showPopover();
+        }
+        trigger.setAttribute("aria-expanded", "true");
+        positionErrorPopover();
+      };
+      const leave = (event) => {
+        const target = event.relatedTarget;
+        if (target instanceof Node && (trigger.contains(target) || popup.contains(target))) return;
+        errorPopoverTimer = window.setTimeout(() => {
+          if (document.activeElement !== trigger && !trigger.matches(":hover") && !popup.matches(":hover")) closeErrorPopover();
+        }, 120);
+      };
+      trigger.addEventListener("mouseenter", () => {
+        if (dismissedErrorPopoverTrigger !== trigger) show();
+      });
+      trigger.addEventListener("mousemove", () => {
+        if (dismissedErrorPopoverTrigger !== trigger) return;
+        dismissedErrorPopoverTrigger = void 0;
+        show();
+      });
+      trigger.addEventListener("mouseleave", leave);
+      trigger.addEventListener("focus", show);
+      trigger.addEventListener("blur", closeErrorPopover);
+      trigger.addEventListener("click", show);
+      trigger.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          show();
+        }
+      });
+      popup.addEventListener("mouseenter", () => window.clearTimeout(errorPopoverTimer));
+      popup.addEventListener("mouseleave", leave);
+    });
+  }
+  window.addEventListener("scroll", (event) => {
+    if (event.target instanceof Node && activeErrorPopover?.popup.contains(event.target)) return;
+    positionErrorPopover();
+  }, true);
+  window.addEventListener("resize", closeErrorPopover);
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    dismissedErrorPopoverTrigger = activeErrorPopover?.trigger;
+    closeErrorPopover();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (event.target instanceof Node && activeErrorPopover && !activeErrorPopover.trigger.contains(event.target) && !activeErrorPopover.popup.contains(event.target)) closeErrorPopover();
+  });
+  function errorBreakdownPopoverHtml(errorBreakdown = {}, metrics = {}) {
+    return `<div class='err-pop' role='tooltip' hidden><div class='err-pop-title'>${t("error_breakdown_hover_title")}</div><div class='err-pop-row'><span class='n'>${t("in_errors")}</span><span class='v'>+${fmtNum(metrics.in_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("out_errors")}</span><span class='v'>+${fmtNum(metrics.out_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("in_discards")}</span><span class='v'>+${fmtNum(metrics.in_discards_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("out_discards")}</span><span class='v'>+${fmtNum(metrics.out_discards_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("late_collisions")}</span><span class='v'>+${fmtNum(metrics.late_collisions_delta)}</span></div><div class='err-pop-divider'></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_fcs_errors")}</span><span class='v'>+${fmtNum(errorBreakdown.fcs_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_alignment_errors")}</span><span class='v'>+${fmtNum(errorBreakdown.alignment_errors_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_frame_too_longs")}</span><span class='v'>+${fmtNum(errorBreakdown.frame_too_longs_delta)}</span></div><div class='err-pop-row'><span class='n'>${t("error_breakdown_internal_mac_receive_errors")}</span><span class='v'>+${fmtNum(errorBreakdown.internal_mac_receive_errors_delta)}</span></div></div>`;
+  }
+  function formatCounterWithBreakdown(total, delta, errorBreakdown, metrics) {
+    return `<span class='err-cell' tabindex='0' role='button' aria-expanded='false' aria-label='${esc(t("error_breakdown_hover_title"))}'>${formatCounter(total, delta)}${errorBreakdownPopoverHtml(errorBreakdown, metrics)}</span>`;
   }
   function diagnosticBadge(status) {
     const diagnostics = {
@@ -524,22 +797,23 @@ var TracePulseDeviceDetail = (() => {
   function renderInterfaces(ifaces = []) {
     const tbody = document.getElementById("if-tbody");
     if (!tbody) return;
+    closeErrorPopover();
     if (ifaces.length === 0) {
       tbody.innerHTML = `<tr><td colspan=13 class=no-data>${t("no_interface_data")}</td></tr>`;
       return;
     }
     const spikeThreshold = window.TRACEPULSE_SPIKE_THRESHOLD || 10;
-    tbody.innerHTML = ifaces.map((iface, index) => {
+    tbody.innerHTML = ifaces.map((iface) => {
       const metrics = iface.metrics || {};
-      const linkClass = iface.link_status === "up" ? "link-up" : "link-down";
+      const linkClass = interfaceStatusClass(iface.link_status);
       const errorDelta = Math.max(metrics.in_errors_delta || 0, metrics.out_errors_delta || 0);
       const discardDelta = Math.max(metrics.in_discards_delta || 0, metrics.out_discards_delta || 0);
       const rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? " row-crit" : errorDelta > 0 || discardDelta > 0 ? " row-warn" : "";
       const predictiveStatus = iface.predictive_status;
       const predictiveBadge = predictiveStatus && (predictiveStatus.dom_warning || predictiveStatus.trend_warning) ? "<span class='pred-badge'>[PRED]</span>" : "";
-      const flipErrorPopover = index >= ifaces.length - 2;
-      return `<tr class='${rowClass.trim()}'><td>${iface.if_index}</td><td>${esc(iface.if_name)}${predictiveBadge}</td><td><span class=${linkClass}>${esc(iface.link_status)}</span></td><td>${diagnosticBadge(iface.health_status)}</td><td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td><td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td><td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td><td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td><td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td><td>${(Number(metrics.bandwidth_utilization || 0) * 100).toFixed(1)}%</td><td>${opticalPowerHtml(iface.tx_power_dbm)}</td><td>${opticalPowerHtml(iface.rx_power_dbm === void 0 ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td><td>${fmtTime(iface.sampled_at)}</td></tr>`;
+      return `<tr class='${rowClass.trim()}'><td>${iface.if_index}</td><td>${esc(iface.if_name)}${predictiveBadge}</td><td><span class=${linkClass}>${esc(iface.link_status)}</span></td><td>${diagnosticBadge(iface.health_status)}</td><td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics)}</td><td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics)}</td><td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td><td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td><td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td><td>${Number(metrics.bandwidth_utilization || 0).toFixed(1)}%</td><td>${opticalPowerHtml(iface.tx_power_dbm)}</td><td>${opticalPowerHtml(iface.rx_power_dbm === void 0 ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td><td>${fmtTime(iface.sampled_at)}</td></tr>`;
     }).join("");
+    bindErrorPopovers(tbody);
   }
   function opticalPowerHtml(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
@@ -561,7 +835,9 @@ var TracePulseDeviceDetail = (() => {
       const cls = sensor.is_alarm || sensor.status_kind === "critical" ? "hardware-card crit" : sensor.status_kind === "warning" ? "hardware-card warn" : sensor.status_kind === "normal" ? "hardware-card" : sensor.status !== null && sensor.status !== void 0 && sensor.status !== 0 ? "hardware-card warn" : "hardware-card";
       const label = sensor.name || (sensor.source === "entity-physical" ? `component ${sensor.index}` : `sensor ${sensor.index}`);
       const displayValue = sensor.status_text ? sensor.status_text : sensor.value !== null && sensor.value !== void 0 ? `${sensor.value}${sensor.unit ? ` ${sensor.unit}` : ""}` : sensor.status !== null && sensor.status !== void 0 ? sensor.status : "N/A";
-      return `<div class='${cls}'><div class='label'>${esc(label)}</div><div class='value'>${esc(displayValue)}</div></div>`;
+      const hasNumericValue = sensor.value !== null && sensor.value !== void 0;
+      const stateClass = sensor.status_text || !hasNumericValue ? cls.endsWith("crit") ? "status-critical" : cls.endsWith("warn") ? "status-warning" : sensor.status_kind === "normal" ? "status-online" : "status-unknown" : "";
+      return `<div class='${cls}'><div class='label'>${esc(label)}</div><div class='value ${stateClass}'>${esc(displayValue)}</div></div>`;
     }).join("");
   }
   function renderTemplateMetrics(metrics = [], error) {
@@ -620,7 +896,7 @@ var TracePulseDeviceDetail = (() => {
       return;
     }
     tbody.innerHTML = spikes.map((spike) => {
-      const linkClass = spike.link_status === "up" ? "link-up" : "link-down";
+      const linkClass = interfaceStatusClass(spike.link_status);
       return `<tr><td>${fmtTime(spike.latest_sampled_at)}</td><td>${esc(spike.if_name)} (if-${spike.if_index || 0})</td><td><span class=${linkClass}>${esc(spike.link_status)}</span></td><td>${fmtNum(spike.in_errors_delta)}</td><td>${fmtNum(spike.out_errors_delta)}</td><td>${fmtNum(spike.in_discards_delta)}</td><td>${fmtNum(spike.out_discards_delta)}</td><td>${fmtNum(spike.total_delta)}</td></tr>`;
     }).join("");
   }

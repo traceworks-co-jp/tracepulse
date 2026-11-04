@@ -52,7 +52,6 @@ declare global {
         resetDefaults?: () => void;
         saveSettings?: () => void;
         updateBar?: () => void;
-        saveOidOverrides?: () => void;
         startDiagnostics?: (event: SubmitEvent) => boolean;
         openActiveDiagnostic?: (target: string, kind: string, port?: number) => void;
         openActiveDiagnosticWithPortPrompt?: (target: string, kind: string, port?: number) => void;

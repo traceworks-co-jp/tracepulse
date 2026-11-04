@@ -10,8 +10,34 @@ permissions:
   id-token: write
 
 jobs:
+  generate-third-party-notices:
+    name: Generate third-party notices
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-about
+        run: cargo install cargo-about --locked --version 0.9.3 --features cli
+
+      - name: Generate Rust dependency notices
+        run: cargo about generate --locked --fail -o THIRD_PARTY_NOTICES.txt about.txt.hbs
+
+      - name: Upload generated notices
+        uses: actions/upload-artifact@v4
+        with:
+          name: third-party-notices
+          path: THIRD_PARTY_NOTICES.txt
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.target }}
+    needs: generate-third-party-notices
     runs-on: ${{ matrix.os }}
     environment: production
     strategy:
@@ -38,6 +64,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Download generated third-party notices
+        uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: third-party-notices
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -139,7 +171,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path release-package | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/${{ matrix.binary }}" release-package/
           Copy-Item -Recurse templates release-package/templates
-          Copy-Item LICENSE-MIT,LICENSE-APACHE,SECURITY.md,THIRD_PARTY_LICENSES.html release-package/
+          Copy-Item LICENSE-APACHE,SECURITY.md,THIRD_PARTY_LICENSES.html release-package/
+          Copy-Item third-party-notices/THIRD_PARTY_NOTICES.txt release-package/
           Compress-Archive -Path release-package/* -DestinationPath "${{ matrix.archive }}"
 
       - name: Package Unix binary
@@ -149,7 +182,8 @@ jobs:
           mkdir -p release-package
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" release-package/
           cp -R templates release-package/templates
-          cp LICENSE-MIT LICENSE-APACHE SECURITY.md THIRD_PARTY_LICENSES.html release-package/
+          cp LICENSE-APACHE SECURITY.md THIRD_PARTY_LICENSES.html release-package/
+          cp third-party-notices/THIRD_PARTY_NOTICES.txt release-package/
           tar -czf "${{ matrix.archive }}" -C release-package .
 
       - name: Upload build artifact

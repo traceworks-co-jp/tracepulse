@@ -51,8 +51,12 @@ impl PollingEngine {
         &self,
         device: &DeviceConfig,
     ) -> Result<(SystemMonitor, Vec<InterfaceSample>), AppError> {
-        let client =
-            SnmpClient::with_snmp_config(device.community.clone(), self.config.snmp.clone());
+        let config = self.repository.resolved_snmp_config(
+            &device.ip,
+            &self.config.snmp,
+            &device.community,
+        )?;
+        let client = SnmpClient::with_snmp_config(config.default_community.clone(), config);
         let info = client.query_device(device)?;
         let system = SystemMonitor::from_snmp_device_info(&info);
 

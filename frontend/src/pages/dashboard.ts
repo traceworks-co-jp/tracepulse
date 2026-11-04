@@ -3,6 +3,7 @@ import { fmtTime, formatTracePulseClock } from "../shared/format";
 import { initializeOnboarding } from "../shared/onboarding";
 import { bulkActions, deviceLabel, metadataText } from "../shared/device-metadata";
 import { initializeDeviceFilters } from "../shared/device-filters";
+import { deviceStatusClass as statusClass } from "../shared/status";
 
 interface DashboardDevice {
     id?: number | null;
@@ -64,15 +65,6 @@ function statusOrder(status?: string): number {
     return order[status || ""] ?? 5;
 }
 
-function statusClass(status?: string | null): string {
-    switch (status) {
-        case "online": return "status-online";
-        case "offline": return "status-offline";
-        case "warning": return "status-warning";
-        case "critical": return "status-critical";
-        default: return "status-unknown";
-    }
-}
 
 function compareValue(a: DashboardDevice, b: DashboardDevice, column: (typeof columns)[number]): number {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
@@ -135,7 +127,7 @@ export function renderTable(): void {
         const actionButton = `<button type="button" class="device-action-button" data-action-device="${escapeHtml(device.ip)}" aria-haspopup="dialog" ${deleting || typeof device.id !== "number" ? "disabled" : ""}>${escapeHtml(metadataText("actions"))}</button>`;
         const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
         const healthBadgeClass = statusClass(device.health_status);
-        const health = typeof device.health_score === "number" ? `<span class="${escapeHtml(healthBadgeClass)}">${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label="${escapeHtml(t("health_score"))}" style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
+        const health = typeof device.health_score === "number" && Number.isFinite(device.health_score) ? `<span class="${healthBadgeClass}">${device.health_score}/100</span><span class="health-meter ${healthBadgeClass}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, Math.max(0, device.health_score))}" aria-label="${escapeHtml(t("health_score"))}"><span class="health-meter-fill" style="width:${Math.min(100, Math.max(0, device.health_score))}%"></span></span>` : "-";
         const checkbox = typeof device.id === "number" ? `<input type="checkbox" data-device-id="${device.id}" aria-label="${escapeHtml(`${metadataText("select")} ${device.ip}`)}" ${selectedIds.has(device.id) ? "checked" : ""}>` : "";
         const tags = (device.tags || []).map((tag) => `<span class="device-tag">${escapeHtml(tag)}</span>`).join("");
         return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${escapeHtml(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${escapeHtml(device.ip)}</a></td><td>${escapeHtml(deviceLabel(device))}${spikeBadge}</td><td>${escapeHtml(device.name || "-")}</td><td>${tags ? `<div class="device-tags">${tags}</div>` : "-"}</td><td><span class="${escapeHtml(statusBadgeClass)}">${escapeHtml(device.status)}</span></td><td>${health}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;

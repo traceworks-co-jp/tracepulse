@@ -1,5 +1,6 @@
 import { esc as escapeHtml } from "../shared/escape";
 import { deviceLabel, editDeviceMetadata, metadataText } from "../shared/device-metadata";
+import { interfaceStatusClass } from "../shared/status";
 import {
     fmtNum,
     fmtTime,
@@ -397,8 +398,106 @@ function formatLateCollisions(total: unknown, delta: unknown): string {
     return `${totalText}<span class='counter-delta duplex'> (+${fmtNum(numericDelta)})</span>`;
 }
 
+let activeErrorPopover: { trigger: HTMLElement; popup: HTMLElement } | undefined;
+let dismissedErrorPopoverTrigger: HTMLElement | undefined;
+let errorPopoverTimer: number | undefined;
+let errorPopoverSequence = 0;
+
+function closeErrorPopover(): void {
+    window.clearTimeout(errorPopoverTimer);
+    if (!activeErrorPopover) return;
+    const { trigger, popup } = activeErrorPopover;
+    if (typeof popup.hidePopover === "function" && popup.matches(":popover-open")) popup.hidePopover();
+    popup.classList.remove("is-open");
+    popup.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    if (trigger.isConnected) trigger.append(popup); else popup.remove();
+    activeErrorPopover = undefined;
+}
+
+function positionErrorPopover(): void {
+    if (!activeErrorPopover) return;
+    const { trigger, popup } = activeErrorPopover;
+    const bounds = trigger.getBoundingClientRect();
+    const scrollRegion = trigger.closest(".table-scroll")?.getBoundingClientRect();
+    if (!trigger.isConnected || bounds.bottom < 0 || bounds.top > window.innerHeight || (scrollRegion && (bounds.bottom <= scrollRegion.top || bounds.top >= scrollRegion.bottom || bounds.right <= scrollRegion.left || bounds.left >= scrollRegion.right))) {
+        closeErrorPopover();
+        return;
+    }
+    const margin = 8, gap = 6;
+    popup.style.maxHeight = `${Math.max(0, window.innerHeight - margin * 2)}px`;
+    const naturalHeight = popup.getBoundingClientRect().height;
+    const below = window.innerHeight - bounds.bottom - gap - margin;
+    const above = bounds.top - gap - margin;
+    const openBelow = naturalHeight <= below || below >= above;
+    popup.style.maxHeight = `${Math.max(1, openBelow ? below : above)}px`;
+    const size = popup.getBoundingClientRect();
+    const top = openBelow ? bounds.bottom + gap : bounds.top - size.height - gap;
+    popup.style.left = `${Math.max(margin, Math.min(bounds.left, window.innerWidth - size.width - margin))}px`;
+    popup.style.top = `${Math.max(margin, Math.min(top, window.innerHeight - size.height - margin))}px`;
+}
+
+function bindErrorPopovers(container: HTMLElement): void {
+    container.querySelectorAll<HTMLElement>(".err-cell").forEach(trigger => {
+        const popup = trigger.querySelector<HTMLElement>(".err-pop")!;
+        popup.id = `interface-error-breakdown-${++errorPopoverSequence}`;
+        trigger.setAttribute("aria-describedby", popup.id);
+        const show = (): void => {
+            window.clearTimeout(errorPopoverTimer);
+            if (activeErrorPopover?.trigger === trigger) return;
+            closeErrorPopover();
+            document.body.append(popup);
+            activeErrorPopover = { trigger, popup };
+            popup.hidden = false;
+            popup.classList.add("is-open");
+            if (typeof popup.showPopover === "function") {
+                popup.setAttribute("popover", "manual");
+                popup.showPopover();
+            }
+            trigger.setAttribute("aria-expanded", "true");
+            positionErrorPopover();
+        };
+        const leave = (event: MouseEvent): void => {
+            const target = event.relatedTarget;
+            if (target instanceof Node && (trigger.contains(target) || popup.contains(target))) return;
+            errorPopoverTimer = window.setTimeout(() => {
+                if (document.activeElement !== trigger && !trigger.matches(":hover") && !popup.matches(":hover")) closeErrorPopover();
+            }, 120);
+        };
+        trigger.addEventListener("mouseenter", () => { if (dismissedErrorPopoverTrigger !== trigger) show(); });
+        trigger.addEventListener("mousemove", () => {
+            if (dismissedErrorPopoverTrigger !== trigger) return;
+            dismissedErrorPopoverTrigger = undefined;
+            show();
+        });
+        trigger.addEventListener("mouseleave", leave);
+        trigger.addEventListener("focus", show);
+        trigger.addEventListener("blur", closeErrorPopover);
+        trigger.addEventListener("click", show);
+        trigger.addEventListener("keydown", event => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(); }
+        });
+        popup.addEventListener("mouseenter", () => window.clearTimeout(errorPopoverTimer));
+        popup.addEventListener("mouseleave", leave);
+    });
+}
+
+window.addEventListener("scroll", event => {
+    if (event.target instanceof Node && activeErrorPopover?.popup.contains(event.target)) return;
+    positionErrorPopover();
+}, true);
+window.addEventListener("resize", closeErrorPopover);
+document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    dismissedErrorPopoverTrigger = activeErrorPopover?.trigger;
+    closeErrorPopover();
+});
+document.addEventListener("pointerdown", event => {
+    if (event.target instanceof Node && activeErrorPopover && !activeErrorPopover.trigger.contains(event.target) && !activeErrorPopover.popup.contains(event.target)) closeErrorPopover();
+});
+
 function errorBreakdownPopoverHtml(errorBreakdown: ErrorBreakdown = {}, metrics: InterfaceMetrics = {}): string {
-    return "<div class='err-pop'>" +
+    return "<div class='err-pop' role='tooltip' hidden>" +
         `<div class='err-pop-title'>${t("error_breakdown_hover_title")}</div>` +
         `<div class='err-pop-row'><span class='n'>${t("in_errors")}</span><span class='v'>+${fmtNum(metrics.in_errors_delta)}</span></div>` +
         `<div class='err-pop-row'><span class='n'>${t("out_errors")}</span><span class='v'>+${fmtNum(metrics.out_errors_delta)}</span></div>` +
@@ -413,8 +512,8 @@ function errorBreakdownPopoverHtml(errorBreakdown: ErrorBreakdown = {}, metrics:
         "</div>";
 }
 
-function formatCounterWithBreakdown(total: unknown, delta: unknown, errorBreakdown?: ErrorBreakdown, metrics?: InterfaceMetrics, flipPopover = false): string {
-    return `<span class='err-cell${flipPopover ? " flip" : ""}' tabindex='0'>${formatCounter(total, delta)}${errorBreakdownPopoverHtml(errorBreakdown, metrics)}</span>`;
+function formatCounterWithBreakdown(total: unknown, delta: unknown, errorBreakdown?: ErrorBreakdown, metrics?: InterfaceMetrics): string {
+    return `<span class='err-cell' tabindex='0' role='button' aria-expanded='false' aria-label='${escapeHtml(t("error_breakdown_hover_title"))}'>${formatCounter(total, delta)}${errorBreakdownPopoverHtml(errorBreakdown, metrics)}</span>`;
 }
 
 function diagnosticBadge(status: string | undefined): string {
@@ -436,38 +535,39 @@ function diagnosticBadge(status: string | undefined): string {
 export function renderInterfaces(ifaces: DeviceInterface[] = []): void {
     const tbody = document.getElementById("if-tbody");
     if (!tbody) return;
+    closeErrorPopover();
     if (ifaces.length === 0) {
         tbody.innerHTML = `<tr><td colspan=13 class=no-data>${t("no_interface_data")}</td></tr>`;
         return;
     }
     const spikeThreshold = window.TRACEPULSE_SPIKE_THRESHOLD || 10;
     tbody.innerHTML = ifaces
-        .map((iface, index) => {
+        .map(iface => {
             const metrics = iface.metrics || {};
-            const linkClass = iface.link_status === "up" ? "link-up" : "link-down";
+            const linkClass = interfaceStatusClass(iface.link_status);
             const errorDelta = Math.max(metrics.in_errors_delta || 0, metrics.out_errors_delta || 0);
             const discardDelta = Math.max(metrics.in_discards_delta || 0, metrics.out_discards_delta || 0);
             const rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? " row-crit" : errorDelta > 0 || discardDelta > 0 ? " row-warn" : "";
             const predictiveStatus = iface.predictive_status;
             const predictiveBadge = predictiveStatus && (predictiveStatus.dom_warning || predictiveStatus.trend_warning) ? "<span class='pred-badge'>[PRED]</span>" : "";
-            const flipErrorPopover = index >= ifaces.length - 2;
             return `<tr class='${rowClass.trim()}'>` +
                 `<td>${iface.if_index}</td>` +
                 `<td>${escapeHtml(iface.if_name)}${predictiveBadge}</td>` +
                 `<td><span class=${linkClass}>${escapeHtml(iface.link_status)}</span></td>` +
                 `<td>${diagnosticBadge(iface.health_status)}</td>` +
-                `<td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td>` +
-                `<td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics, flipErrorPopover)}</td>` +
+                `<td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics)}</td>` +
+                `<td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics)}</td>` +
                 `<td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td>` +
                 `<td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td>` +
                 `<td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td>` +
-                `<td>${(Number(metrics.bandwidth_utilization || 0) * 100).toFixed(1)}%</td>` +
+                `<td>${Number(metrics.bandwidth_utilization || 0).toFixed(1)}%</td>` +
                 `<td>${opticalPowerHtml(iface.tx_power_dbm)}</td>` +
                 `<td>${opticalPowerHtml(iface.rx_power_dbm === undefined ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td>` +
                 `<td>${fmtTime(iface.sampled_at)}</td>` +
                 "</tr>";
         })
         .join("");
+    bindErrorPopovers(tbody);
 }
 
 function opticalPowerHtml(value?: number | null): string {
@@ -498,7 +598,11 @@ export function renderHardwareStatus(sensors: HardwareSensor[] = []): void {
                     : sensor.status !== null && sensor.status !== undefined
                         ? sensor.status
                         : "N/A";
-            return `<div class='${cls}'><div class='label'>${escapeHtml(label)}</div><div class='value'>${escapeHtml(displayValue)}</div></div>`;
+            const hasNumericValue = sensor.value !== null && sensor.value !== undefined;
+            const stateClass = sensor.status_text || !hasNumericValue
+                ? cls.endsWith("crit") ? "status-critical" : cls.endsWith("warn") ? "status-warning" : sensor.status_kind === "normal" ? "status-online" : "status-unknown"
+                : "";
+            return `<div class='${cls}'><div class='label'>${escapeHtml(label)}</div><div class='value ${stateClass}'>${escapeHtml(displayValue)}</div></div>`;
         })
         .join("");
 }
@@ -600,7 +704,7 @@ export function renderSpikes(spikes: InterfaceSpike[] = []): void {
     }
     tbody.innerHTML = spikes
         .map((spike) => {
-            const linkClass = spike.link_status === "up" ? "link-up" : "link-down";
+            const linkClass = interfaceStatusClass(spike.link_status);
             return "<tr>" +
                 `<td>${fmtTime(spike.latest_sampled_at)}</td>` +
                 `<td>${escapeHtml(spike.if_name)} (if-${spike.if_index || 0})</td>` +

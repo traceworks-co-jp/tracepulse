@@ -1,4 +1,5 @@
-use snmp::Value;
+use super::session::ReadName;
+use snmp2::Value;
 
 /// SNMP の値をオーナーシップ付きで保持する表現。
 #[derive(Debug, Clone, PartialEq, Eq)]

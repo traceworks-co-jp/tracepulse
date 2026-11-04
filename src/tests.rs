@@ -215,6 +215,16 @@ mod tests {
                     memory_used_bytes INTEGER,
                     sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS template_metric_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id INTEGER NOT NULL,
+                    metric_key TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    unit TEXT NOT NULL,
+                    data_type TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    sampled_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 "#,
             )
             .unwrap();
@@ -269,6 +279,22 @@ mod tests {
                 sampled_at: "2026-08-30T00:00:00Z".to_string(),
             })
             .unwrap();
+        repository
+            .save_template_metric_samples(
+                device_id,
+                &[crate::snmp::client::TemplateMetricReading {
+                    key: "test_metric".into(),
+                    label: "Test Metric".into(),
+                    unit: "count".into(),
+                    data_type: crate::snmp::template::NumericDataType::Gauge,
+                    oid: "1.3.6.1.2.1.1.3.0".into(),
+                    value: Some(serde_json::Number::from(1)),
+                    value_text: Some("1".into()),
+                    error: None,
+                }],
+                "2026-08-30T00:00:00Z",
+            )
+            .unwrap();
 
         repository.remove_device_by_ip("192.168.1.31").unwrap();
 
@@ -279,5 +305,6 @@ mod tests {
         assert_eq!(remaining, 0);
         assert_eq!(alerts_remaining, 0);
         assert_eq!(metrics_remaining, 0);
+        assert_eq!(repository.count_rows("template_metric_samples").unwrap(), 0);
     }
 }

@@ -1,6 +1,109 @@
 import { expect, test } from "@playwright/test";
 
-test("DOM power columns show dBm, exact warning threshold, and mixed unsupported ports", async ({ page }) => {
+test.describe("interface error breakdown overlay", () => {
+    test.use({ hasTouch: true });
+    test.beforeEach(async ({ page, request }) => {
+        page.on("pageerror", error => { throw error; });
+        await page.route("**/static/js/device-detail.js*", route => route.fulfill({ path: "frontend/dist/device-detail.js", contentType: "application/javascript" }));
+        await request.post("/api/discovery/register", { data: [{ ip: "192.0.2.250", name: "tooltip-test", community: "public" }] });
+    });
+    test.afterEach(async ({ request }) => { await request.delete("/api/device/192.0.2.250"); });
+    for (const [width, height] of [[1280, 900], [375, 667], [800, 240]]) {
+        test(`all breakdown rows remain accessible outside clipped tables at ${width}x${height}`, async ({ page }) => {
+            await page.setViewportSize({ width, height });
+            await page.addInitScript(() => {
+                localStorage.setItem("tracepulse-onboarding-v1", "done");
+                localStorage.setItem("tracepulse-lang", "ja");
+            });
+            const interfaces = Array.from({ length: 4 }, (_, index) => ({
+                if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status: "up", sampled_at: "2026-11-02T00:00:00Z",
+                metrics: { in_errors: 12, out_errors: 3, in_errors_delta: 1, out_errors_delta: 2, in_discards_delta: 3, out_discards_delta: 4, late_collisions_delta: 5 },
+                error_breakdown: { fcs_errors_delta: 6, alignment_errors_delta: 7, frame_too_longs_delta: 8, internal_mac_receive_errors_delta: 9 },
+            }));
+            await page.route("**/api/device/192.0.2.250", route => route.fulfill({ json: { ip: "192.0.2.250", name: "tooltip-test", status: "online", interfaces, metrics: [], if_series: [], alerts: [], spikes: [] } }));
+            for (const theme of ["dark", "light"]) {
+                await page.goto("/device/192.0.2.250");
+                await page.locator("#theme-select").selectOption(theme);
+                await expect(page.locator("#if-tbody tr")).toHaveCount(4);
+                const wrapper = page.locator(".interface-table-scroll");
+                await wrapper.evaluate(element => {
+                    Object.assign((element as HTMLElement).style, { overflow: "auto", height: "180px", maxWidth: "360px", marginLeft: "auto" });
+                });
+                for (const row of [1, 3]) {
+                    const trigger = page.locator("#if-tbody tr").nth(row).locator(".err-cell").first();
+                    await trigger.scrollIntoViewIfNeeded();
+                    await trigger.hover();
+                    const popup = page.locator("body > .err-pop.is-open");
+                    await expect(popup).toBeVisible();
+                    await expect(popup.locator(".err-pop-row")).toHaveCount(9);
+                    const bounds = (await popup.boundingBox())!;
+                    expect(bounds.x).toBeGreaterThanOrEqual(7);
+                    expect(bounds.y).toBeGreaterThanOrEqual(7);
+                    expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 7);
+                    expect(bounds.y + bounds.height).toBeLessThanOrEqual(height - 7);
+                    const last = popup.locator(".err-pop-row").last();
+                    await last.scrollIntoViewIfNeeded();
+                    await expect(last.locator(".v")).toHaveText("+9");
+                    expect(await last.evaluate(element => {
+                        const rect = element.getBoundingClientRect();
+                        return element.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+                    })).toBeTruthy();
+                    await popup.screenshot({ path: `test-results/interface-errors-${width}-${height}-${theme}-row${row}.png` });
+                    await page.keyboard.press("Escape");
+                    await expect(popup).toHaveCount(0);
+                    await trigger.focus();
+                    await expect(popup).toBeVisible();
+                    await page.keyboard.press("Escape");
+                    await trigger.press("Enter");
+                    await expect(popup).toBeVisible();
+                    await page.keyboard.press("Escape");
+                    await trigger.tap();
+                    await expect(popup).toBeVisible();
+                    await page.evaluate(() => window.renderInterfaces?.([]));
+                    await expect(popup).toHaveCount(0);
+                    await page.evaluate(data => window.renderInterfaces?.(data), interfaces);
+                }
+            }
+        });
+    }
+});
+
+test("recent alert heading aligns with table content across themes and viewport sizes", async ({ page }) => {
+    await page.addInitScript(() => {
+        localStorage.setItem("tracepulse-onboarding-v1", "done");
+        localStorage.setItem("tracepulse-lang", "ja");
+    });
+    await page.route("**/api/devices", route => route.fulfill({ json: [] }));
+    await page.goto("/");
+    const section = page.locator(".dashboard-recent-alerts");
+    const heading = section.getByRole("heading", { name: "最近のアラート", exact: true });
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const theme of ["dark", "light"]) {
+            await page.locator("#theme-select").selectOption(theme);
+            await expect(heading).toHaveCSS("padding-left", "16px");
+            await expect(heading).toHaveCSS("padding-right", "16px");
+            const spacing = await section.evaluate(element => {
+                const title = element.querySelector("h2")!;
+                const header = element.querySelector("th")!;
+                const range = document.createRange();
+                range.selectNodeContents(title);
+                return {
+                    top: parseFloat(getComputedStyle(title).paddingTop),
+                    titleLeft: range.getBoundingClientRect().left,
+                    cellLeft: header.getBoundingClientRect().left + parseFloat(getComputedStyle(header).paddingLeft),
+                    sectionLeft: element.getBoundingClientRect().left,
+                };
+            });
+            expect(spacing.top).toBeGreaterThanOrEqual(12);
+            expect(spacing.titleLeft - spacing.sectionLeft).toBeGreaterThanOrEqual(16);
+            expect(Math.abs(spacing.titleLeft - spacing.cellLeft)).toBeLessThanOrEqual(1);
+            await section.screenshot({ path: `test-results/recent-alerts-${width}-${theme}.png` });
+        }
+    }
+});
+
+test("DOM power columns show dBm and bandwidth uses percentage values without rescaling", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.goto("/");
     await page.evaluate(() => {
@@ -8,13 +111,17 @@ test("DOM power columns show dBm, exact warning threshold, and mixed unsupported
     });
     await page.addScriptTag({ url: "/static/js/device-detail.js" });
     await page.addScriptTag({ content: `TracePulseDeviceDetail.renderInterfaces([
-        {if_index:7,if_name:"xe-0/0/0",link_status:"up",tx_power_dbm:-4.2,rx_power_dbm:-3.5},
-        {if_index:8,if_name:"ge-0/0/1",link_status:"up",tx_power_dbm:null,rx_power_dbm:null,predictive_status:{rx_optical_power_dbm:-5}},
-        {if_index:9,if_name:"weak",link_status:"up",tx_power_dbm:-20,rx_power_dbm:-40},
-        {if_index:10,if_name:"zero",link_status:"up",tx_power_dbm:0,rx_power_dbm:-19.99}
+        {if_index:7,if_name:"xe-0/0/0",link_status:"up",tx_power_dbm:-4.2,rx_power_dbm:-3.5,metrics:{bandwidth_utilization:77.29}},
+        {if_index:8,if_name:"ge-0/0/1",link_status:"up",tx_power_dbm:null,rx_power_dbm:null,predictive_status:{rx_optical_power_dbm:-5},metrics:{bandwidth_utilization:7.72}},
+        {if_index:9,if_name:"weak",link_status:"up",tx_power_dbm:-20,rx_power_dbm:-40,metrics:{bandwidth_utilization:0}},
+        {if_index:10,if_name:"zero",link_status:"up",tx_power_dbm:0,rx_power_dbm:-19.99,metrics:{bandwidth_utilization:100}}
     ]);` });
     const rows = page.locator("#if-tbody tr");
     await expect(rows).toHaveCount(4);
+    await expect(rows.nth(0).locator("td").nth(9)).toHaveText("77.3%");
+    await expect(rows.nth(1).locator("td").nth(9)).toHaveText("7.7%");
+    await expect(rows.nth(2).locator("td").nth(9)).toHaveText("0.0%");
+    await expect(rows.nth(3).locator("td").nth(9)).toHaveText("100.0%");
     await expect(rows.nth(0).locator("td").nth(10)).toHaveText("-4.2 dBm");
     await expect(rows.nth(0).locator("td").nth(11)).toHaveText("-3.5 dBm");
     await expect(rows.nth(0).locator(".status-warning")).toHaveCount(0);
@@ -55,6 +162,138 @@ test("vendor hardware states render normal power and critical failures correctly
     await expect(cards.nth(4)).toContainText("42 C");
 });
 
+test("hardware status cards use readable colors in light mode and retain dark mode styling", async ({ page }) => {
+    await page.request.post("/api/discovery/register", { data: [{ ip: "192.0.2.251", name: "hardware-color-test", community: "public" }] });
+    await page.route("**/api/device/192.0.2.251", route => route.fulfill({ json: {
+        ip: "192.0.2.251", name: "hardware-color-test", status: "online", metrics: [], alerts: [], spikes: [],
+        interfaces: ["up", "down", "unknown", "testing", "dormant", "notPresent", "lowerLayerDown"].map((link_status, index) => ({ if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status })),
+        hardware_sensors: [
+            { index: 1, name: "Power Supply 1", sensor_type: "power", status: 2, status_text: "On", status_kind: "normal", is_alarm: false },
+            { index: 2, name: "Fan 1", sensor_type: "fan", status: 1, status_text: "Warning", status_kind: "warning", is_alarm: false },
+            { index: 3, name: "Power Supply 2", sensor_type: "power", status: 8, status_text: "Failed", status_kind: "critical", is_alarm: true },
+            { index: 4, name: "Temperature", sensor_type: "temperature", value: 42, unit: "C", status: null, is_alarm: false },
+        ],
+    } }));
+    await page.goto("/device/192.0.2.251");
+    const cards = page.locator("#hardware-status .hardware-card");
+    await expect(cards).toHaveCount(4);
+    await page.locator("#theme-select").selectOption("light");
+    await expect(cards.nth(0)).toHaveCSS("background-color", "rgb(248, 250, 252)");
+    await expect(cards.nth(0).locator(".label")).toHaveCSS("color", "rgb(100, 116, 139)");
+    await expect(cards.nth(0).locator(".value")).toHaveCSS("color", "rgb(21, 128, 61)");
+    await expect(cards.nth(1).locator(".value")).toHaveCSS("color", "rgb(180, 83, 9)");
+    await expect(cards.nth(2).locator(".value")).toHaveCSS("color", "rgb(185, 28, 28)");
+    await expect(cards.nth(3).locator(".value")).toHaveCSS("color", "rgb(15, 23, 42)");
+    await expect(cards.nth(3)).toContainText("42 C");
+    const links = page.locator("#if-tbody tr td:nth-child(3) span");
+    await expect(links).toHaveText(["up", "down", "unknown", "testing", "dormant", "notPresent", "lowerLayerDown"]);
+    for (const [index, color] of ["rgb(21, 128, 61)", "rgb(185, 28, 28)", "rgb(100, 116, 139)", "rgb(180, 83, 9)", "rgb(100, 116, 139)", "rgb(100, 116, 139)", "rgb(185, 28, 28)"].entries()) {
+        await expect(links.nth(index)).toHaveCSS("color", color);
+    }
+    await expect(cards.nth(1)).toHaveCSS("background-color", "rgb(255, 247, 237)");
+    await expect(cards.nth(1)).toHaveCSS("border-top-color", "rgb(253, 186, 116)");
+    await expect(cards.nth(2)).toHaveCSS("background-color", "rgb(254, 242, 242)");
+    await expect(cards.nth(2)).toHaveCSS("border-top-color", "rgb(252, 165, 165)");
+    await page.locator("#theme-select").selectOption("dark");
+    await expect(cards.nth(0)).toHaveCSS("background-color", "rgb(15, 23, 42)");
+    await expect(cards.nth(0).locator(".value")).toHaveCSS("color", "rgb(74, 222, 128)");
+    await expect(cards.nth(1).locator(".value")).toHaveCSS("color", "rgb(251, 191, 36)");
+    await expect(cards.nth(2).locator(".value")).toHaveCSS("color", "rgb(248, 113, 113)");
+    await expect(cards.nth(3).locator(".value")).toHaveCSS("color", "rgb(248, 250, 252)");
+    for (const [index, color] of ["rgb(74, 222, 128)", "rgb(248, 113, 113)", "rgb(148, 163, 184)", "rgb(251, 191, 36)", "rgb(148, 163, 184)", "rgb(148, 163, 184)", "rgb(248, 113, 113)"].entries()) {
+        await expect(links.nth(index)).toHaveCSS("color", color);
+    }
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const theme of ["light", "dark"]) {
+            await page.locator("#theme-select").selectOption(theme);
+            await page.locator("#hardware-status").screenshot({ path: `test-results/hardware-state-${width}-${theme}.png` });
+        }
+    }
+    await page.request.delete("/api/device/192.0.2.251");
+});
+
+test("interface selection uses light-theme colors and retains dark-theme styling", async ({ page }) => {
+    await page.request.post("/api/discovery/register", { data: [{ ip: "192.0.2.252", name: "interface-filter-test", community: "public" }] });
+    await page.route("**/api/device/192.0.2.252", route => route.fulfill({ json: {
+        ip: "192.0.2.252", name: "interface-filter-test", status: "online", metrics: [], alerts: [], spikes: [],
+        interfaces: Array.from({ length: 4 }, (_, index) => ({ if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status: "up", metrics: {} })),
+    } }));
+    await page.goto("/device/192.0.2.252");
+    const filter = page.locator("#iface-filter");
+    const items = filter.locator(".iface-filter-item");
+    await expect(items).toHaveCount(4);
+    await page.locator("#theme-select").selectOption("light");
+    await expect(filter).toHaveCSS("background-color", "rgb(248, 250, 252)");
+    await expect(filter).toHaveCSS("border-top-color", "rgb(203, 213, 225)");
+    await expect(items.first()).toHaveCSS("color", "rgb(51, 65, 85)");
+    await expect(items.first().locator("input")).toHaveCSS("accent-color", "rgb(20, 143, 131)");
+    await page.locator("#theme-select").selectOption("dark");
+    await expect(filter).toHaveCSS("background-color", "rgb(15, 23, 42)");
+    await expect(items.first()).toHaveCSS("color", "rgb(203, 213, 225)");
+    await expect(items.first().locator("input")).toHaveCSS("accent-color", "rgb(56, 189, 248)");
+    await page.request.delete("/api/device/192.0.2.252");
+});
+
+test("device traffic and error breakdown panels adapt to light mode", async ({ page }) => {
+    await page.request.post("/api/discovery/register", { data: [{ ip: "192.0.2.253", name: "light-theme-test", community: "public" }] });
+    await page.route("**/api/device/192.0.2.253", route => route.fulfill({ json: {
+        ip: "192.0.2.253", name: "light-theme-test", status: "online", metrics: [], alerts: [], spikes: [],
+        interfaces: [{ if_index: 1, if_name: "Gi0/1", link_status: "up", metrics: { in_errors: 1, in_errors_delta: 1 }, error_breakdown: { fcs_errors: 1, fcs_errors_delta: 1 } }],
+    } }));
+    await page.route("**/api/flow/analytics*", route => route.fulfill({ json: {
+        summary: { total_bps: 800, total_pps: 1, active_flows: 1, top_protocol: "TCP" },
+        protocols: [{ protocol: "TCP", bytes: 100, percentage: 100, bps: 800, pps: 1 }],
+        applications: [], top_sources: [], top_destinations: [], top_talkers: [], timeseries: [],
+    } }));
+    await page.goto("/device/192.0.2.253");
+    const trafficCard = page.locator("#traffic-protocols .traffic-card").first();
+    await expect(trafficCard).toBeVisible();
+    await page.locator("#theme-select").selectOption("light");
+    await expect(trafficCard).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    await expect(trafficCard.locator("h3").first()).toHaveCSS("color", "rgb(21, 35, 55)");
+    await expect(page.locator("#traffic-protocols .traffic-controls button").first()).toHaveCSS("background-color", "rgb(237, 243, 246)");
+    await expect(page.locator("#error-breakdown-if")).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    await expect(page.locator("#if-tbody .err-pop").first()).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    await page.locator("#theme-select").selectOption("dark");
+    await expect(trafficCard).toHaveCSS("background-color", "rgba(15, 23, 42, 0.6)");
+    await page.request.delete("/api/device/192.0.2.253");
+});
+
+test("discovery progress and result banners use light status colors", async ({ page }) => {
+    await page.goto("/discovery");
+    await page.evaluate(() => {
+        const progress = document.querySelector<HTMLElement>("#scan-progress")!;
+        progress.style.display = "block";
+        const error = document.querySelector<HTMLElement>("#scan-error")!;
+        error.style.display = "block";
+        const result = document.querySelector<HTMLElement>("#register-result")!;
+        result.className = "reg-success";
+        result.style.display = "block";
+    });
+    await page.locator("#theme-select").selectOption("light");
+    await expect(page.locator(".progress-bar-track")).toHaveCSS("background-color", "rgb(226, 232, 240)");
+    await expect(page.locator("#progress-stats")).toHaveCSS("color", "rgb(51, 65, 85)");
+    await expect(page.locator("#scan-error")).toHaveCSS("background-color", "rgb(254, 242, 242)");
+    await expect(page.locator("#register-result")).toHaveCSS("background-color", "rgb(240, 253, 244)");
+    await page.locator("#theme-select").selectOption("dark");
+    await expect(page.locator(".progress-bar-track")).toHaveCSS("background-color", "rgb(15, 23, 42)");
+});
+
+test("active diagnostics panel and port dialog adapt to light mode", async ({ page }) => {
+    await page.goto("/diagnostics");
+    await page.locator("#theme-select").selectOption("light");
+    await page.evaluate(() => window.openActiveDiagnostic?.("127.0.0.1", "ping"));
+    const panel = page.locator("#active-diagnostic-panel");
+    await expect(panel).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    await expect(panel.locator("#active-diagnostic-output")).toHaveCSS("color", "rgb(51, 65, 85)");
+    await page.evaluate(() => window.openActiveDiagnosticWithPortPrompt?.("127.0.0.1", "port", 80));
+    const dialog = page.locator(".diag-port-dialog");
+    await expect(dialog).toHaveCSS("background-color", "rgb(255, 255, 255)");
+    await expect(dialog.locator("input")).toHaveCSS("color", "rgb(21, 35, 55)");
+    await page.locator(".diag-port-dialog [data-cancel]").click();
+});
+
 test("numeric template metrics render exact values and explicit errors safely", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.route("**/api/device/*", (route) => route.fulfill({ json: { interfaces: [], metrics: [] } }));
@@ -84,7 +323,7 @@ test("numeric template metrics render exact values and explicit errors safely", 
 });
 
 test("SNMP settings show the template disclaimer in English and Japanese", async ({ page }) => {
-    await page.goto("/settings");
+    await page.goto("/settings/snmp");
     const disclaimer = page.locator("[data-i18n='snmp_template_disclaimer']");
     await expect(disclaimer).toContainText("TraceWorks assumes no liability");
     await page.evaluate(() => window.setLanguage?.("ja"));
@@ -452,6 +691,65 @@ test("Community settings do not expose notification destinations", async ({ page
     expect((await request.get("/api/notifications")).status()).toBe(404);
 });
 
+test("threshold validation shows field errors and a fixed toast at the focused input", async ({ page }) => {
+    await page.addInitScript(() => {
+        localStorage.setItem("tracepulse-onboarding-v1", "done");
+        localStorage.setItem("tracepulse-lang", "ja");
+    });
+    let saves = 0;
+    await page.route("**/api/settings", async route => {
+        saves++;
+        await route.fulfill({ json: { ok: true } });
+    });
+    await page.goto("/settings");
+    const warning = page.locator("#cpu_warning");
+    const critical = page.locator("#cpu_critical");
+    const toast = page.locator("#toast-err");
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const theme of ["dark", "light"]) {
+            await page.locator("#theme-select").selectOption(theme);
+            await page.evaluate(() => window.resetDefaults?.());
+            await warning.fill("90");
+            await critical.fill("80");
+            await critical.press("Tab");
+            await expect(warning).toHaveAttribute("aria-invalid", "true");
+            await expect(critical).toHaveAttribute("aria-invalid", "true");
+            await expect(warning).toHaveCSS("border-top-color", "rgb(239, 68, 68)");
+            await expect(page.locator("#cpu_warning-error")).toHaveText("WarningはCritical未満の値を指定してください。");
+            await expect(page.locator("#cpu_critical-error")).toHaveText("CriticalはWarningより大きい値を指定してください。");
+            await expect(warning).toHaveAttribute("aria-describedby", /cpu_warning-error/);
+            const before = saves;
+            await page.getByRole("button", { name: "設定を保存", exact: true }).click();
+            expect(saves).toBe(before);
+            await expect(warning).toBeFocused();
+            await expect(warning).toBeInViewport();
+            await expect(page.locator("#cpu_warning-error")).toBeInViewport();
+            await expect(toast).toHaveText("入力値に誤りがあります。赤枠の項目をご確認ください。");
+            await expect(toast).toBeInViewport();
+            await expect(page.locator(".settings-toasts")).toHaveCSS("position", "fixed");
+            const top = (await toast.boundingBox())!.y;
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await expect(toast).toBeInViewport();
+            expect(Math.abs((await toast.boundingBox())!.y - top)).toBeLessThanOrEqual(1);
+            await warning.scrollIntoViewIfNeeded();
+            await page.screenshot({ path: `test-results/settings-validation-${width}-${theme}.png`, fullPage: false });
+            await warning.fill("70");
+            await expect(warning).toHaveAttribute("aria-invalid", "false");
+            await expect(critical).toHaveAttribute("aria-invalid", "false");
+            await expect(page.locator("#cpu_warning-error")).toBeHidden();
+            await warning.fill("0");
+            await warning.press("Tab");
+            await expect(page.locator("#cpu_warning-error")).toHaveText("0.01以上100以下の%値を、小数第2位までで入力してください。");
+            await warning.fill("70");
+            await page.getByRole("button", { name: "設定を保存", exact: true }).click();
+            await expect(page.locator("#toast-ok")).toBeInViewport();
+            await expect(toast).toBeHidden();
+            expect(saves).toBe(before + 1);
+        }
+    }
+});
+
 test("metric settings use percentages and validate Warning before saving", async ({ page }) => {
     let payload: any;
     let saves = 0;
@@ -498,13 +796,72 @@ test("dashboard health score remains separate from metric alarm status", async (
     const row = page.locator("#dash-tbody tr").filter({ hasText: "cpu-alarm" });
     await expect(row).toContainText("critical");
     await expect(row).toContainText("67/100");
-    await expect(row.locator("meter")).toHaveAttribute("value", "67");
-    await expect(page.locator("#dash-tbody tr").filter({ hasText: "unknown-metrics" }).locator("meter")).toHaveCount(0);
+    await expect(row.getByRole("meter")).toHaveAttribute("aria-valuenow", "67");
+    await expect(page.locator("#dash-tbody tr").filter({ hasText: "unknown-metrics" }).getByRole("meter")).toHaveCount(0);
     const untrustedRow = page.locator("#dash-tbody tr").filter({ hasText: "router' onmouseover='alert(1)" });
     await expect(untrustedRow.locator("[onmouseover]")).toHaveCount(0);
-    await expect(untrustedRow.locator(".status-unknown")).toHaveCount(2);
+    await expect(untrustedRow.locator(".status-unknown")).toHaveCount(3);
     await expect(untrustedRow.locator("button")).toHaveAttribute("data-action-device", "192.0.2.3' onmouseover='alert(1)");
     await expect(untrustedRow.locator("button")).toHaveText("Actions");
+});
+
+test("dashboard health meters follow API health status across themes and viewports", async ({ page }) => {
+    const statuses = ["online", "warning", "critical", "unknown"];
+    await page.route("**/api/devices", route => route.fulfill({ json: statuses.map((health_status, index) => ({
+        ip: `192.0.2.${index + 1}`, name: `health-${health_status}`, status: health_status, health_score: [90, 67, 44, 50][index], health_status,
+    })) }));
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto("/");
+        await page.evaluate(() => window.refreshDashboard?.());
+        const rows = page.locator("#dash-tbody tr");
+        await expect(rows).toHaveCount(4);
+        for (const theme of ["light", "dark"]) {
+            await page.locator("#theme-select").selectOption(theme);
+            const colors = theme === "light" ? ["rgb(21, 128, 61)", "rgb(180, 83, 9)", "rgb(185, 28, 28)", "rgb(100, 116, 139)"] : ["rgb(74, 222, 128)", "rgb(251, 191, 36)", "rgb(248, 113, 113)", "rgb(148, 163, 184)"];
+            for (const [index, status] of statuses.entries()) {
+                const row = rows.filter({ hasText: `health-${status}` });
+                const score = row.locator("td").nth(6);
+                await expect(score.locator("span").first()).toHaveCSS("color", colors[index]);
+                await expect(score.locator(".health-meter-fill")).toHaveCSS("background-color", colors[index]);
+                await expect(row.locator("td").nth(5).locator("span")).toHaveCSS("color", colors[index]);
+                const meter = row.getByRole("meter");
+                await expect(meter).toHaveAttribute("aria-valuemin", "0");
+                await expect(meter).toHaveAttribute("aria-valuemax", "100");
+                expect(await meter.evaluate(element => {
+                    const fill = element.querySelector<HTMLElement>(".health-meter-fill")!;
+                    return Math.abs(fill.getBoundingClientRect().width / element.getBoundingClientRect().width * 100 - Number(element.getAttribute("aria-valuenow"))) < 1;
+                })).toBeTruthy();
+            }
+            await page.locator(".dashboard-table-scroll").screenshot({ path: `test-results/health-states-${width}-${theme}.png` });
+        }
+    }
+});
+
+test("discovery result states distinguish offline warnings and unknown across themes", async ({ page }) => {
+    const statuses = ["online", "offline", "warning", "critical", "unknown"];
+    await page.route("**/api/discovery/scan", route => route.fulfill({ json: { job_id: "status-test", total: 5 } }));
+    await page.route("**/api/discovery/scan/status-test", route => route.fulfill({ json: {
+        status: "done", scanned: 5, total: 5, elapsed: 1,
+        devices: statuses.map((status, index) => ({ ip: `192.0.2.${index + 1}`, name: `discovered-${status}`, status })),
+    } }));
+    await page.goto("/discovery");
+    await page.locator("#cidr").fill("192.0.2.0/29");
+    await page.locator("#scan-btn").click();
+    const rows = page.locator("#results-body tr");
+    await expect(rows).toHaveCount(5);
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const theme of ["light", "dark"]) {
+            await page.locator("#theme-select").selectOption(theme);
+            const colors = theme === "light" ? ["rgb(21, 128, 61)", "rgb(185, 28, 28)", "rgb(180, 83, 9)", "rgb(185, 28, 28)", "rgb(100, 116, 139)"] : ["rgb(74, 222, 128)", "rgb(248, 113, 113)", "rgb(251, 191, 36)", "rgb(248, 113, 113)", "rgb(148, 163, 184)"];
+            for (const [index, status] of statuses.entries()) {
+                const state = rows.filter({ hasText: `discovered-${status}` }).locator("td").nth(3).locator("span");
+                await expect(state).toHaveText(status);
+                await expect(state).toHaveCSS("color", colors[index]);
+            }
+        }
+    }
 });
 
 test("health score legend follows boundaries and language changes", async ({ page }) => {
@@ -659,6 +1016,38 @@ test("discovery loads TypeScript discovery and topology bundles", async ({ page 
     await expect(page.locator("script[src='/static/js/discovery.js']")).toHaveCount(1);
     await expect(page.locator("script[src='/static/js/topology.js']")).toHaveCount(1);
     expect(consoleErrors).toEqual([]);
+});
+
+test("topology inspector colors device and interface states across themes and viewports", async ({ page }) => {
+    await page.route("**/api/discovery/topology", route => route.fulfill({ json: {
+        seed_ip: "192.0.2.1", edges: [],
+        nodes: ["online", "offline", "unknown"].map((status, index) => ({
+            id: status, label: `switch-${status}`, ip: `192.0.2.${index + 1}`, status,
+            interfaces: ["up", "down", "unknown", "testing"].map((link_status, port) => ({ if_index: port + 1, if_name: `Gi0/${port + 1}`, link_status })),
+        })),
+    } }));
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.goto("/discovery");
+        await page.locator("#seed-ip").fill("192.0.2.1");
+        await page.locator("#topology-btn").click();
+        for (const theme of ["light", "dark"]) {
+            await page.locator("#theme-select").selectOption(theme);
+            const colors = theme === "light" ? ["rgb(21, 128, 61)", "rgb(185, 28, 28)", "rgb(100, 116, 139)"] : ["rgb(74, 222, 128)", "rgb(248, 113, 113)", "rgb(148, 163, 184)"];
+            for (const [index, status] of ["online", "offline", "unknown"].entries()) {
+                await page.locator(`[data-node='${status}']`).press("Enter");
+                const panel = page.locator("#topology-inspector");
+                const deviceState = panel.locator(".inspector-row .inspector-state");
+                await expect(deviceState).toHaveText(status);
+                await expect(deviceState).toHaveCSS("color", colors[index]);
+                const states = panel.locator(".inspector-if .inspector-state");
+                await expect(states).toHaveText(["up", "down", "unknown", "testing"]);
+                for (const port of [0, 1, 2, 3]) await expect(states.nth(port)).toHaveCSS("color", colors[Math.min(port, 2)]);
+                if (status === "online") await panel.screenshot({ path: `test-results/topology-status-${width}-${theme}.png` });
+                await page.locator(".inspector-close").click();
+            }
+        }
+    }
 });
 
 test("CIDR hints do not move the discovery scan button", async ({ page }) => {

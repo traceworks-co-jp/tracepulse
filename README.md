@@ -1,15 +1,14 @@
 # TracePulse
 
-> Portable, single-binary network monitoring with an interactive TUI and an embedded Web UI.
+> Portable, single-binary network monitoring with an embedded Web UI.
 
 [![CI](https://github.com/traceworks-co-jp/trace-pulse/actions/workflows/ci.yml/badge.svg)](https://github.com/traceworks-co-jp/trace-pulse/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE-APACHE)
 
 TracePulse is a Rust-powered network device monitoring tool for SNMP health
 monitoring, anomaly detection, flow analytics, discovery, and topology
 mapping. It ships as one portable binary with an embedded SQLite database and
-supports both an interactive terminal dashboard (TUI) and a browser-based Web
-UI.
+a browser-based Web UI.
 
 - [Quick Start](#quick-start)
 - [Screenshots](#screenshots)
@@ -39,14 +38,11 @@ recreation. See [Docker Deployment](#docker-deployment) for networking and secur
 Download the archive for your platform from the [latest release](https://github.com/traceworks-co-jp/trace-pulse/releases/latest), extract it, and run one of the following commands:
 
 ```bash
-# Interactive terminal dashboard
-./tracepulse --cli
-
 # Embedded Web UI
 ./tracepulse --web
 ```
 
-On Windows, use `tracepulse.exe --cli` or `tracepulse.exe --web`.
+On Windows, use `tracepulse.exe --web`.
 Web UI mode is available at `http://localhost:8080` after startup.
 
 ## Screenshots
@@ -55,22 +51,36 @@ Web UI mode is available at `http://localhost:8080` after startup.
 
 ![TracePulse Web UI dashboard](docs/assets/tracepulse-web.png)
 
-The TUI is available immediately after running `./tracepulse --cli` (or
-`tracepulse.exe --cli` on Windows). A dedicated TUI capture will be added to
-the release assets once a representative monitoring dataset is available.
+### Topology Discovery & Mapping
+
+<video controls preload="metadata" width="100%">
+  <source src="https://raw.githubusercontent.com/traceworks-co-jp/tracepulse/main/docs/assets/videos/TopologyDiscovery%26Mapping.mp4" type="video/mp4">
+  Your browser does not support embedded videos.
+</video>
+
+[Open the topology discovery video](docs/assets/videos/TopologyDiscovery%26Mapping.mp4)
+
+### Device Details, Error Breakdown & Active Diagnostics
+
+<video controls preload="metadata" width="100%">
+  <source src="https://raw.githubusercontent.com/traceworks-co-jp/tracepulse/main/docs/assets/videos/DeviceDetails_ErrorBreakdown%26ActiveDiagnostics.mp4" type="video/mp4">
+  Your browser does not support embedded videos.
+</video>
+
+[Open the device details and diagnostics video](docs/assets/videos/DeviceDetails_ErrorBreakdown%26ActiveDiagnostics.mp4)
 
 ## Key Features
 
 - **Single Binary & Portable Execution**
   - Self-contained execution with SQLite (`data.db`) and configuration (`config.toml`). Portable across folders or USB drives without external database installation.
-- **Interactive 3-Pane TUI Dashboard**
-  - Fullscreen terminal UI built with `Ratatui` and `Crossterm`. Enables rapid troubleshooting for topology, port errors, and alert streams without needing a web browser.
 - **Embedded WebGUI**
   - Web dashboard featuring multi-device monitoring, real-time charts for bandwidth, error counters, and CPU/memory utilization, as well as auto-generated topology maps via LLDP/CDP.
 - **Template-Driven Multi-Vendor Support**
-  - RFC-standard defaults and Cisco, Yamaha RT, and Juniper numeric-OID templates are embedded in the binary. Add or override vendor definitions under `custom_templates/`; raw MIB files are never parsed. See [SNMP template specification](docs/design/03-snmp-collection.md).
+  - RFC-standard defaults and Cisco, Yamaha RT, Juniper, Fortinet FortiGate, MikroTik RouterOS, Arista EOS, Palo Alto PAN-OS, Ubiquiti, HPE ProCurve AOS-S, Aruba AOS-CX, and Allied Telesis numeric-OID templates are embedded in the binary. Add or override vendor definitions under `custom_templates/`; raw MIB files are never parsed. **Settings → SNMP Settings** (`/settings/snmp`) combines connection credentials and monitoring definitions, with independent save buttons. The visual editor provides English/Japanese network-oriented labels, SQLite persistence, version-conflict checks, live application, profile reset, and TOML import/export without credentials. Diagnostics displays results without the editor in between. See [SNMP template specification](docs/design/03-snmp-collection.md#gui-managed-definitions-sqlite).
 - **Network Discovery & Topology Detection**
   - Parallel CIDR host scanning and automated neighbor port discovery via LLDP and CDP.
+- **Per-Device SNMP Credentials**
+  - SNMPv2c and SNMPv3 credentials with per-field device-to-global fallback, encrypted storage, masked forms, and bulk credential replacement. Configure global defaults in Settings and individual overrides during manual registration or from device actions. See [credential behavior and security](docs/design/03-snmp-collection.md#デバイス別snmp認証と継承).
 - **Health Scoring & Anomaly Detection**
   - Real-time detection of L1/L2 errors, discards, late collisions (duplex mismatch), traffic spikes, and automated health score calculation.
 
@@ -105,11 +115,11 @@ separate TracePulse Enterprise package through the notification provider API.
 
 ### Supported vendors (OID templates)
 
-TracePulse bundles RFC-standard monitoring plus numeric-OID templates for [Cisco](templates/cisco.toml), [Yamaha RT](templates/yamaha.toml), and [Juniper](templates/juniper.toml) in the binary, release archives, and Docker image. Templates are automatically selected by sysObjectID. Place legally obtained additional TOML templates in `TRACEPULSE_DATA_DIR/custom_templates` (beside the executable when the variable is unset), then restart. A custom template with the same selector replaces its bundled vendor definition; a more specific selector takes precedence.
+TracePulse bundles RFC-standard monitoring plus numeric-OID templates for [Cisco](templates/cisco.toml), [Yamaha RT](templates/yamaha.toml), [Juniper](templates/juniper.toml), [Fortinet FortiGate](templates/fortinet.toml), [MikroTik RouterOS](templates/mikrotik.toml), [Arista EOS](templates/arista.toml), [Palo Alto PAN-OS](templates/paloalto.toml), [Ubiquiti](templates/ubiquiti.toml), [HPE ProCurve AOS-S](templates/hp_aos_s.toml), [Aruba AOS-CX](templates/aruba_cx.toml), and [Allied Telesis](templates/allied_telesis.toml) in the binary, release archives, and Docker image. Templates are automatically selected by sysObjectID. Place legally obtained additional TOML templates in `TRACEPULSE_DATA_DIR/custom_templates` (beside the executable when the variable is unset), then restart. A custom template with the same selector replaces its bundled vendor definition; a more specific selector takes precedence.
 
 Devices without a dedicated template can still be monitored through the `generic.toml` template, which relies on standard MIBs (IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB, etc.).
 
-> TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.
+> TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks Co., Ltd. assumes no liability for unauthorized access to proprietary vendor metrics.
 
 See the [template schema, OID sources, Docker mount example, and migration guide](docs/design/03-snmp-collection.md). Vendor metric collection is defined in TOML, not hard-coded probes; LLDP/CDP topology discovery is retained separately. The new vendor definitions are tested with mock SNMP agents, not certified across physical device models.
 
@@ -130,17 +140,15 @@ Devices outside this list are expected to work as long as they expose the releva
 
 1. Download the archive for your platform from the [latest release](https://github.com/traceworks-co-jp/trace-pulse/releases/latest), then extract it. RFC templates are embedded; `config.toml`, `data.db`, and optional `custom_templates/` live in the data directory (beside the executable by default).
 2. Edit `config.toml`, at minimum `[snmp] default_community` and `[polling] interval_seconds`.
-3. Start the application in TUI or Web UI mode:
+3. Start the Web UI:
 
    ```bash
-   ./tracepulse --cli
-   # or
    ./tracepulse --web
    ```
 
 ### 2. Register devices
 
-- **Discovery (recommended)**: In the TUI, press `d`; in the WebGUI, open the Device Discovery page. Specify a CIDR (e.g. `192.168.1.0/24`) and register the devices that respond over SNMP.
+- **Discovery (recommended)**: In the WebGUI, open the Device Discovery page. Specify a CIDR (e.g. `192.168.1.0/24`) and register the devices that respond over SNMP.
 - **Manual registration**: Register a single device by IP address, SNMP community, and device type.
 - **Bulk import**: Add `[[devices]]` entries to a TOML file, or import from CSV.
 
@@ -156,16 +164,7 @@ See [docs/guide/user-operation-flow.md](docs/guide/user-operation-flow.md) for a
 
 ## How to Run
 
-### 1. TUI Mode
-Launch the interactive terminal dashboard:
-
-```bash
-cargo run -- --cli
-# Or compiled binary:
-./tracepulse --cli
-```
-
-### 2. WebGUI Mode
+### WebGUI Mode
 Start the embedded web server and access via web browser:
 
 ```bash
@@ -261,53 +260,7 @@ The workflow's OCI source label links the package to its source repository.
 
 ---
 
-## User Operations Guide
-
-### TUI Mode Keyboard Shortcuts
-
-In TUI mode, all operations can be performed using keyboard shortcuts and mouse tab selection:
-
-| Key | Function |
-| :---: | :--- |
-| **`1` - `5`** | **Switch Tab**: Select Dashboard, Devices, Interfaces, Traffic, or Alerts. |
-| **`←` / `→`** or **`[`** / **`]`** | **Switch Tab**: Move to the previous or next top-level tab. |
-| **Mouse click** | **Switch Tab**: Click a tab in the top bar. |
-| **`↑` / `↓`** or **`k` / `j`** | **Navigate / Scroll**: Move selection in the current tab's list. |
-| **`Enter`** | **Context detail**: Open the selected device's interfaces, Interface Error Breakdown, Flow Inspector, or alert details. |
-| **`PgUp` / `PgDn`** | **Select Device**: Change the device shown on the Interfaces tab. |
-| **`r`** | **Manual Poll**: Perform immediate SNMP polling for all devices with progress bar overlay. |
-| **`d`** | **Network Discovery Modal**: Open CIDR discovery dialog for automated device scanning & registration. |
-| **`p`** | **Toggle Traffic**: Switch between Interfaces and Traffic. When entered from Interfaces, the selected interface is applied as the flow filter. |
-| **`c`** | **Clear filter**: Clear the interface/traffic filter and incremental text filter. |
-| **`w`** | **Time window**: Cycle 60 seconds, 5 minutes, and 1 hour on Traffic. |
-| **`s`** | **Sort Top Talkers**: Cycle Bps, PPS, and Bytes order on Traffic. |
-| **`Space`** | **Pause / Resume**: Freeze or resume TUI rendering while keyboard input remains available. |
-| **`/`** | **Incremental filter**: Search the current tab's device, interface, alert, or Top Talker list. Press `c` to clear. |
-| **`q`** / **`Esc`** | **Quit / Cancel**: `q` exits TUI; `Esc` closes an active dialog or filter input. |
-
-Each tab has its own main area: Dashboard summarizes health and attention items; Devices, Interfaces, Traffic, and Alerts devote the available body to their respective lists or analytics. The Interfaces tab uses the selected device, which can be changed with `PgUp` / `PgDn`.
-
-#### Traffic View
-
-The Traffic tab is a compact, terminal-width-friendly view containing:
-
-- Protocol share and top applications.
-- Top Talkers with Source/Destination, Protocol, Bytes, Bps, PPS, TCP flags, and In/Out interface names.
-- The selected Top Talker is highlighted; use `↑` / `k` and `↓` / `j` to move, then `Enter` to open Flow Inspector.
-- Flow Inspector shows the tuple, bytes, packets, Bps/PPS, flags, resolved interface names, and sampling correction status. Active/Inactive timeout values are shown as unavailable when they were not retained by the flow record.
-- Ingest sampling-rate correction is applied before persistence; displayed values are estimates when exporter sampling metadata is unavailable.
-
-#### Network Discovery Modal Controls
-
-1. Press **`d`** to open the modal. Target CIDR is automatically populated based on local IP (e.g., `192.168.11.0/24`).
-2. **`Tab` / `↑` / `↓`**: Switch between input fields (`Target CIDR Range` ↔ `SNMP Community` ↔ `SNMP Version`).
-3. **`←` / `→` / `Home` / `End`**: Move cursor within text fields.
-4. **`SNMP Version Selection`**: Toggle SNMP version (`v2c`, `v1`, `v3`) using **`←` / `→` / `Space`** or keys **`1` / `2` / `3`**.
-5. **`Enter`**: Start 64-thread parallel scan. Discovered devices are auto-registered and immediately polled.
-
----
-
-### Flow Analytics Scope
+## Flow Analytics Scope
 
 - The protocol-share and Top Talkers views use decoded NetFlow v5/v9, IPFIX, and sFlow v5 records. Default ports are UDP 2055, 4739, and 6343; they can be overridden under `[flow]` in `config.toml`.
 - The WebGUI Device Detail page shows Traffic & Protocols only after at least one flow record has been received, so installations that do not export flow data do not show an empty analytics panel.
@@ -318,7 +271,7 @@ The Traffic tab is a compact, terminal-width-friendly view containing:
 
 ---
 
-### WebGUI Operations Guide
+## WebGUI Operations Guide
 
 1. **Dashboard**
    - System-wide health summary cards (Online, Warning, Offline, Total, Error Spikes).
@@ -356,9 +309,8 @@ Selection survives filtering and sorting; the header checkbox selects or clears
 only the visible devices. `selection_order` preserves the order in which devices
 were checked; `ip_asc` sorts addresses numerically (IPv4 before IPv6).
 
-The TUI prioritizes aliases, displays compact tag badges, and shows the original
-hostname/IP for the selected device. Metadata is preserved by discovery and
-polling updates. Existing databases migrate automatically at startup.
+Metadata is preserved by discovery and polling updates. Existing databases
+migrate automatically at startup.
 
 API endpoints (subject to the same authorization/CSRF rules as other mutations):
 
@@ -508,7 +460,7 @@ interval_seconds = 30
 
 [display]
 timezone = "utc"
-language = "en" # use "ja" for Japanese TUI labels
+language = "en" # use "ja" for Japanese UI labels
 
 [snmp]
 default_community = "public"
@@ -540,12 +492,10 @@ Legacy `error_rate_threshold` fractions migrate to an error-rate Warning percent
 
 ## License
 
-This project is licensed under either of
-
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
+This project is licensed under the Apache License, Version 2.0. See
+[LICENSE-APACHE](LICENSE-APACHE) or read the
+[full license text](http://www.apache.org/licenses/LICENSE-2.0).
+Use of the TracePulse name and logos is covered by the [Trademark Policy](TRADEMARK.md).
 
 ## Disclaimer
 
@@ -579,7 +529,9 @@ license and attribution notices. The development-only packages used for
 frontend builds and browser tests, including TypeScript, esbuild, and
 Playwright, are not embedded in the release binary. See
 [`THIRD_PARTY_LICENSES.html`](THIRD_PARTY_LICENSES.html) for the repository's
-third-party license notice page.
+third-party license notice page. Native release archives also include
+`THIRD_PARTY_NOTICES.txt`, generated from the Rust dependency graph using
+`cargo-about`.
 
 ---
 
@@ -596,18 +548,16 @@ Modified builds must not be represented as official TracePulse Enterprise produc
 <a id="日本語"></a>
 # 日本語
 
-TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検知し、対話型 TUI (ターミナルUI) と WebGUI の両方を同一バイナリで提供する Rust 製のポータブル監視アプリケーションです。
+TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検知する Rust 製のポータブル監視アプリケーションです。WebGUI を備え、単一バイナリで動作します。
 
 ## 主な特徴
 
 - **ポータブル＆単一バイナリ**
   - 内蔵 SQLite (`data.db`) と設定ファイル (`config.toml`) により、外部 DB のセットアップ不要で USB メモリや単一フォルダで持ち運び可能な構成を実現。
-- **3ペイン対話型 TUI ダッシュボード**
-  - `Ratatui` / `Crossterm` を採用したフルスクリーン TUI。Web ブラウザなしでターミナル上でトポロジー・ポートエラー・アラートを一目で特定。
 - **直感的な WebGUI**
   - ブラウザから複数台の監視、帯域・エラー・CPU/メモリ使用率のリアルタイムグラフ、LLDP/CDP による自動トポロジー描画が可能。
 - **テンプレート駆動マルチベンダー対応**
-  - RFC 標準と Cisco・Yamaha RT・Juniper の数値 OID 定義をバイナリに内蔵。`custom_templates/*.toml` でベンダー定義を追加・上書きできます。生 MIB の解析は行いません。[SNMP テンプレート仕様](docs/design/03-snmp-collection.md)を参照してください。
+  - RFC 標準と Cisco・Yamaha RT・Juniper の数値 OID 定義をバイナリに内蔵。`custom_templates/*.toml` でベンダー定義を追加・上書きできます。「設定 → SNMP設定」（`/settings/snmp`）に接続・認証設定と監視定義を集約し、それぞれ独立したボタンで保存します。日本語・英語の用途別ラベルによる編集、SQLiteへの定義保存、競合検出、再起動なしの反映、リセット、認証情報を含めないTOML入出力が可能です。診断画面は編集欄を挟まず結果を表示します。生 MIB の解析は行いません。[SNMP テンプレート仕様](docs/design/03-snmp-collection.md#gui-managed-definitions-sqlite)を参照してください。
 - **自動探索＆トポロジー認識 (Discovery)**
   - CIDR 並列スキャンと LLDP / CDP 隣接情報取得による対向機器・対向ポートの自動マッピング。
 - **障害予兆＆健全度スコアリング**
@@ -646,17 +596,15 @@ RFC 標準に加え、[Cisco](templates/cisco.toml)・[Yamaha RT](templates/yama
 
 1. [GitHub Releases の最新版](https://github.com/traceworks-co-jp/trace-pulse/releases/latest) から利用環境向けのアーカイブをダウンロードして展開します。RFC 定義はバイナリ内蔵です。`config.toml`・`data.db`・任意の `custom_templates/` はデータディレクトリ（既定は実行ファイルと同じ場所）に配置してください。
 2. `config.toml` を編集します。最低限 `[snmp] default_community` と `[polling] interval_seconds` を設定してください。
-3. TUI または WebGUI モードで起動します。
+3. WebGUI を起動します。
 
    ```bash
-   ./tracepulse --cli
-   # または
    ./tracepulse --web
    ```
 
 ### 2. 機器の登録
 
-- **自動検出（推奨）**: TUI では `d` キー、WebGUI では Device Discovery ページで CIDR（例: `192.168.1.0/24`）を指定し、SNMP 応答のあった機器を登録します。
+- **自動検出（推奨）**: WebGUI の Device Discovery ページで CIDR（例: `192.168.1.0/24`）を指定し、SNMP 応答のあった機器を登録します。
 - **手動登録**: IP アドレス・SNMP community・種別を指定して 1 台ずつ登録します。
 - **一括登録**: TOML の `[[devices]]` または CSV からまとめて読み込みます。
 
@@ -672,16 +620,7 @@ RFC 標準に加え、[Cisco](templates/cisco.toml)・[Yamaha RT](templates/yama
 
 ## 実行方法
 
-### 1. TUI モード
-ターミナル上でインタラクティブな 3 ペインダッシュボードを起動します。
-
-```bash
-cargo run -- --cli
-# またはビルド済みバイナリ:
-./tracepulse --cli
-```
-
-### 2. WebGUI モード
+### WebGUI モード
 内蔵 Web サーバーを起動し、ブラウザから確認できます。
 
 ```bash
@@ -695,46 +634,7 @@ cargo run -- --web
 
 ---
 
-## ユーザー操作ガイド
-
-### TUI モード操作方法
-
-TUI モードでは、キーボードのみで直感的に全操作を行えます。
-
-| キー | 機能 |
-| :---: | :--- |
-| **`Tab`** | **フォーカス切替**: 上ペイン (`Device List`) ↔ 中ペイン (`Interface List`) のフォーカスを切り替え。 |
-| **`↑` / `↓`** または **`k` / `j`** | **選択・スクロール**: リストの上下移動。ポート数が多い機器では自動的にスクロール追従。 |
-| **`Enter`** | **コンテキスト詳細**: Interfaceペインでは物理エラー詳細、Protocol Viewでは選択中Top TalkerのFlow Inspectorを表示。 |
-| **`r`** | **手動ポーリング (Manual Poll)**: 全登録機器の SNMP 情報を即時再取得 (進捗プログレスバーを表示)。 |
-| **`d`** | **ネットワーク自動探索 (Discovery)**: CIDR スキャン＆自動登録ダイアログを開く。 |
-| **`p`** | **プロトコル表示切替**: 中ペインを Protocol & Traffic Viewへ切り替え。Interfaceペインから切り替えた場合は選択中IFで絞り込み。 |
-| **`c`** | **フィルター解除**: Protocol ViewをAll Interfacesへ戻す、または検索フィルターを解除。 |
-| **`1` / `2` / `3`** | **時間窓切替**: Protocol Viewの集計期間を60秒 / 5分 / 1時間へ切り替え。 |
-| **`s`** | **Top Talkersソート**: Bps → PPS → Bytesの順に切り替え。 |
-| **`Space`** | **一時停止 / 再開**: TUIの描画更新を停止・再開。停止中もキー入力可能。 |
-| **`/`** | **インクリメンタル検索**: IP、ポート、プロトコル、ホスト名、インターフェースをリアルタイム絞り込み。`Esc` / `c`で解除。 |
-| **`q`** / **`Esc`** | **終了 / キャンセル**: TUI を安全に終了、またはアクティブなモーダルダイアログを閉じる。 |
-
-#### Protocol & Traffic View
-
-- プロトコル構成比と上位アプリケーションをコンパクトに表示。
-- Top Talkersに送信元/宛先、Protocol、Bytes、Bps、PPS、TCP Flags、In/Out IF名を表示。
-- `↑` / `k`、`↓` / `j`で行を選択し、選択行は色でハイライトされます。`Enter`でFlow Inspectorを開きます。
-- Flow Inspectorでは5タプル、Bytes、Packets、Bps/PPS、TCP Flags、解決済みIF名、サンプリング補正状態を確認できます。Flow recordに保持されないActive/Inactive Timeoutは未収録として表示します。
-- インジェスト時にサンプリング率補正を適用します。Exporterからサンプリング情報が得られない場合、表示値は概算値です。
-
-#### ネットワーク自動探索 (Discovery) ダイアログの操作
-
-1. **`d` キー** を押すとダイアログが開きます。自端末のローカル IP から推測されたサブネット（例: `192.168.11.0/24`）が自動入力されます。
-2. **`Tab` / `↑` / `↓`**: 入力項目 (`Target CIDR Range` ↔ `SNMP Community` ↔ `SNMP Version`) の切り替え。
-3. **`←` / `→` / `Home` / `End`**: テキスト入力フィールド内のカーソル移動。
-4. **`SNMP Version 選択`**: `SNMP Version` フィールド選択中に **`←` / `→` / `Space`** または **`1` / `2` / `3`** キーで `v2c`, `v1`, `v3` を切り替え。
-5. **`Enter`**: 64 スレッド並列スキャンを開始。応答があった機器を DB へ自動登録し、初回ポーリングを一括実行してダッシュボードを更新。
-
----
-
-### フロー分析の対象範囲
+## フロー分析の対象範囲
 
 - プロトコル別通信シェアと Top Talkers は、NetFlow v5/v9、IPFIX、sFlow v5 のデコード結果を対象とします。既定ポートは UDP 2055/4739/6343 で、`config.toml` の `[flow]` で変更できます。
 - WebGUI のデバイス詳細では、少なくとも1件のフローレコードを受信するまで「トラフィックとプロトコル」を表示しません。フローデータを送信しない環境では空の分析パネルは表示されません。
@@ -745,7 +645,7 @@ TUI モードでは、キーボードのみで直感的に全操作を行えま�
 
 ---
 
-### WebGUI モード操作方法
+## WebGUI モード操作方法
 
 1. **Dashboard (ダッシュボード)**
    - システム全体の健全度サマリ (Online / Warning / Offline / Total / Error Spikes)
@@ -829,9 +729,6 @@ Enterprise 専用の分析機能およびバンドル済みアセットは公開
 
 改変版を公式の TracePulse Enterprise と表示したり、許可なく TracePulse の商標を使用したりすることは禁止します。おまかせ予兆監視・おまかせセキュリティ管理／信用スコア・自動保存トポロジ（障害時LKG保持）・ステータス連動ハイライト＆フィルタリング、Enterprise 連携、サポート、アップデートをご利用の場合は公式 Enterprise 版をご検討ください。Enterprise への移行でインスタンス上限が増えるものではありません。
 
-本プロジェクトは、以下のいずれかのライセンスの下で提供されます。
-
-* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) または http://www.apache.org/licenses/LICENSE-2.0)
-* MIT License ([LICENSE-MIT](LICENSE-MIT) または http://opensource.org/licenses/MIT)
-
-いずれかを選択できます。
+本プロジェクトは Apache License, Version 2.0 の下で提供されます。詳細は
+[LICENSE-APACHE](LICENSE-APACHE) または[ライセンス全文](http://www.apache.org/licenses/LICENSE-2.0)
+を参照してください。

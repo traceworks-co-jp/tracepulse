@@ -1,6 +1,9 @@
 pub mod client;
+pub mod credentials;
 pub mod dom;
+pub mod management;
 pub mod oid;
+pub(crate) mod session;
 pub mod template;
 pub mod topology;
 pub mod walk;

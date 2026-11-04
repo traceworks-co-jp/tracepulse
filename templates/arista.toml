@@ -1,0 +1,8 @@
+name = "Arista EOS"
+description = "Arista EOS processor load; standard ENTITY sensors are collected automatically"
+sysObjectID_prefix = "1.3.6.1.4.1.30065.1"
+enterprise_id = 30065
+
+# HOST-RESOURCES-MIB reports processor load as 0..100 percent.
+[cpu]
+candidates = ["1.3.6.1.2.1.25.3.3.1.2"]

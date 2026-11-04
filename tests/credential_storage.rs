@@ -20,6 +20,225 @@ fn stored(path: &Path, ip: &str) -> String {
 }
 
 #[test]
+fn device_credentials_inherit_defaults_and_override_only_configured_fields() {
+    use tracepulse::snmp::credentials::SnmpCredentials;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let repo = repository(&path);
+    let mut global = AppConfig::default().snmp;
+    global.default_community = "global-zone-secret".into();
+    global.credentials = SnmpCredentials {
+        version: Some("3".into()),
+        v3_username: Some("global-user".into()),
+        v3_auth_password: Some("global-auth-secret".into()),
+        v3_priv_password: Some("global-privacy-secret".into()),
+        ..Default::default()
+    };
+    let device = DeviceConfig::new("192.0.2.51", "");
+    let id = repo.save_device_config(&device).unwrap();
+    let resolved = repo.resolved_snmp_config(&device.ip, &global, "").unwrap();
+    assert_eq!(resolved.default_community, global.default_community);
+    assert_eq!(
+        resolved.credentials.v3_auth_password,
+        global.credentials.v3_auth_password
+    );
+    repo.set_device_snmp_credentials(
+        &[id],
+        SnmpCredentials {
+            v3_auth_password: Some("device-auth-secret".into()),
+            community: Some("device-zone-secret".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let resolved = repo.resolved_snmp_config(&device.ip, &global, "").unwrap();
+    assert_eq!(resolved.default_community, "device-zone-secret");
+    assert_eq!(
+        resolved.credentials.v3_auth_password.as_deref(),
+        Some("device-auth-secret")
+    );
+    assert_eq!(
+        resolved.credentials.v3_priv_password,
+        global.credentials.v3_priv_password
+    );
+    global.default_community = "updated-global-secret".into();
+    assert_eq!(
+        repo.resolved_snmp_config(&device.ip, &global, "")
+            .unwrap()
+            .default_community,
+        "device-zone-secret"
+    );
+    repo.set_device_snmp_credentials(&[id], SnmpCredentials::default())
+        .unwrap();
+    assert_eq!(
+        repo.find_device_by_ip(&device.ip)
+            .unwrap()
+            .unwrap()
+            .community,
+        ""
+    );
+    assert_eq!(
+        repo.resolved_snmp_config(&device.ip, &global, "")
+            .unwrap()
+            .default_community,
+        "updated-global-secret"
+    );
+}
+
+#[test]
+fn device_v3_credentials_are_encrypted_and_bulk_updates_are_atomic() {
+    use tracepulse::snmp::credentials::SnmpCredentials;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let repo = repository(&path);
+    let first = repo
+        .save_device_config(&DeviceConfig::new("192.0.2.52", "legacy-secret"))
+        .unwrap();
+    let second = repo
+        .save_device_config(&DeviceConfig::new("192.0.2.53", ""))
+        .unwrap();
+    let credentials = SnmpCredentials {
+        version: Some("3".into()),
+        community: Some("individual-community-marker".into()),
+        v3_username: Some("individual-user-marker".into()),
+        v3_auth_password: Some("individual-auth-marker".into()),
+        v3_priv_password: Some("individual-privacy-marker".into()),
+        ..Default::default()
+    };
+    repo.set_device_snmp_credentials(&[first, second], credentials.clone())
+        .unwrap();
+    assert_eq!(
+        repo.device_snmp_credentials("192.0.2.52").unwrap(),
+        credentials
+    );
+    assert!(!format!("{credentials:?}").contains("individual"));
+    assert!(
+        repo.set_device_snmp_credentials(&[first, 99999], Default::default())
+            .is_err()
+    );
+    assert_eq!(
+        repo.device_snmp_credentials("192.0.2.52").unwrap(),
+        credentials
+    );
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let envelopes: Vec<String> = connection
+        .prepare("SELECT envelope FROM device_snmp_credentials")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(envelopes.iter().all(|value| value.starts_with(PREFIX)));
+    assert_ne!(envelopes[0], envelopes[1]);
+    drop(connection);
+    drop(repo);
+    for file in [
+        path.clone(),
+        path.with_file_name("data.db-wal"),
+        path.with_file_name("data.db-journal"),
+    ] {
+        if file.exists() {
+            let data = fs::read(file).unwrap();
+            for secret in [
+                "individual-community-marker",
+                "individual-user-marker",
+                "individual-auth-marker",
+                "individual-privacy-marker",
+            ] {
+                assert!(
+                    !data
+                        .windows(secret.len())
+                        .any(|window| window == secret.as_bytes())
+                );
+            }
+        }
+    }
+    let repo = repository(&path);
+    assert_eq!(
+        repo.device_snmp_credentials("192.0.2.53").unwrap(),
+        credentials
+    );
+    repo.remove_device_by_ip("192.0.2.52").unwrap();
+    assert_eq!(
+        repo.device_snmp_credentials("192.0.2.52").unwrap(),
+        Default::default()
+    );
+}
+
+#[test]
+fn v3_config_migration_encrypts_secrets_and_preserves_other_sections() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    fs::write(&path, "[snmp]\ndefault_community='config-community-marker'\n[snmp.credentials]\nversion='3'\nv3_username='config-user-marker'\nv3_auth_password='config-auth-marker'\nv3_priv_password='config-privacy-marker'\n[extension]\nretained=true\n").unwrap();
+    let config = AppConfig::load(&path).unwrap();
+    let encrypted = fs::read_to_string(&path).unwrap();
+    for secret in [
+        "config-community-marker",
+        "config-user-marker",
+        "config-auth-marker",
+        "config-privacy-marker",
+    ] {
+        assert!(!encrypted.contains(secret));
+        assert!(!format!("{config:?}").contains(secret));
+        assert!(!serde_json::to_string(&config).unwrap().contains(secret));
+    }
+    assert!(encrypted.contains("retained = true"));
+    assert_eq!(
+        AppConfig::load(&path).unwrap().snmp.credentials,
+        config.snmp.credentials
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), encrypted);
+    fs::remove_file(directory.path().join("secret.key")).unwrap();
+    assert!(AppConfig::load(&path).is_err());
+    assert!(!directory.path().join("secret.key").exists());
+}
+
+#[test]
+fn invalid_or_masked_credentials_never_replace_saved_credentials() {
+    use tracepulse::snmp::credentials::SnmpCredentials;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let repo = repository(&path);
+    let id = repo
+        .save_device_config(&DeviceConfig::new("192.0.2.54", "original"))
+        .unwrap();
+    for credentials in [
+        SnmpCredentials {
+            community: Some("********".into()),
+            ..Default::default()
+        },
+        SnmpCredentials {
+            version: Some("invalid".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            repo.set_device_snmp_credentials(&[id], credentials)
+                .is_err()
+        );
+    }
+    assert_eq!(
+        repo.find_device_by_ip("192.0.2.54")
+            .unwrap()
+            .unwrap()
+            .community,
+        "original"
+    );
+    let mut credentials = SnmpCredentials {
+        version: Some("3".into()),
+        ..Default::default()
+    }
+    .resolve(&AppConfig::default().snmp, "");
+    assert!(credentials.validate_resolved().is_err());
+    credentials.v3_username = Some("user".into());
+    credentials.v3_auth_protocol = Some("none".into());
+    credentials.v3_priv_protocol = Some("none".into());
+    assert!(credentials.validate_resolved().is_ok());
+    credentials.v3_priv_protocol = Some("aes128".into());
+    assert!(credentials.validate_resolved().is_err());
+}
+
+#[test]
 fn communities_are_envelopes_on_disk_but_plaintext_only_for_snmp_in_memory() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("data.db");
@@ -200,58 +419,76 @@ fn repository_credentials_authenticate_an_actual_loopback_snmp_exchange() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("data.db");
     let repo = repository(&path);
-    repo.save_device_config(&DeviceConfig::new("127.0.0.1", "loopback-private"))
-        .unwrap();
-    let secret = repo
-        .find_device_by_ip("127.0.0.1")
-        .unwrap()
-        .unwrap()
-        .community;
-    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let ip = "127.0.0.241";
+    repo.save_device_config(&DeviceConfig::new(ip, "")).unwrap();
+    let socket = UdpSocket::bind((ip, 161)).unwrap();
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
-    let endpoint = socket.local_addr().unwrap();
     let worker = std::thread::spawn(move || {
-        let mut buffer = [0; 1500];
-        let (length, peer) = socket.recv_from(&mut buffer).unwrap();
-        let mut packet = &buffer[..length];
-        let (_, mut message) = take(&mut packet);
-        let (_, version) = take(&mut message);
-        let (_, community) = take(&mut message);
-        assert_eq!(community, b"loopback-private");
-        let (_, mut pdu) = take(&mut message);
-        let (_, request_id) = take(&mut pdu);
-        take(&mut pdu);
-        take(&mut pdu);
-        let (_, mut bindings) = take(&mut pdu);
-        let (_, mut binding) = take(&mut bindings);
-        let (_, oid) = take(&mut binding);
-        let binding = tlv(0x30, &[tlv(6, oid), tlv(4, b"loopback-switch")].concat());
-        let pdu = tlv(
-            0xa2,
-            &[
-                tlv(2, request_id),
-                tlv(2, &[0]),
-                tlv(2, &[0]),
-                tlv(0x30, &binding),
-            ]
-            .concat(),
-        );
-        let response = tlv(0x30, &[tlv(2, version), tlv(4, community), pdu].concat());
-        socket.send_to(&response, peer).unwrap();
+        for expected in [
+            b"loopback-global".as_slice(),
+            b"loopback-private".as_slice(),
+        ] {
+            let mut buffer = [0; 1500];
+            let (length, peer) = socket.recv_from(&mut buffer).unwrap();
+            let mut packet = &buffer[..length];
+            let (_, mut message) = take(&mut packet);
+            let (_, version) = take(&mut message);
+            let (_, community) = take(&mut message);
+            assert_eq!(community, expected);
+            let (_, mut pdu) = take(&mut message);
+            let (_, request_id) = take(&mut pdu);
+            take(&mut pdu);
+            take(&mut pdu);
+            let (_, mut bindings) = take(&mut pdu);
+            let (_, mut binding) = take(&mut bindings);
+            let (_, oid) = take(&mut binding);
+            let binding = tlv(0x30, &[tlv(6, oid), tlv(4, b"loopback-switch")].concat());
+            let pdu = tlv(
+                0xa2,
+                &[
+                    tlv(2, request_id),
+                    tlv(2, &[0]),
+                    tlv(2, &[0]),
+                    tlv(0x30, &binding),
+                ]
+                .concat(),
+            );
+            let response = tlv(0x30, &[tlv(2, version), tlv(4, community), pdu].concat());
+            socket.send_to(&response, peer).unwrap();
+        }
     });
-    let mut session =
-        snmp::SyncSession::new(endpoint, secret.as_bytes(), Some(Duration::from_secs(3)), 1)
+    let mut global = AppConfig::default().snmp;
+    global.default_community = "loopback-global".into();
+    for community in [None, Some("loopback-private")] {
+        let device = repo.find_device_by_ip(ip).unwrap().unwrap();
+        if let Some(community) = community {
+            repo.set_device_snmp_credentials(
+                &[device.id.unwrap()],
+                tracepulse::snmp::credentials::SnmpCredentials {
+                    community: Some(community.into()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
-    let mut response = session.get(&[1, 3, 6, 1, 2, 1, 1, 5, 0]).unwrap();
-    let (_, value) = response.varbinds.next().unwrap();
-    assert!(matches!(
-        value,
-        snmp::Value::OctetString(b"loopback-switch")
-    ));
+        }
+        let config = repo
+            .resolved_snmp_config(ip, &global, &device.community)
+            .unwrap();
+        let client = tracepulse::snmp::SnmpClient::with_snmp_config(
+            config.default_community.clone(),
+            config,
+        );
+        assert_eq!(
+            client
+                .probe_device_once(&DeviceConfig::new(ip, ""), Duration::from_secs(3))
+                .unwrap(),
+            "loopback-switch"
+        );
+    }
     worker.join().unwrap();
-    assert!(stored(&path, "127.0.0.1").starts_with(PREFIX));
+    assert!(stored(&path, ip).starts_with(PREFIX));
 }
 
 #[test]

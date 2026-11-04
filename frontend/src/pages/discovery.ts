@@ -1,5 +1,7 @@
+import { credentialFields, clearCredentials, readCredentials } from "../shared/snmp-credentials";
 import { esc } from "../shared/escape";
 import { addSecretVisibility } from "../shared/secret-visibility";
+import { deviceStatusClass } from "../shared/status";
 
 interface DiscoveryDevice {
     ip: string;
@@ -175,7 +177,7 @@ function renderResults(devices: DiscoveryDevice[], scanned: number, total: numbe
     devices.forEach((device) => {
         const registered = existingIps().has(device.ip);
         const row = document.createElement("tr");
-        row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${device.status === "online" ? "status-online" : "status-unknown"}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
+        row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${deviceStatusClass(device.status)}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
         tbody.appendChild(row);
     });
     el<HTMLElement>("results-section").style.display = "block";
@@ -208,19 +210,22 @@ export function hideManual(): void { el<HTMLElement>("manual-box").style.display
 export async function addManual(): Promise<void> {
     const ip = el<HTMLInputElement>("manual-ip").value.trim();
     const name = el<HTMLInputElement>("manual-name").value.trim() || `device-${ip.split(".").pop()}`;
-    const community = el<HTMLInputElement>("manual-community").value.trim() || "public";
+    const community = el<HTMLInputElement>("manual-community").value;
+    const snmp_credentials = readCredentials(el<HTMLElement>("manual-box"));
     const result = el<HTMLElement>("manual-result");
     if (!ip) { result.textContent = "! IP address is required."; return; }
     try {
-        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community }]) });
+        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community, snmp_credentials }]) });
         const data = await response.json() as RegisterResult;
-        result.textContent = data.error || data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`;
-        if (data.registered.length) { existingIps().add(ip); el<HTMLInputElement>("manual-ip").value = ""; el<HTMLInputElement>("manual-name").value = ""; }
+        result.textContent = data.error || data.errors?.join("; ") || (data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`);
+        if (data.registered.length) { existingIps().add(ip); el<HTMLInputElement>("manual-ip").value = ""; el<HTMLInputElement>("manual-name").value = ""; el<HTMLInputElement>("manual-community").value = ""; clearCredentials(el<HTMLElement>("manual-box")); }
     } catch (error: unknown) { result.textContent = String(error); }
 }
 
 window.addManual = addManual; window.cancelScan = cancelScan; window.hideManual = hideManual; window.registerSelected = registerSelected; window.runTopologyOnly = runTopologyOnly; window.showManual = showManual; window.startScan = startScan; window.toggleAll = toggleAll; window.updateHint = updateHint; window.updateRegisterBtn = updateRegisterBtn;
 window.applyPageLanguage = applyPageLanguage;
+const manualCommunity = document.getElementById("manual-community");
+manualCommunity?.parentElement?.insertAdjacentHTML("afterend", credentialFields("manual-snmp", false, false));
 for (const id of ["community", "manual-community"]) {
     const input = document.getElementById(id);
     if (input instanceof HTMLInputElement) addSecretVisibility(input);

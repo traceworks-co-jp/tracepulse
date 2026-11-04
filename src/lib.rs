@@ -34,6 +34,7 @@ pub fn run() -> Result<(), AppError> {
     let mut conn = crate::db::sqlite::initialize_database(&db_path)?;
     crate::db::credentials::protect(&mut conn)?;
     let mut config = AppConfig::load(&config_path)?;
+    crate::snmp::management::initialize(&conn, &config.snmp)?;
     config.web.port = parse_web_port(&args, config.web.port)?;
 
     let runner = AppRunner::new(config, conn).with_database_path(db_path);

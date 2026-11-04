@@ -197,7 +197,7 @@ var TracePulseDashboard = (() => {
     }
   };
   function initializeOnboarding(auto = false) {
-    const text2 = (key) => copy[document.documentElement.lang === "ja" ? "ja" : "en"][key];
+    const text3 = (key) => copy[document.documentElement.lang === "ja" ? "ja" : "en"][key];
     const style = document.createElement("style");
     style.textContent = `
         .setup-dialog{box-sizing:border-box;inset:0;margin:auto;width:min(600px,calc(100% - 24px));max-height:calc(100dvh - 24px);padding:24px;border:1px solid var(--border,#475569);border-radius:8px;background:var(--panel-bg,#1e293b);color:var(--text,#e2e8f0);overflow:auto}
@@ -304,7 +304,7 @@ var TracePulseDashboard = (() => {
         return;
       }
       const titles = ["welcome", "discovery", "alerts"];
-      dialog2.innerHTML = `<div class="setup-step">${text2("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text2(titles[step])}</h2>` + (step === 0 ? `<p>${text2("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text2("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text2("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text2("privacy")}</p><button class="setup-primary" type="submit">${text2("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text2("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text2("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text2("alertInfo")}</p><a href="/settings" id="setup-settings">${text2("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text2("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text2("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text2(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
+      dialog2.innerHTML = `<div class="setup-step">${text3("step")} ${step + 1} / 3</div><h2 id="setup-title" tabindex="-1">${text3(titles[step])}</h2>` + (step === 0 ? `<p>${text3("intro")}</p>` : step === 1 ? `<form id="setup-form"><label>${text3("cidr")}<input id="setup-cidr" required placeholder="192.168.1.0/24" autocomplete="off"></label><label>${text3("community")}<input id="setup-community" type="password" required value="public" autocomplete="off"></label><p>${text3("privacy")}</p><button class="setup-primary" type="submit">${text3("scan")}</button></form><progress id="setup-progress" hidden aria-label="${text3("progress")}"></progress><div id="setup-results" class="setup-results"></div><button type="button" data-action="register" hidden>${text3("register")}</button><p id="setup-status" role="status" aria-live="polite"></p>` : `<p>${text3("alertInfo")}</p><a href="/settings" id="setup-settings">${text3("settings")}</a>`) + `<div class="setup-actions"><button type="button" data-action="skip">${text3("skip")}</button>${step > 0 || step === 0 && languageChoiceEnabled ? `<button type="button" data-action="${step === 0 ? "language-back" : "back"}">${text3("back")}</button>` : ""}<button type="button" class="setup-primary" data-action="next">${text3(step === 2 ? "finish" : step === 1 && !registered ? "continue" : "next")}</button></div>`;
       dialog2.querySelector("#setup-title")?.focus();
       const communityInput = dialog2.querySelector("#setup-community");
       if (communityInput) addSecretVisibility(communityInput);
@@ -320,7 +320,7 @@ var TracePulseDashboard = (() => {
       const community = dialog2.querySelector("#setup-community").value;
       const match = cidr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
       if (!match || match[1].split(".").some((part) => Number(part) > 255) || Number(match[2]) < 24 || Number(match[2]) > 32) {
-        status(text2("rangeError"), true);
+        status(text3("rangeError"), true);
         return;
       }
       stop();
@@ -330,7 +330,7 @@ var TracePulseDashboard = (() => {
       dialog2.querySelector("[data-action=register]").hidden = true;
       const signal = controller.signal;
       setBusy(true);
-      status(text2("scanning"));
+      status(text3("scanning"));
       const progress = dialog2.querySelector("#setup-progress");
       progress.hidden = false;
       progress.removeAttribute("value");
@@ -339,23 +339,23 @@ var TracePulseDashboard = (() => {
         stop();
         setBusy(false);
         progress.hidden = true;
-        status(error instanceof Error ? error.message : text2("failure"), true);
+        status(error instanceof Error ? error.message : text3("failure"), true);
       };
-      deadline = window.setTimeout(() => fail(new Error(text2("timeout"))), 3e5);
+      deadline = window.setTimeout(() => fail(new Error(text3("timeout"))), 3e5);
       try {
         const prefix = Number(match[2]);
         const hosts = prefix >= 31 ? 2 ** (32 - prefix) : 2 ** (32 - prefix) - 2;
         const job = await request("/api/discovery/scan", signal, new URLSearchParams({ cidr, community, max_hosts: String(hosts) }));
         if (signal.aborted) return;
-        if (!job.job_id) throw new Error(text2("failure"));
+        if (!job.job_id) throw new Error(text3("failure"));
         const poll = async () => {
           try {
             const result = await request(`/api/discovery/scan/${encodeURIComponent(job.job_id)}`, signal);
             if (signal.aborted) return;
             progress.max = result.total || hosts;
             progress.value = result.scanned || 0;
-            status(`${text2("scanning")} ${result.scanned || 0} / ${result.total || hosts}`);
-            if (result.status === "error") throw new Error(text2("failure"));
+            status(`${text3("scanning")} ${result.scanned || 0} / ${result.total || hosts}`);
+            if (result.status === "error") throw new Error(text3("failure"));
             if (result.status !== "done") {
               timer = window.setTimeout(() => void poll(), 1500);
               return;
@@ -367,7 +367,7 @@ var TracePulseDashboard = (() => {
             devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community }));
             setBusy(false);
             progress.hidden = true;
-            status(devices.length ? text2("selected") : text2("empty"));
+            status(devices.length ? text3("selected") : text3("empty"));
             dialog2.querySelector("#setup-results").innerHTML = devices.map((device, index) => `<label class="setup-device"><input type="checkbox" value="${index}" checked><span>${esc(device.ip)} ${esc(device.name || "")}</span></label>`).join("");
             dialog2.querySelector("[data-action=register]").hidden = devices.length === 0;
           } catch (error) {
@@ -383,7 +383,7 @@ var TracePulseDashboard = (() => {
       if (busy) return;
       const selected = Array.from(dialog2.querySelectorAll("#setup-results input:checked")).map((input) => devices[Number(input.value)]);
       if (!selected.length) {
-        status(text2("selected"), true);
+        status(text3("selected"), true);
         return;
       }
       const signal = controller.signal;
@@ -396,12 +396,12 @@ var TracePulseDashboard = (() => {
           if (accepted.has(devices[Number(input.value)].ip)) input.closest("label")?.remove();
         });
         registered = result.registered.length > 0 || result.skipped.length > 0;
-        status(result.errors.length ? result.errors.join("\n") : registered ? text2("registered") : text2("failure"), result.errors.length > 0 || !registered);
+        status(result.errors.length ? result.errors.join("\n") : registered ? text3("registered") : text3("failure"), result.errors.length > 0 || !registered);
         window.refreshDashboard?.();
-        dialog2.querySelector("[data-action=next]").textContent = text2(registered ? "next" : "continue");
+        dialog2.querySelector("[data-action=next]").textContent = text3(registered ? "next" : "continue");
         dialog2.querySelector("[data-action=register]").hidden = dialog2.querySelectorAll("#setup-results input").length === 0;
       } catch (error) {
-        if (!signal.aborted) status(error instanceof Error ? error.message : text2("failure"), true);
+        if (!signal.aborted) status(error instanceof Error ? error.message : text3("failure"), true);
       } finally {
         if (!signal.aborted) setBusy(false);
       }
@@ -442,12 +442,12 @@ var TracePulseDashboard = (() => {
     const launch = document.createElement("button");
     launch.className = "setup-launch";
     launch.type = "button";
-    launch.textContent = text2("guide");
+    launch.textContent = text3("guide");
     launch.hidden = auto && dismissed;
     launch.addEventListener("click", () => open());
     document.querySelector("main h1")?.after(launch);
     window.addEventListener("tracepulse-language-change", () => {
-      launch.textContent = text2("guide");
+      launch.textContent = text3("guide");
       if (dialog2.open && step !== 1) render();
     });
     if (auto) {
@@ -456,6 +456,55 @@ var TracePulseDashboard = (() => {
       }).catch(() => {
       });
     }
+  }
+
+  // frontend/src/shared/snmp-credentials.ts
+  var japanese = () => document.documentElement.lang === "ja";
+  var text = (key, fallback) => window.t?.(key) || fallback;
+  var credentialTitle = () => text("snmp_credential_title", japanese() ? "SNMP\u8A8D\u8A3C\u60C5\u5831" : "SNMP credentials");
+  function credentialFields(prefix, global = false, includeCommunity = true) {
+    if (!document.getElementById("snmp-credential-styles")) {
+      const style = document.createElement("style");
+      style.id = "snmp-credential-styles";
+      style.textContent = `.snmp-credential-fields{display:grid;gap:12px;min-width:0;border:0;padding:0;margin:12px 0}
+            .snmp-credential-fields label{display:grid;gap:6px;font-size:.88rem;min-width:0}
+            .snmp-credential-fields input,.snmp-credential-fields select{box-sizing:border-box;width:100%;min-width:0;padding:8px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-bg,#0f172a);color:var(--tp-text,#e2e8f0)}
+            .snmp-credential-fields p{margin:0;font-size:.82rem;overflow-wrap:anywhere}
+            #snmp-connection-form{max-width:680px}#snmp-connection-form .field-row{grid-template-columns:1fr}
+            #snmp-connection-form .secret-input input{box-sizing:border-box;width:100%}
+            #manual-box .snmp-credential-fields{flex:1 1 100%}
+            html[data-theme=light] .snmp-credential-fields input,html[data-theme=light] .snmp-credential-fields select{background:#fff;color:#0f172a;border-color:#cbd5e1}`;
+      document.head.append(style);
+    }
+    const hintKey = global ? "snmp_credential_keep_hint" : "snmp_credential_inherit_hint";
+    const hint = text(hintKey, global ? "Leave blank to keep existing defaults." : "Blank fields inherit global defaults. Saving replaces the current device overrides.");
+    const optionKey = global ? "snmp_credential_unchanged" : "snmp_credential_global";
+    const label = (key, fallback) => `<span data-i18n="snmp_credential_${key}">${esc(text(`snmp_credential_${key}`, fallback))}</span>`;
+    const input = (key, fallback) => `<label for="${prefix}-${key}">${label(key, fallback)}<input id="${prefix}-${key}" data-snmp="${key}" type="password" autocomplete="new-password" maxlength="1024" placeholder="${esc(hint)}" data-i18n-placeholder="${hintKey}" aria-describedby="${prefix}-hint"></label>`;
+    const protocolLabels = { "2c": "SNMPv2c", "3": "SNMPv3", sha1: "SHA-1", sha256: "SHA-256", sha512: "SHA-512", aes128: "AES-128" };
+    const select = (key, fallback, options) => `<label for="${prefix}-${key}">${label(key, fallback)}<select id="${prefix}-${key}" data-snmp="${key}"><option value="" data-i18n="${optionKey}">${esc(text(optionKey, global ? "Unchanged" : "Global default"))}</option>${options.map((value) => value === "none" ? `<option value="none" data-i18n="snmp_credential_none">${esc(text("snmp_credential_none", "None"))}</option>` : `<option value="${value}">${esc(protocolLabels[value] || value)}</option>`).join("")}</select></label>`;
+    return `<fieldset class="snmp-credential-fields">
+        <legend data-i18n="snmp_credential_title">${esc(credentialTitle())}</legend><p id="${prefix}-hint" data-i18n="${hintKey}">${esc(hint)}</p>
+        ${select("version", "SNMP version", ["2c", "3"])}
+        ${includeCommunity ? input("community", "Community (SNMPv2c)") : ""}
+        ${input("v3_username", "v3 username")}
+        ${select("v3_auth_protocol", "v3 authentication", ["sha256", "sha512", "sha1", "none"])}
+        ${input("v3_auth_password", "v3 authentication password")}
+        ${select("v3_priv_protocol", "v3 privacy", ["aes128", "none"])}
+        ${input("v3_priv_password", "v3 privacy password")}
+    </fieldset>`;
+  }
+  function readCredentials(container) {
+    const credentials = {};
+    container.querySelectorAll("[data-snmp]").forEach((input) => {
+      if (input.value) credentials[input.dataset.snmp] = input.value;
+    });
+    return credentials;
+  }
+  function clearCredentials(container) {
+    container.querySelectorAll("[data-snmp]").forEach((input) => {
+      input.value = "";
+    });
   }
 
   // frontend/src/shared/device-metadata.ts
@@ -599,10 +648,12 @@ var TracePulseDashboard = (() => {
         <input id="device-tag-input" maxlength="64" aria-describedby="device-tag-hint">
         <p id="device-tag-hint">${esc(metadataText("tagHint"))}</p>
         <button type="button" id="device-add-tag">${esc(metadataText("add"))}</button>
+        <button type="button" id="device-snmp-edit">${esc(credentialTitle())}</button>
         <p role="alert"></p><div class="metadata-actions">
         <button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
         <button type="submit">${esc(metadataText("save"))}</button></div></form>`);
     const input = element.querySelector("#device-tag-input");
+    element.querySelector("#device-snmp-edit").onclick = () => editSnmpCredentials([device], saved);
     const error = element.querySelector("[role=alert]");
     const renderTags = () => {
       const chips = element.querySelector("#device-tag-chips");
@@ -659,6 +710,102 @@ var TracePulseDashboard = (() => {
     renderTags();
     element.showModal();
   }
+  function editSnmpCredentials(devices, saved) {
+    const element = dialog("device-snmp-dialog", credentialTitle());
+    element.insertAdjacentHTML("beforeend", `<form><p>${esc(metadataText("targets"))}: ${devices.length}</p>
+        <ul>${devices.map((device) => `<li>${esc(device.ip || "")} ${esc(deviceLabel(device))}</li>`).join("")}</ul>
+        ${credentialFields("device-snmp")}
+        <p role="status" aria-live="polite"></p>
+        <p role="alert"></p><div class="metadata-actions"><button type="button" data-reset>${document.documentElement.lang === "ja" ? "\u5171\u901A\u8A2D\u5B9A\u3078\u623B\u3059" : "Use global defaults"}</button>
+        <button type="button" data-cancel>${esc(metadataText("cancel"))}</button><button type="submit">${esc(metadataText("save"))}</button></div></form>`);
+    element.querySelector("[data-cancel]").onclick = () => {
+      clearCredentials(element);
+      element.close();
+    };
+    let busy = false;
+    let loading = false;
+    const individual = devices.length === 1 && Boolean(devices[0].ip);
+    const japanese2 = document.documentElement.lang === "ja";
+    const status = element.querySelector("[role=status]");
+    const failure = element.querySelector("[role=alert]");
+    const controls = element.querySelectorAll("input,select,button");
+    const setBusy = (value) => {
+      busy = value;
+      controls.forEach((control) => {
+        control.disabled = value;
+      });
+    };
+    const controller = new AbortController();
+    element.addEventListener("cancel", (event) => {
+      if (busy && !loading) event.preventDefault();
+    });
+    element.addEventListener("close", () => {
+      controller.abort();
+      clearCredentials(element);
+    });
+    const persist = async (defaults) => {
+      if (busy) return;
+      const credentials = defaults ? {} : readCredentials(element);
+      setBusy(true);
+      failure.textContent = "";
+      try {
+        await post("/api/devices/snmp-credentials", { device_ids: devices.map((device) => device.id), credentials, preserve_secrets: !defaults && individual });
+        clearCredentials(element);
+        element.close();
+        saved();
+      } catch (reason) {
+        failure.textContent = String(reason);
+      } finally {
+        setBusy(false);
+      }
+    };
+    element.querySelector("[data-reset]").onclick = () => {
+      if (window.confirm(japanese2 ? "\u500B\u5225\u306ESNMP\u8A8D\u8A3C\u60C5\u5831\u3092\u524A\u9664\u3057\u3001\u5171\u901A\u8A2D\u5B9A\u3078\u623B\u3057\u307E\u3059\u304B\uFF1F" : "Remove the device SNMP overrides and use global defaults?")) void persist(true);
+    };
+    element.querySelector("form").onsubmit = (event) => {
+      event.preventDefault();
+      void persist(false);
+    };
+    element.showModal();
+    if (individual) {
+      loading = true;
+      setBusy(true);
+      element.querySelector("[data-cancel]").disabled = false;
+      status.textContent = japanese2 ? "\u8A2D\u5B9A\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059\u2026" : "Loading settings...";
+      const hint = element.querySelector("#device-snmp-hint");
+      hint.removeAttribute("data-i18n");
+      hint.textContent = japanese2 ? "\u4FDD\u5B58\u6E08\u307F\u306E\u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\u3068\u30D1\u30B9\u30EF\u30FC\u30C9\u306F\u8868\u793A\u3057\u307E\u305B\u3093\u3002\u7A7A\u6B04\u306E\u307E\u307E\u4FDD\u5B58\u3059\u308B\u3068\u65E2\u5B58\u5024\u3092\u7DAD\u6301\u3057\u307E\u3059\u3002" : "Stored communities and passwords are not displayed. Leave them blank to keep existing values.";
+      void (async () => {
+        try {
+          const response = await fetch(`/api/device/${encodeURIComponent(devices[0].ip)}/snmp-credentials`, { signal: controller.signal });
+          const data = await response.json();
+          if (!response.ok || !data.ok || !data.devices) throw new Error(data.error || metadataText("failed"));
+          const view = data.devices;
+          for (const key of ["version", "v3_username", "v3_auth_protocol", "v3_priv_protocol"]) {
+            const input = element.querySelector(`[data-snmp=${key}]`);
+            input.value = view.credentials[key] || "";
+            if (key === "v3_username" && input instanceof HTMLInputElement) {
+              input.type = "text";
+              input.autocomplete = "off";
+            }
+          }
+          for (const key of ["community", "v3_auth_password", "v3_priv_password"]) {
+            const input = element.querySelector(`[data-snmp=${key}]`);
+            input.removeAttribute("data-i18n-placeholder");
+            input.placeholder = view.secret_configured[key] ? japanese2 ? "\u8A2D\u5B9A\u6E08\u307F\uFF08\u5909\u66F4\u3059\u308B\u5834\u5408\u306E\u307F\u5165\u529B\uFF09" : "Configured (enter only to replace)" : japanese2 ? "\u7A7A\u6B04\u306E\u5834\u5408\u306F\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Blank: use global defaults";
+          }
+          status.textContent = view.individual_configured ? japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u30C7\u30D0\u30A4\u30B9\u500B\u5225\u8A2D\u5B9A" : "Current settings: device overrides" : japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Current settings: global defaults";
+          loading = false;
+          setBusy(false);
+        } catch (reason) {
+          if (controller.signal.aborted) return;
+          status.textContent = "";
+          failure.textContent = String(reason);
+          element.querySelector("[data-cancel]").disabled = false;
+        }
+      })();
+    }
+  }
   function bulkActions(devices, saved, individual = false) {
     const ids = devices.map((device) => device.id).filter((id) => typeof id === "number");
     const chooser = dialog("bulk-actions-dialog", metadataText(individual ? "actions" : "bulk"));
@@ -666,9 +813,14 @@ var TracePulseDashboard = (() => {
     chooser.insertAdjacentHTML("beforeend", `${list()}<div class="metadata-actions">
         <button type="button" data-action="tags">${esc(metadataText("bulkTags"))}</button>
         <button type="button" data-action="names">${esc(metadataText("bulkNames"))}</button>
+        <button type="button" data-action="snmp">${esc(credentialTitle())}</button>
         <button type="button" data-action="unregister">${esc(metadataText("unregister"))}</button>
         <button type="button" data-cancel>${esc(metadataText("cancel"))}</button></div>`);
     chooser.querySelector("[data-cancel]").onclick = () => chooser.close();
+    chooser.querySelector("[data-action=snmp]").onclick = () => {
+      chooser.close();
+      editSnmpCredentials(devices, saved);
+    };
     chooser.querySelector("[data-action=names]").onclick = () => {
       chooser.close();
       if (individual) editDeviceMetadata(devices[0], saved);
@@ -915,7 +1067,7 @@ var TracePulseDashboard = (() => {
   };
   var fields = ["ip", "display_name", "name", "tags", "status", "health_score"];
   var statuses = ["online", "warning", "critical", "offline", "unknown"];
-  var text = (key) => copy3[document.documentElement.lang === "ja" ? "ja" : "en"][key];
+  var text2 = (key) => copy3[document.documentElement.lang === "ja" ? "ja" : "en"][key];
   var operators = (field2) => field2 === "health_score" ? ["gte", "lte", "equals", "not_equals", "gt", "lt"] : field2 === "status" ? ["equals", "not_equals"] : ["contains", "equals", "not_equals", "starts_with"];
   function initializeDeviceFilters(before, changed) {
     const conditions = [];
@@ -937,20 +1089,20 @@ var TracePulseDashboard = (() => {
     before.before(section);
     const invalid = (condition) => condition.field === "health_score" && condition.value.trim() !== "" && (!Number.isFinite(Number(condition.value)) || Number(condition.value) < 0 || Number(condition.value) > 100);
     const update = () => {
-      section.querySelector("[role=alert]").textContent = conditions.some(invalid) ? text("invalid") : "";
+      section.querySelector("[role=alert]").textContent = conditions.some(invalid) ? text2("invalid") : "";
       changed();
     };
     const render = () => {
-      section.innerHTML = `<h3 id="device-filters-title">${esc(text("title"))}</h3><p>${esc(text("hint"))}</p><div id="device-filter-rows"></div><button type="button" id="device-filter-add">${esc(text("add"))}</button> <button type="button" id="device-filter-clear">${esc(text("clear"))}</button><p role="alert"></p>`;
+      section.innerHTML = `<h3 id="device-filters-title">${esc(text2("title"))}</h3><p>${esc(text2("hint"))}</p><div id="device-filter-rows"></div><button type="button" id="device-filter-add">${esc(text2("add"))}</button> <button type="button" id="device-filter-clear">${esc(text2("clear"))}</button><p role="alert"></p>`;
       const rows = section.querySelector("#device-filter-rows");
       conditions.forEach((condition, index) => {
         const row = document.createElement("div");
         row.className = "device-filter-row";
-        const options = (values, selected, labels) => values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(labels ? text(value) : value)}</option>`).join("");
-        row.innerHTML = `<label>${esc(text("field"))}<select data-filter-field>${options(fields, condition.field, true)}</select></label>
-                <label>${esc(text("operator"))}<select data-filter-operator>${options(operators(condition.field), condition.operator, true)}</select></label>
-                <label>${esc(text("value"))}${condition.field === "status" ? `<select data-filter-value><option value="">-</option>${options(statuses, condition.value, false)}</select>` : `<input data-filter-value type="text" ${condition.field === "health_score" ? 'inputmode="decimal"' : ""} value="${esc(condition.value)}">`}</label>
-                <button type="button" data-filter-remove>${esc(text("remove"))}</button>`;
+        const options = (values, selected, labels) => values.map((value) => `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(labels ? text2(value) : value)}</option>`).join("");
+        row.innerHTML = `<label>${esc(text2("field"))}<select data-filter-field>${options(fields, condition.field, true)}</select></label>
+                <label>${esc(text2("operator"))}<select data-filter-operator>${options(operators(condition.field), condition.operator, true)}</select></label>
+                <label>${esc(text2("value"))}${condition.field === "status" ? `<select data-filter-value><option value="">-</option>${options(statuses, condition.value, false)}</select>` : `<input data-filter-value type="text" ${condition.field === "health_score" ? 'inputmode="decimal"' : ""} value="${esc(condition.value)}">`}</label>
+                <button type="button" data-filter-remove>${esc(text2("remove"))}</button>`;
         row.querySelector("[data-filter-field]").onchange = (event) => {
           condition.field = event.currentTarget.value;
           condition.operator = operators(condition.field)[0];
@@ -987,7 +1139,7 @@ var TracePulseDashboard = (() => {
         update();
         section.querySelector("#device-filter-add").focus();
       };
-      section.querySelector("[role=alert]").textContent = conditions.some(invalid) ? text("invalid") : "";
+      section.querySelector("[role=alert]").textContent = conditions.some(invalid) ? text2("invalid") : "";
     };
     render();
     window.addEventListener("tracepulse-language-change", render);
@@ -1019,6 +1171,22 @@ var TracePulseDashboard = (() => {
       if (condition.operator === "not_equals") return values.every((item) => item !== value);
       return values.some((item) => condition.operator === "contains" ? item.includes(value) : condition.operator === "starts_with" ? item.startsWith(value) : item === value);
     });
+  }
+
+  // frontend/src/shared/status.ts
+  function deviceStatusClass(status) {
+    switch (status?.trim().toLowerCase()) {
+      case "online":
+        return "status-online";
+      case "offline":
+        return "status-offline";
+      case "warning":
+        return "status-warning";
+      case "critical":
+        return "status-critical";
+      default:
+        return "status-unknown";
+    }
   }
 
   // frontend/src/pages/dashboard.ts
@@ -1065,20 +1233,6 @@ var TracePulseDashboard = (() => {
   function statusOrder(status) {
     const order = { critical: 0, offline: 1, warning: 2, unknown: 3, online: 4 };
     return order[status || ""] ?? 5;
-  }
-  function statusClass(status) {
-    switch (status) {
-      case "online":
-        return "status-online";
-      case "offline":
-        return "status-offline";
-      case "warning":
-        return "status-warning";
-      case "critical":
-        return "status-critical";
-      default:
-        return "status-unknown";
-    }
   }
   function compareValue(a, b, column) {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
@@ -1129,14 +1283,14 @@ var TracePulseDashboard = (() => {
       return;
     }
     tbody.innerHTML = sorted.map((device) => {
-      const statusBadgeClass = statusClass(device.status);
+      const statusBadgeClass = deviceStatusClass(device.status);
       const rowClass = device.error_spike ? " class=spike-row" : "";
       const spikeBadge = device.error_spike ? "<span class=spike-badge>&#9888; Error Spike</span>" : "";
       const deleting = deletingIps.has(device.ip);
       const actionButton = `<button type="button" class="device-action-button" data-action-device="${esc(device.ip)}" aria-haspopup="dialog" ${deleting || typeof device.id !== "number" ? "disabled" : ""}>${esc(metadataText("actions"))}</button>`;
       const lastSeen = fmtTime(device.last_seen || device.last_seen_at);
-      const healthBadgeClass = statusClass(device.health_status);
-      const health = typeof device.health_score === "number" ? `<span class="${esc(healthBadgeClass)}">${device.health_score}/100</span><meter min='0' max='100' value='${device.health_score}' aria-label="${esc(t("health_score"))}" style='width:4rem;margin-left:.5rem;vertical-align:middle'></meter>` : "-";
+      const healthBadgeClass = deviceStatusClass(device.health_status);
+      const health = typeof device.health_score === "number" && Number.isFinite(device.health_score) ? `<span class="${healthBadgeClass}">${device.health_score}/100</span><span class="health-meter ${healthBadgeClass}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, Math.max(0, device.health_score))}" aria-label="${esc(t("health_score"))}"><span class="health-meter-fill" style="width:${Math.min(100, Math.max(0, device.health_score))}%"></span></span>` : "-";
       const checkbox = typeof device.id === "number" ? `<input type="checkbox" data-device-id="${device.id}" aria-label="${esc(`${metadataText("select")} ${device.ip}`)}" ${selectedIds.has(device.id) ? "checked" : ""}>` : "";
       const tags = (device.tags || []).map((tag) => `<span class="device-tag">${esc(tag)}</span>`).join("");
       return `<tr${rowClass}><td>${checkbox}</td><td><a href="/device/${esc(encodeURIComponent(device.ip))}" style='color:#38bdf8;text-decoration:none'>${esc(device.ip)}</a></td><td>${esc(deviceLabel(device))}${spikeBadge}</td><td>${esc(device.name || "-")}</td><td>${tags ? `<div class="device-tags">${tags}</div>` : "-"}</td><td><span class="${esc(statusBadgeClass)}">${esc(device.status)}</span></td><td>${health}</td><td>${lastSeen}</td><td><div class='row-actions'>${actionButton}</div></td></tr>`;

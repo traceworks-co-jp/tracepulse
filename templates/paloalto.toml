@@ -1,0 +1,29 @@
+name = "Palo Alto Networks PAN-OS"
+description = "Management-plane CPU and active/maximum session counts"
+enterprise_id = 25461
+
+# PAN-OS management-plane CPU; this is not data-plane CPU utilization.
+[cpu]
+candidates = ["1.3.6.1.4.1.25461.2.1.2.3.1.0"]
+
+[[metrics]]
+key = "data_plane_cpu"
+oid = "1.3.6.1.4.1.25461.2.1.2.1.1.2"
+unit = "percent"
+label = "Data Plane CPU"
+data_type = "gauge"
+aggregation = "max"
+
+[[metrics]]
+key = "active_sessions"
+oid = "1.3.6.1.4.1.25461.2.1.2.3.3.0"
+unit = "sessions"
+label = "Active Sessions"
+data_type = "gauge"
+
+[[metrics]]
+key = "maximum_sessions"
+oid = "1.3.6.1.4.1.25461.2.1.2.3.4.0"
+unit = "sessions"
+label = "Maximum Sessions"
+data_type = "gauge"

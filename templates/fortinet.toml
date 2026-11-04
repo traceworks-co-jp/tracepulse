@@ -1,0 +1,19 @@
+name = "Fortinet FortiGate"
+description = "FortiGate system CPU, memory, and active session count"
+sysObjectID_prefix = "1.3.6.1.4.1.12356.101"
+enterprise_id = 12356
+
+# FORTINET-FORTIGATE-MIB system utilization gauges (0..100 percent).
+[cpu]
+candidates = ["1.3.6.1.4.1.12356.101.4.1.3.0"]
+
+[memory]
+mode = "direct"
+oid = "1.3.6.1.4.1.12356.101.4.1.4.0"
+
+[[metrics]]
+key = "session_count"
+oid = "1.3.6.1.4.1.12356.101.4.1.8.0"
+unit = "sessions"
+label = "Active Sessions"
+data_type = "gauge"

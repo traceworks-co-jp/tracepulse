@@ -1,10 +1,10 @@
+use super::session::SyncSession;
 use super::{
     client::{SnmpClient, parse_oid_string, query_template_column},
     template::DomTableTemplate,
     walk::SnmpValue,
 };
 use crate::{device::types::DeviceConfig, error::AppError};
-use snmp::SyncSession;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

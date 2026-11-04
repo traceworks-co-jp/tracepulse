@@ -100,6 +100,18 @@ pub struct DeviceMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateMetricSample {
+    pub id: Option<i64>,
+    pub device_id: i64,
+    pub metric_key: String,
+    pub label: String,
+    pub unit: String,
+    pub data_type: String,
+    pub value: String,
+    pub sampled_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceSpike {
     pub if_index: i32,
     pub if_name: String,

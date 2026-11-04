@@ -22,6 +22,7 @@ impl Default for PollingConfig {
 impl Default for SnmpConfig {
     fn default() -> Self {
         Self {
+            credentials: Default::default(),
             default_community: super::defaults::default_snmp_community(),
             cpu_oid_override: super::defaults::default_cpu_oid_override(),
             memory_oid_override: super::defaults::default_memory_oid_override(),

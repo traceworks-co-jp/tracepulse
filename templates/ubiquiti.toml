@@ -1,0 +1,40 @@
+name = "Ubiquiti UniFi / EdgeMAX"
+description = "Ubiquiti CPU, memory capacity, and temperature readings"
+enterprise_id = 41112
+
+# Use the vendor CPU gauge when exposed, then standard HOST-RESOURCES-MIB.
+[cpu]
+candidates = [
+    "1.3.6.1.4.1.41112.1.4.1.1.4.1",
+    "1.3.6.1.2.1.25.3.3.1.2",
+]
+aggregation = "max"
+
+# Calculate used bytes and utilization by matching total/free table row indexes.
+[memory]
+mode = "calculated"
+free_oid = "1.3.6.1.4.1.41112.1.4.1.1.3.1"
+total_oid = "1.3.6.1.4.1.41112.1.4.1.1.2.1"
+used_is_bytes = true
+
+# Keep raw capacities available as extra metrics as well as derived memory usage.
+[[metrics]]
+key = "memory_total_bytes"
+oid = "1.3.6.1.4.1.41112.1.4.1.1.2.1"
+unit = "bytes"
+label = "Memory Total"
+data_type = "gauge"
+
+[[metrics]]
+key = "memory_free_bytes"
+oid = "1.3.6.1.4.1.41112.1.4.1.1.3.1"
+unit = "bytes"
+label = "Memory Free"
+data_type = "gauge"
+
+[[metrics]]
+key = "temperature"
+oid = "1.3.6.1.4.1.41112.1.4.1.1.6.1"
+unit = "C"
+label = "Temperature"
+data_type = "gauge"

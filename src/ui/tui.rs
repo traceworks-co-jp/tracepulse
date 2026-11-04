@@ -2662,16 +2662,17 @@ impl TuiRenderer {
                 last_seen_at: device.last_seen_at.clone(),
             };
 
-            let client = SnmpClient::with_snmp_config(
-                if device.community.is_empty() {
-                    self.runner.config.snmp.default_community.clone()
-                } else {
-                    device.community.clone()
-                },
-                self.runner.config.snmp.clone(),
-            );
-
-            client.query_device_port_neighbors(&cfg)
+            match repository.resolved_snmp_config(
+                &device.ip,
+                &self.runner.config.snmp,
+                &device.community,
+            ) {
+                Ok(config) => {
+                    SnmpClient::with_snmp_config(config.default_community.clone(), config)
+                        .query_device_port_neighbors(&cfg)
+                }
+                Err(_) => std::collections::HashMap::new(),
+            }
         };
 
         ifaces

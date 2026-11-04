@@ -3,6 +3,8 @@ import { initializeOnboarding } from "../shared/onboarding";
 const metrics = ["cpu", "memory", "bandwidth", "error_rate"] as const;
 type Metric = typeof metrics[number];
 interface MetricThresholds { warning: number; critical: number; }
+const validatedMetrics = new Set<Metric>();
+let toastTimer: number | undefined;
 
 interface SettingsFormValues {
     interval: number;
@@ -24,15 +26,50 @@ function t(key: string): string {
     return typeof window.t === "function" ? window.t(key) : key;
 }
 
+function fieldError(input: HTMLInputElement, message: string): void {
+    const id = `${input.id}-error`;
+    let error = document.getElementById(id);
+    if (!error) {
+        error = document.createElement("p");
+        error.id = id;
+        error.className = "settings-field-error";
+        error.setAttribute("aria-live", "polite");
+        input.after(error);
+        const descriptions = new Set((input.getAttribute("aria-describedby") || "").split(" ").filter(Boolean));
+        descriptions.add(id);
+        input.setAttribute("aria-describedby", [...descriptions].join(" "));
+    }
+    error.textContent = message;
+    error.hidden = !message;
+    input.setAttribute("aria-invalid", String(Boolean(message)));
+}
+
+function validateMetric(metric: Metric): boolean {
+    validatedMetrics.add(metric);
+    const warning = element<HTMLInputElement>(`${metric}_warning`);
+    const critical = element<HTMLInputElement>(`${metric}_critical`);
+    let warningError = !warning.value.trim() || !Number.isFinite(warning.valueAsNumber) || !warning.checkValidity() ? t("metric_threshold_range") : "";
+    let criticalError = !critical.value.trim() || !Number.isFinite(critical.valueAsNumber) || !critical.checkValidity() ? t("metric_threshold_range") : "";
+    if (!warningError && !criticalError && warning.valueAsNumber >= critical.valueAsNumber) {
+        warningError = t("metric_warning_order");
+        criticalError = t("metric_critical_order");
+    }
+    fieldError(warning, warningError);
+    fieldError(critical, criticalError);
+    return !warningError && !criticalError;
+}
+
 export function populateForm(values: SettingsFormValues): void {
+    validatedMetrics.clear();
     (element<HTMLInputElement>("interval").value = String(values.interval));
-    element<HTMLInputElement>("community").value = values.community;
     element<HTMLSelectElement>("timezone").value = values.timezone || "utc";
     try { localStorage.setItem("tracepulse-timezone", element<HTMLSelectElement>("timezone").value); } catch { /* ignore */ }
     for (const metric of metrics) {
         const thresholds = values.thresholds?.[metric] || (metric === "error_rate" ? { warning: 5, critical: 10 } : { warning: 80, critical: 90 });
         element<HTMLInputElement>(`${metric}_warning`).value = String(thresholds.warning);
         element<HTMLInputElement>(`${metric}_critical`).value = String(thresholds.critical);
+        fieldError(element<HTMLInputElement>(`${metric}_warning`), "");
+        fieldError(element<HTMLInputElement>(`${metric}_critical`), "");
     }
     element<HTMLInputElement>("spike").value = String(values.spike);
     element<HTMLInputElement>("warn_t").value = String(values.warn);
@@ -58,38 +95,43 @@ export function updateBar(): void {
 }
 
 function showToast(ok: boolean, message?: string): void {
+    window.clearTimeout(toastTimer);
     const success = element<HTMLElement>("toast-ok");
     const failure = element<HTMLElement>("toast-err");
     success.style.display = "none";
     failure.style.display = "none";
     if (ok) {
         success.style.display = "inline-block";
-        window.setTimeout(() => { success.style.display = "none"; }, 3000);
+        toastTimer = window.setTimeout(() => { success.style.display = "none"; }, 3000);
     } else {
-        failure.textContent = `x ${message || "Unknown error"}`;
+        failure.textContent = message || t("settings_save_failed");
         failure.style.display = "inline-block";
-        window.setTimeout(() => { failure.style.display = "none"; }, 5000);
+        toastTimer = window.setTimeout(() => { failure.style.display = "none"; }, 5000);
     }
 }
 
 export function saveSettings(): void {
     const timezone = element<HTMLSelectElement>("timezone").value;
     const thresholds = {} as Record<Metric, MetricThresholds>;
+    let firstInvalid: HTMLInputElement | undefined;
     for (const metric of metrics) {
         const warningInput = element<HTMLInputElement>(`${metric}_warning`);
         const criticalInput = element<HTMLInputElement>(`${metric}_critical`);
         const warning = warningInput.valueAsNumber;
         const critical = criticalInput.valueAsNumber;
-        if (!warningInput.checkValidity() || !criticalInput.checkValidity() || !Number.isFinite(warning) || !Number.isFinite(critical) || warning >= critical) {
-            showToast(false, t("metric_threshold_invalid"));
-            warningInput.focus();
-            return;
+        if (!validateMetric(metric) && !firstInvalid) {
+            firstInvalid = warningInput.getAttribute("aria-invalid") === "true" ? warningInput : criticalInput;
         }
         thresholds[metric] = { warning, critical };
     }
+    if (firstInvalid) {
+        showToast(false, t("settings_invalid_input"));
+        firstInvalid.scrollIntoView({ block: "center" });
+        firstInvalid.focus({ preventScroll: true });
+        return;
+    }
     const payload = {
         interval_seconds: parseInt(element<HTMLInputElement>("interval").value, 10),
-        default_community: element<HTMLInputElement>("community").value,
         timezone,
         ...thresholds,
         spike_threshold: parseInt(element<HTMLInputElement>("spike").value, 10),
@@ -101,7 +143,6 @@ export function saveSettings(): void {
         .then((response) => response.json())
         .then((data: { ok?: boolean; error?: string }) => {
             if (data.ok) {
-                element<HTMLInputElement>("community").value = "";
                 try { localStorage.setItem("tracepulse-timezone", timezone); } catch { /* ignore */ }
                 showToast(true);
             } else showToast(false, data.error);
@@ -118,5 +159,15 @@ window.resetDefaults = resetDefaults;
 window.saveSettings = saveSettings;
 window.updateBar = updateBar;
 populateForm(window.INIT);
-window.addEventListener("tracepulse-language-change", updateBar);
+for (const metric of metrics) {
+    for (const level of ["warning", "critical"]) {
+        const input = element<HTMLInputElement>(`${metric}_${level}`);
+        input.addEventListener("blur", () => validateMetric(metric));
+        input.addEventListener("input", () => { if (validatedMetrics.has(metric)) validateMetric(metric); });
+    }
+}
+window.addEventListener("tracepulse-language-change", () => {
+    updateBar();
+    validatedMetrics.forEach(metric => validateMetric(metric));
+});
 document.addEventListener("DOMContentLoaded", () => initializeOnboarding());

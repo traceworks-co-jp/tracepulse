@@ -11,6 +11,8 @@ pub struct PollingConfig {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct SnmpConfig {
+    #[serde(default, skip_serializing)]
+    pub credentials: crate::snmp::credentials::SnmpCredentials,
     #[serde(default = "defaults::default_snmp_community")]
     #[serde(skip_serializing)]
     pub default_community: String,
@@ -139,10 +141,23 @@ impl AppConfig {
             crate::crypto::MasterKey::load(directory, false)?
                 .decrypt(value, CONFIG_SECRET_CONTEXT)?;
         }
+        if let Some(value) = root
+            .get("snmp")
+            .and_then(|snmp| snmp.get("credentials_encrypted"))
+            .and_then(toml::Value::as_str)
+        {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            crate::crypto::MasterKey::load(directory, false)?
+                .decrypt(value, b"TracePulse/config/snmp/credentials")?;
+        }
         Ok(())
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, crate::error::AppError> {
+        Self::verify_stored_key(path)?;
         let content = match std::fs::read_to_string(path) {
             Ok(content) => zeroize::Zeroizing::new(content),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -177,6 +192,48 @@ impl AppConfig {
                 "invalid configuration fields (contents redacted)".into(),
             )
         })?;
+        if let Some(value) = root
+            .get("snmp")
+            .and_then(|snmp| snmp.get("credentials_encrypted"))
+            .and_then(toml::Value::as_str)
+        {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            let key = crate::crypto::MasterKey::load(directory, false)?;
+            let plaintext = zeroize::Zeroizing::new(
+                key.decrypt_string(value, b"TracePulse/config/snmp/credentials")?,
+            );
+            config.snmp.credentials = serde_json::from_str(&plaintext).map_err(|_| {
+                crate::error::AppError::Config(
+                    "invalid SNMP credentials (contents redacted)".into(),
+                )
+            })?;
+        }
+        config.snmp.credentials.normalize()?;
+        let migrate_credentials = root
+            .get("snmp")
+            .and_then(|snmp| snmp.get("credentials"))
+            .is_some();
+        if migrate_credentials {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or(std::path::Path::new("."));
+            let key = crate::crypto::MasterKey::load(directory, true)?;
+            let plaintext =
+                zeroize::Zeroizing::new(serde_json::to_string(&config.snmp.credentials).map_err(
+                    |_| crate::error::AppError::Config("invalid SNMP credentials".into()),
+                )?);
+            root["snmp"].as_table_mut().unwrap().remove("credentials");
+            root["snmp"].as_table_mut().unwrap().insert(
+                "credentials_encrypted".into(),
+                toml::Value::String(
+                    key.encrypt(plaintext.as_bytes(), b"TracePulse/config/snmp/credentials")?,
+                ),
+            );
+        }
         if let Some(alert) = root.get("alert")
             && alert.get("error_rate").is_none()
             && alert.get("error_rate_threshold").is_some()
@@ -203,8 +260,12 @@ impl AppConfig {
                 "metric thresholds must satisfy 0 < warning < critical <= 100".into(),
             ));
         }
-        if let Some(envelope) = migration {
-            root["snmp"]["default_community"] = toml::Value::String(envelope);
+        if migration.is_some() || migrate_credentials {
+            if let Some(envelope) = migration {
+                root["snmp"]["default_community"] = toml::Value::String(envelope);
+            } else if let Some(value) = stored {
+                root["snmp"]["default_community"] = toml::Value::String(value);
+            }
             let serialized = toml::to_string_pretty(&root).map_err(|_| {
                 crate::error::AppError::Config("configuration serialization failed".into())
             })?;

@@ -4,13 +4,22 @@ use crate::db::models::{
     ProtocolShare, RecentAlert, TopTalker,
 };
 use crate::error::AppError;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Repository {
     connection: rusqlite::Connection,
     key: crate::crypto::MasterKey,
+}
+
+#[derive(Debug, Default)]
+pub struct DashboardDeviceData {
+    pub metrics: Option<DeviceMetrics>,
+    pub interfaces: HashMap<i32, Vec<InterfaceSample>>,
+    pub error_spike: bool,
+    pub community_configured: bool,
+    pub snmp_individual_configured: bool,
 }
 
 fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
@@ -20,9 +29,66 @@ fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
 }
 
 impl Repository {
+    pub fn save_snmp_definitions(
+        &self,
+        request: crate::snmp::management::SaveDefinitions,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut state = crate::snmp::management::runtime()
+            .write()
+            .map_err(|_| AppError::Validation("template state lock poisoned".into()))?;
+        let next = state.save(&self.connection, request)?;
+        *state = next;
+        state.view()
+    }
+
     pub fn new(mut connection: rusqlite::Connection) -> Result<Self, AppError> {
         let key = super::credentials::protect(&mut connection)?;
-        Ok(Self { connection, key })
+        let repository = Self { connection, key };
+        let has_credentials: bool = repository.connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='device_snmp_credentials')", [], |row| row.get(0))?;
+        if has_credentials {
+            let mut statement = repository.connection.prepare(
+                "SELECT ip FROM devices JOIN device_snmp_credentials ON devices.id=device_id",
+            )?;
+            let addresses = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for ip in addresses {
+                repository.device_snmp_credentials(&ip)?;
+            }
+        }
+        Ok(repository)
+    }
+
+    pub fn register_device_with_credentials(
+        &self,
+        device: &crate::device::DeviceConfig,
+        credentials: Option<crate::snmp::credentials::SnmpCredentials>,
+    ) -> Result<i64, AppError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        self.check_registration_capacity(&device.ip)?;
+        let community = self.protect_community(&device.ip, &device.community)?;
+        self.connection.execute(
+            "INSERT INTO devices(name,ip,community,device_type,status,last_seen_at) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![device.name,device.ip,community,device.device_type,device.status,device.last_seen_at],
+        )?;
+        let id = self.connection.last_insert_rowid();
+        if let Some(mut credentials) = credentials {
+            credentials.normalize()?;
+            let plaintext = zeroize::Zeroizing::new(
+                serde_json::to_string(&credentials)
+                    .map_err(|_| AppError::Validation("invalid SNMP credentials".into()))?,
+            );
+            let envelope = self.key.encrypt(
+                plaintext.as_bytes(),
+                format!("TracePulse/devices/{}/snmp", device.ip).as_bytes(),
+            )?;
+            self.connection.execute(
+                "INSERT INTO device_snmp_credentials(device_id,envelope) VALUES(?1,?2)",
+                params![id, envelope],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(id)
     }
 
     pub fn save_device(&self, device: &Device) -> Result<i64, AppError> {
@@ -159,6 +225,10 @@ impl Repository {
             params![device_id],
         )?;
         connection.execute(
+            "DELETE FROM template_metric_samples WHERE device_id = ?1",
+            params![device_id],
+        )?;
+        connection.execute(
             "DELETE FROM interface_samples WHERE device_id = ?1",
             params![device_id],
         )?;
@@ -200,30 +270,266 @@ impl Repository {
         Ok(devices)
     }
 
+    pub fn dashboard_device_data(
+        &self,
+        devices: &[Device],
+        spike_threshold: u64,
+    ) -> Result<HashMap<i64, DashboardDeviceData>, AppError> {
+        let device_ids: Vec<i64> = devices.iter().filter_map(|device| device.id).collect();
+        if device_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let requested_rows = vec!["(?)"; device_ids.len()].join(",");
+        let mut data = HashMap::with_capacity(device_ids.len());
+        let devices_by_id: HashMap<i64, &Device> = devices
+            .iter()
+            .filter_map(|device| device.id.map(|id| (id, device)))
+            .collect();
+        for device in devices {
+            let Some(id) = device.id else { continue };
+            data.insert(
+                id,
+                DashboardDeviceData {
+                    community_configured: !device.community.is_empty(),
+                    snmp_individual_configured: !device.community.is_empty(),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let credentials_sql = format!(
+            "SELECT device_id, envelope FROM device_snmp_credentials WHERE device_id IN ({})",
+            vec!["?"; device_ids.len()].join(",")
+        );
+        let mut statement = self.connection.prepare(&credentials_sql)?;
+        let rows = statement.query_map(params_from_iter(device_ids.iter()), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (device_id, envelope) = row?;
+            let device = devices_by_id.get(&device_id).ok_or_else(|| {
+                AppError::Database("SNMP credentials reference a missing device".into())
+            })?;
+            let plaintext = zeroize::Zeroizing::new(self.key.decrypt_string(
+                &envelope,
+                format!("TracePulse/devices/{}/snmp", device.ip).as_bytes(),
+            )?);
+            let credentials: crate::snmp::credentials::SnmpCredentials =
+                serde_json::from_str(&plaintext)
+                    .map_err(|_| AppError::Database("invalid encrypted SNMP credentials".into()))?;
+            if let Some(data) = data.get_mut(&device_id) {
+                data.community_configured |= credentials.community.is_some();
+                data.snmp_individual_configured |= credentials != Default::default();
+            }
+        }
+        drop(statement);
+
+        let metrics_sql = format!(
+            "WITH requested(device_id) AS (VALUES {requested_rows}),
+             latest(id) AS (
+                 SELECT (SELECT metrics.id FROM device_metrics AS metrics
+                         WHERE metrics.device_id = requested.device_id
+                         ORDER BY metrics.sampled_at DESC, metrics.id DESC LIMIT 1)
+                 FROM requested
+             )
+             SELECT metrics.id, metrics.device_id, metrics.cpu_usage, metrics.memory_usage,
+                    metrics.memory_used_bytes, metrics.sampled_at
+             FROM device_metrics AS metrics JOIN latest ON latest.id = metrics.id"
+        );
+        let mut statement = self.connection.prepare(&metrics_sql)?;
+        let rows = statement.query_map(params_from_iter(device_ids.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(1)?,
+                DeviceMetrics {
+                    id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    cpu_usage: row.get::<_, Option<i64>>(2)?.map(|value| value as u32),
+                    memory_usage: row.get::<_, Option<i64>>(3)?.map(|value| value as u32),
+                    memory_used_bytes: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+                    sampled_at: row.get(5)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (device_id, metrics) = row?;
+            if let Some(device) = data.get_mut(&device_id) {
+                device.metrics = Some(metrics);
+            }
+        }
+        drop(statement);
+
+        let interfaces_sql = format!(
+            "WITH requested(device_id) AS (VALUES {requested_rows}),
+             interface_keys(device_id, if_index) AS (
+                 SELECT DISTINCT samples.device_id, samples.if_index
+                 FROM interface_samples AS samples JOIN requested USING (device_id)
+             ),
+             recent_ids(id) AS (
+                 SELECT (SELECT samples.id FROM interface_samples AS samples
+                         WHERE samples.device_id = keys.device_id AND samples.if_index = keys.if_index
+                         ORDER BY samples.sampled_at DESC, samples.id DESC LIMIT 1)
+                 FROM interface_keys AS keys
+                 UNION ALL
+                 SELECT (SELECT samples.id FROM interface_samples AS samples
+                         WHERE samples.device_id = keys.device_id AND samples.if_index = keys.if_index
+                         ORDER BY samples.sampled_at DESC, samples.id DESC LIMIT 1 OFFSET 1)
+                 FROM interface_keys AS keys
+             )
+             SELECT samples.id, samples.device_id, samples.if_index, samples.if_name, samples.link_status,
+                    samples.in_errors, samples.out_errors, samples.in_packets, samples.out_packets,
+                    samples.in_discards, samples.out_discards, samples.late_collisions, samples.fcs_errors,
+                    samples.alignment_errors, samples.frame_too_longs, samples.internal_mac_receive_errors,
+                    samples.rx_optical_power_dbm, samples.in_octets, samples.out_octets,
+                    samples.bandwidth_utilization, samples.sampled_at, samples.tx_power_dbm
+             FROM interface_samples AS samples JOIN recent_ids ON recent_ids.id = samples.id
+             ORDER BY samples.device_id, samples.if_index, samples.sampled_at DESC, samples.id DESC"
+        );
+        let mut statement = self.connection.prepare(&interfaces_sql)?;
+        let rows = statement.query_map(params_from_iter(device_ids.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(1)?,
+                InterfaceSample {
+                    id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    if_index: row.get(2)?,
+                    if_name: row.get(3)?,
+                    link_status: row.get(4)?,
+                    in_errors: row.get::<_, i64>(5)? as u64,
+                    out_errors: row.get::<_, i64>(6)? as u64,
+                    in_packets: row.get::<_, i64>(7)? as u64,
+                    out_packets: row.get::<_, i64>(8)? as u64,
+                    in_discards: row.get::<_, i64>(9)? as u64,
+                    out_discards: row.get::<_, i64>(10)? as u64,
+                    late_collisions: row.get::<_, i64>(11)? as u64,
+                    fcs_errors: row.get::<_, i64>(12)? as u64,
+                    alignment_errors: row.get::<_, i64>(13)? as u64,
+                    frame_too_longs: row.get::<_, i64>(14)? as u64,
+                    internal_mac_receive_errors: row.get::<_, i64>(15)? as u64,
+                    rx_optical_power_dbm: row.get(16)?,
+                    in_octets: row.get::<_, i64>(17)? as u64,
+                    out_octets: row.get::<_, i64>(18)? as u64,
+                    bandwidth_utilization: row.get(19)?,
+                    sampled_at: row.get(20)?,
+                    tx_power_dbm: row.get(21)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (device_id, sample) = row?;
+            if let Some(device) = data.get_mut(&device_id) {
+                device
+                    .interfaces
+                    .entry(sample.if_index)
+                    .or_default()
+                    .push(sample);
+            }
+        }
+        drop(statement);
+
+        for device in data.values_mut() {
+            device.error_spike = device.interfaces.values().any(|history| {
+                let [latest, previous, ..] = history.as_slice() else {
+                    return false;
+                };
+                let total_delta = counter32_delta(previous.in_errors, latest.in_errors)
+                    + counter32_delta(previous.out_errors, latest.out_errors)
+                    + counter32_delta(previous.in_discards, latest.in_discards)
+                    + counter32_delta(previous.out_discards, latest.out_discards);
+                total_delta >= spike_threshold
+            });
+        }
+
+        Ok(data)
+    }
+
     fn protect_community(&self, ip: &str, value: &str) -> Result<String, AppError> {
         if value == crate::crypto::MASK {
             return Err(AppError::Validation(
                 "masked credentials cannot be saved".into(),
             ));
         }
-        if value.is_empty() {
-            if let Some(envelope) = self
+        if value.is_empty()
+            && let Some(envelope) = self
                 .connection
                 .query_row("SELECT community FROM devices WHERE ip=?1", [ip], |row| {
                     row.get::<_, String>(0)
                 })
                 .optional()?
-            {
-                self.key
-                    .decrypt(&envelope, super::credentials::context(ip).as_bytes())?;
-                return Ok(envelope);
-            }
-            return Err(AppError::Validation(
-                "community is required for a new device".into(),
-            ));
+        {
+            self.key
+                .decrypt(&envelope, super::credentials::context(ip).as_bytes())?;
+            return Ok(envelope);
         }
         self.key
             .encrypt(value.as_bytes(), super::credentials::context(ip).as_bytes())
+    }
+
+    pub fn device_snmp_credentials(
+        &self,
+        ip: &str,
+    ) -> Result<crate::snmp::credentials::SnmpCredentials, AppError> {
+        let envelope: Option<String> = self.connection.query_row(
+            "SELECT envelope FROM device_snmp_credentials JOIN devices ON devices.id=device_id WHERE ip=?1",
+            [ip], |row| row.get(0),
+        ).optional()?;
+        match envelope {
+            None => Ok(Default::default()),
+            Some(envelope) => {
+                let plaintext = zeroize::Zeroizing::new(self.key.decrypt_string(
+                    &envelope,
+                    format!("TracePulse/devices/{ip}/snmp").as_bytes(),
+                )?);
+                serde_json::from_str(&plaintext)
+                    .map_err(|_| AppError::Database("invalid encrypted SNMP credentials".into()))
+            }
+        }
+    }
+
+    pub fn set_device_snmp_credentials(
+        &self,
+        ids: &[i64],
+        mut credentials: crate::snmp::credentials::SnmpCredentials,
+    ) -> Result<(), AppError> {
+        credentials.normalize()?;
+        let devices = self.list_devices()?;
+        let selected = crate::device::metadata::selected_devices(ids, &devices)?;
+        let transaction = self.connection.unchecked_transaction()?;
+        for device in selected {
+            let plaintext = zeroize::Zeroizing::new(
+                serde_json::to_string(&credentials)
+                    .map_err(|_| AppError::Validation("invalid SNMP credentials".into()))?,
+            );
+            let envelope = self.key.encrypt(
+                plaintext.as_bytes(),
+                format!("TracePulse/devices/{}/snmp", device.ip).as_bytes(),
+            )?;
+            self.connection.execute(
+                "INSERT INTO device_snmp_credentials(device_id,envelope) VALUES(?1,?2) ON CONFLICT(device_id) DO UPDATE SET envelope=excluded.envelope",
+                params![device.id, envelope],
+            )?;
+            let empty = self
+                .key
+                .encrypt(b"", super::credentials::context(&device.ip).as_bytes())?;
+            self.connection.execute(
+                "UPDATE devices SET community=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2",
+                params![empty, device.id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn resolved_snmp_config(
+        &self,
+        ip: &str,
+        global: &crate::config::SnmpConfig,
+        legacy: &str,
+    ) -> Result<crate::config::SnmpConfig, AppError> {
+        let mut config = global.clone();
+        config.credentials = self.device_snmp_credentials(ip)?.resolve(global, legacy);
+        config.credentials.validate_resolved()?;
+        config.default_community = config.credentials.community.clone().unwrap_or_default();
+        Ok(config)
     }
 
     fn read_community(&self, value: String, ip: &str) -> rusqlite::Result<String> {
@@ -333,7 +639,11 @@ impl Repository {
 
     pub fn count_rows(&self, table: &str) -> Result<i64, AppError> {
         let table = match table {
-            "devices" | "interface_samples" | "alert_events" | "device_metrics" => table,
+            "devices"
+            | "interface_samples"
+            | "alert_events"
+            | "device_metrics"
+            | "template_metric_samples" => table,
             _ => return Err(AppError::Validation(format!("unsupported table {}", table))),
         };
 
@@ -1081,6 +1391,10 @@ impl Repository {
             params![history_days.to_string()],
         )?;
         let _ = self.connection.execute(
+            "DELETE FROM template_metric_samples WHERE sampled_at < datetime('now', '-' || ?1 || ' days')",
+            params![history_days.to_string()],
+        )?;
+        let _ = self.connection.execute(
             "DELETE FROM flow_records WHERE observed_at < datetime('now', '-5 minutes')",
             [],
         )?;
@@ -1242,6 +1556,63 @@ impl Repository {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn save_template_metric_samples(
+        &self,
+        device_id: i64,
+        metrics: &[crate::snmp::client::TemplateMetricReading],
+        sampled_at: &str,
+    ) -> Result<usize, AppError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut saved = 0;
+        for metric in metrics {
+            let Some(value) = metric.value_text.as_deref() else {
+                continue;
+            };
+            let data_type = match metric.data_type {
+                crate::snmp::template::NumericDataType::Gauge => "gauge",
+                crate::snmp::template::NumericDataType::Counter => "counter",
+            };
+            transaction.execute(
+                "INSERT INTO template_metric_samples(device_id, metric_key, label, unit, data_type, value, sampled_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![device_id, metric.key, metric.label, metric.unit, data_type, value, sampled_at],
+            )?;
+            saved += 1;
+        }
+        transaction.commit()?;
+        Ok(saved)
+    }
+
+    pub fn get_template_metric_history(
+        &self,
+        device_id: i64,
+        metric_key: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::db::models::TemplateMetricSample>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, device_id, metric_key, label, unit, data_type, value, sampled_at
+             FROM template_metric_samples
+             WHERE device_id = ?1 AND metric_key = ?2
+             ORDER BY sampled_at DESC, id DESC LIMIT ?3",
+        )?;
+        let mut samples = statement
+            .query_map(params![device_id, metric_key, limit as i64], |row| {
+                Ok(crate::db::models::TemplateMetricSample {
+                    id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    metric_key: row.get(2)?,
+                    label: row.get(3)?,
+                    unit: row.get(4)?,
+                    data_type: row.get(5)?,
+                    value: row.get(6)?,
+                    sampled_at: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        samples.reverse();
+        Ok(samples)
     }
 
     /// 直近 `limit` 件の CPU/メモリ履歴を時系列昇順で返す

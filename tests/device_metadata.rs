@@ -1,6 +1,10 @@
 use std::path::Path;
 use tracepulse::{
-    db::{repository::Repository, sqlite::initialize_database},
+    db::{
+        models::{DeviceMetrics, InterfaceSample},
+        repository::Repository,
+        sqlite::initialize_database,
+    },
     device::{
         DeviceConfig,
         metadata::{BulkAction, BulkRename, DeviceMetadata, rename_plan},
@@ -23,6 +27,134 @@ fn request() -> BulkRename {
         "suffix": "-本館", "sort_by": "ip_asc"
     }))
     .unwrap()
+}
+
+fn interface_sample(
+    device_id: i64,
+    if_index: i32,
+    sampled_at: &str,
+    in_errors: u64,
+) -> InterfaceSample {
+    InterfaceSample {
+        id: None,
+        device_id,
+        if_index,
+        if_name: format!("port-{if_index}"),
+        link_status: "up".into(),
+        in_errors,
+        out_errors: 0,
+        in_packets: 0,
+        out_packets: 0,
+        in_discards: 0,
+        out_discards: 0,
+        late_collisions: 0,
+        fcs_errors: 0,
+        alignment_errors: 0,
+        frame_too_longs: 0,
+        internal_mac_receive_errors: 0,
+        rx_optical_power_dbm: None,
+        tx_power_dbm: None,
+        in_octets: 0,
+        out_octets: 0,
+        bandwidth_utilization: if in_errors > 0 { 42.0 } else { 10.0 },
+        sampled_at: sampled_at.into(),
+    }
+}
+
+#[test]
+fn dashboard_device_data_batches_latest_metrics_interface_history_and_status() {
+    let repo = repository();
+    repo.save_device_metrics(&DeviceMetrics {
+        id: None,
+        device_id: 1,
+        cpu_usage: Some(20),
+        memory_usage: Some(30),
+        memory_used_bytes: Some(300),
+        sampled_at: "2026-10-25 10:00:00".into(),
+    })
+    .unwrap();
+    repo.save_device_metrics(&DeviceMetrics {
+        id: None,
+        device_id: 1,
+        cpu_usage: Some(40),
+        memory_usage: Some(50),
+        memory_used_bytes: Some(500),
+        sampled_at: "2026-10-25 10:01:00".into(),
+    })
+    .unwrap();
+    for (if_index, time, errors) in [
+        (1, "2026-10-25 10:00:00", 2),
+        (1, "2026-10-25 10:01:00", 8),
+        (2, "2026-10-25 10:00:00", 100),
+        (2, "2026-10-25 10:01:00", 100),
+        (3, "2026-10-25 10:01:00", 1),
+    ] {
+        repo.save_sample(&interface_sample(1, if_index, time, errors))
+            .unwrap();
+    }
+    let devices = repo.list_devices().unwrap();
+    let data = repo.dashboard_device_data(&devices, 5).unwrap();
+    let first = &data[&1];
+    let metrics = first.metrics.as_ref().unwrap();
+    assert_eq!(metrics.cpu_usage, Some(40));
+    assert_eq!(metrics.memory_usage, Some(50));
+    assert_eq!(first.interfaces.len(), 3);
+    assert_eq!(first.interfaces[&1].len(), 2);
+    assert_eq!(first.interfaces[&1][0].in_errors, 8);
+    assert_eq!(first.interfaces[&1][1].in_errors, 2);
+    assert_eq!(first.interfaces[&3].len(), 1);
+    assert!(first.error_spike);
+    assert!(first.community_configured);
+    assert!(first.snmp_individual_configured);
+    assert!(!data[&2].error_spike);
+    assert_eq!(repo.dashboard_device_data(&[], 5).unwrap().len(), 0);
+}
+
+#[test]
+fn template_metric_history_persists_scaled_values_and_skips_unavailable_reads() {
+    let repo = repository();
+    let readings = [
+        tracepulse::snmp::client::TemplateMetricReading {
+            key: "hardware_voltage".into(),
+            label: "Hardware Voltage".into(),
+            unit: "V".into(),
+            data_type: tracepulse::snmp::template::NumericDataType::Gauge,
+            oid: "1.3.6.1.4.1.14988.1.1.3.8.0".into(),
+            value: Some(serde_json::Number::from_f64(12.5).unwrap()),
+            value_text: Some("12.5".into()),
+            error: None,
+        },
+        tracepulse::snmp::client::TemplateMetricReading {
+            key: "missing_sensor".into(),
+            label: "Missing Sensor".into(),
+            unit: "C".into(),
+            data_type: tracepulse::snmp::template::NumericDataType::Gauge,
+            oid: "1.3.6.1.4.1.14988.1.1.3.10.0".into(),
+            value: None,
+            value_text: None,
+            error: Some("unavailable".into()),
+        },
+    ];
+    let saved = repo
+        .save_template_metric_samples(1, &readings, "2026-10-25 10:00:00")
+        .unwrap();
+    assert_eq!(saved, 1);
+    assert_eq!(repo.count_rows("template_metric_samples").unwrap(), 1);
+    let history = repo
+        .get_template_metric_history(1, "hardware_voltage", 10)
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].value, "12.5");
+    assert_eq!(history[0].unit, "V");
+    assert_eq!(history[0].sampled_at, "2026-10-25 10:00:00");
+
+    repo.cleanup_old_history(1).unwrap();
+    assert_eq!(repo.count_rows("template_metric_samples").unwrap(), 0);
+    let sampled_at = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    repo.save_template_metric_samples(1, &readings, &sampled_at)
+        .unwrap();
+    repo.remove_device_by_ip("192.0.2.10").unwrap();
+    assert_eq!(repo.count_rows("template_metric_samples").unwrap(), 0);
 }
 
 #[test]

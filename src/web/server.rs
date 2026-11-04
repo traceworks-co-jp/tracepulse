@@ -691,6 +691,9 @@ fn handle_connection(
     if req.method == "GET" && clean_path == "/static/js/diagnostics.js" {
         return respond_js(stream, DIAGNOSTICS_BUNDLE_JS);
     }
+    if req.method == "GET" && clean_path == "/static/js/snmp-definitions.js" {
+        return respond_js(stream, SNMP_DEFINITIONS_BUNDLE_JS);
+    }
     if req.method == "GET" && clean_path == "/static/js/discovery.js" {
         return respond_js(stream, DISCOVERY_BUNDLE_JS);
     }
@@ -716,6 +719,18 @@ fn handle_connection(
     }
 
     // Route: GET /api/device/<ip>  (IP に . を含むためパスマッチで処理)
+    if req.method == "GET"
+        && clean_path.starts_with("/api/device/")
+        && clean_path.ends_with("/snmp-credentials")
+    {
+        let ip = url_decode(
+            clean_path
+                .trim_start_matches("/api/device/")
+                .trim_end_matches("/snmp-credentials"),
+        );
+        let (status, body) = api_get_device_snmp_credentials(&ip, &repo);
+        return respond_json(stream, status, body);
+    }
     if req.method == "GET" && req.path.starts_with("/api/device/") {
         let ip = url_decode(clean_path.trim_start_matches("/api/device/"));
         let body = api_device_detail(&ip, &repo, &cfg, !passive);
@@ -765,6 +780,11 @@ fn handle_connection(
         return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
     }
 
+    if req.method == "POST" && clean_path == "/api/devices/snmp-credentials" {
+        let (status, body) = api_device_snmp_credentials(&req.body, &repo, &cfg);
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+
     // Route: GET /device/<ip>
     if req.method == "GET" && req.path.starts_with("/device/") {
         let ip = url_decode(clean_path.trim_start_matches("/device/"));
@@ -804,6 +824,9 @@ fn handle_connection(
                     .is_none_or(|extension| extension.show_core_settings(&req.headers)),
             ),
         ),
+        ("GET", "/settings/snmp") => {
+            respond_html(stream, page_snmp_definitions(web_extension.as_deref()))
+        }
         ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
         ("GET", "/api/devices") => respond_json(
             stream,
@@ -836,12 +859,42 @@ fn handle_connection(
             "200 OK",
             api_post_settings(&req.body, &cfg, &cfg_path),
         ),
+        ("GET", "/api/snmp/definitions") => {
+            let result = crate::snmp::management::runtime().read()
+                .map_err(|_| AppError::Validation("template state lock poisoned".into()))
+                .and_then(|state| state.view());
+            respond_json(stream, "200 OK", definitions_response(result))
+        }
+        ("POST", "/api/snmp/definitions") => respond_mutation(
+            stream, web_extension.as_deref(), &req, "200 OK",
+            definitions_response(
+                serde_json::from_str::<crate::snmp::management::SaveDefinitions>(&req.body)
+                    .map_err(|error| AppError::Validation(error.to_string()))
+                    .and_then(|request| repo.lock()
+                        .map_err(|_| AppError::Database("repository lock poisoned".into()))?
+                        .save_snmp_definitions(request))
+            ),
+        ),
+        ("POST", "/api/snmp/definitions/convert") => respond_mutation(
+            stream, web_extension.as_deref(), &req, "200 OK",
+            api_convert_definition(&req.body),
+        ),
+        ("POST", "/api/snmp/definitions/preview") => respond_mutation(
+            stream, web_extension.as_deref(), &req, "200 OK",
+            definitions_response(
+                serde_json::from_str::<crate::snmp::management::PreviewDefinitions>(&req.body)
+                    .map_err(|error| AppError::Validation(error.to_string()))
+                    .and_then(|request| crate::snmp::management::runtime().read()
+                        .map_err(|_| AppError::Validation("template state lock poisoned".into()))?
+                        .preview(request))
+            ),
+        ),
         ("POST", "/api/diagnostics/oids") => respond_mutation(
             stream,
             web_extension.as_deref(),
             &req,
             "200 OK",
-            api_post_oid_overrides(&req.body, &cfg, &cfg_path),
+            r#"{"error":"Use /api/snmp/definitions with a generation number; legacy OID settings have moved to SQLite."}"#.into(),
         ),
         ("POST", "/api/discovery/scan") => respond_mutation(
             stream,
@@ -1256,47 +1309,47 @@ fn api_devices(repo: &Arc<Mutex<Repository>>, cfg: &Arc<Mutex<AppConfig>>) -> St
             return serde_json::json!({"error":"Device credentials could not be read; check the master key and database"}).to_string();
         }
     };
+    let dashboard_data = match repo.dashboard_device_data(&devices, alert_config.spike_threshold) {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::warn!(%error, "Dashboard device metrics could not be read");
+            HashMap::new()
+        }
+    };
     let items: Vec<String> = devices
         .iter()
-        .map(|d| {
-            let spike =
-                d.id.and_then(|id| {
-                    repo.check_interface_spikes(id, alert_config.spike_threshold)
-                        .ok()
-                })
-                .map(|spikes| !spikes.is_empty())
-                .unwrap_or(false);
-            dashboard_device_json(&repo, d, spike, false, &alert_config)
+        .map(|device| {
+            let data = device.id.and_then(|id| dashboard_data.get(&id));
+            dashboard_device_json(device, data, false, &alert_config)
         })
         .collect();
     format!("[{}]", items.join(","))
 }
 
 fn dashboard_device_json(
-    repo: &Repository,
     device: &crate::db::models::Device,
-    spike: bool,
+    data: Option<&crate::db::repository::DashboardDeviceData>,
     redact: bool,
     config: &crate::config::AlertConfig,
 ) -> String {
     let score = device
         .id
         .filter(|_| device.status != "offline")
-        .and_then(|id| {
-            let metrics = repo.get_device_metrics_history(id, 1).ok()?.pop()?;
+        .and_then(|_| {
+            let data = data?;
+            let metrics = data.metrics.as_ref()?;
             let cpu = metrics.cpu_usage?;
             let memory = metrics.memory_usage?;
-            let interfaces = repo.get_latest_interfaces(id).ok()?;
-            let bandwidth = interfaces
-                .iter()
+            let bandwidth = data
+                .interfaces
+                .values()
+                .filter_map(|samples| samples.first())
                 .map(|sample| sample.bandwidth_utilization)
                 .fold(0.0, f64::max);
-            let error_rate = interfaces
-                .iter()
-                .filter_map(|sample| {
-                    let history = repo
-                        .get_recent_interface_samples(id, sample.if_index, 2)
-                        .ok()?;
+            let error_rate = data
+                .interfaces
+                .values()
+                .filter_map(|history| {
                     crate::alert::rules::interface_error_rate(history.get(1)?, history.first()?)
                 })
                 .fold(0.0, f64::max);
@@ -1321,8 +1374,9 @@ fn dashboard_device_json(
         "id": device.id, "ip": device.ip, "name": device.name, "status": device.status,
         "display_name": device.display_name, "tags": device.tags,
         "community": if redact { "" } else { crate::crypto::MASK },
-        "community_configured": !device.community.is_empty(),
-        "last_seen": device.last_seen_at.as_deref().unwrap_or(""), "error_spike": spike,
+        "community_configured": !device.community.is_empty() || data.is_some_and(|data| data.community_configured),
+        "snmp_individual_configured": !device.community.is_empty() || data.is_some_and(|data| data.snmp_individual_configured),
+        "last_seen": device.last_seen_at.as_deref().unwrap_or(""), "error_spike": data.is_some_and(|data| data.error_spike),
         "health_score": score, "health_status": health_status,
     })
     .to_string()
@@ -1452,6 +1506,10 @@ fn api_device_detail(
         device_type: device.device_type.clone(),
         status: device.status.clone(),
         last_seen_at: device.last_seen_at.clone(),
+    };
+    let snmp_config = match r.resolved_snmp_config(ip, &snmp_config, &device.community) {
+        Ok(config) => config,
+        Err(_) => return r#"{"error":"device SNMP credentials could not be resolved"}"#.into(),
     };
     let client = SnmpClient::with_snmp_config(snmp_config.default_community.clone(), snmp_config);
     let hardware_sensors = if active_probes {
@@ -1683,13 +1741,102 @@ fn api_device_detail(
     )
 }
 
+fn api_get_device_snmp_credentials(
+    ip: &str,
+    repo: &Arc<Mutex<Repository>>,
+) -> (&'static str, String) {
+    metadata_response((|| {
+        let repository = repo
+            .lock()
+            .map_err(|_| AppError::Validation("repository lock failed".into()))?;
+        let device = repository
+            .find_device_by_ip(ip)?
+            .ok_or_else(|| AppError::Validation("device was not found".into()))?;
+        let credentials = repository.device_snmp_credentials(ip)?;
+        Ok(serde_json::json!({
+            "individual_configured": !device.community.is_empty() || credentials != Default::default(),
+            "credentials": {
+                "version": credentials.version,
+                "v3_username": credentials.v3_username,
+                "v3_auth_protocol": credentials.v3_auth_protocol,
+                "v3_priv_protocol": credentials.v3_priv_protocol,
+            },
+            "secret_configured": {
+                "community": !device.community.is_empty() || credentials.community.is_some(),
+                "v3_auth_password": credentials.v3_auth_password.is_some(),
+                "v3_priv_password": credentials.v3_priv_password.is_some(),
+            },
+        }))
+    })())
+}
+
+fn api_device_snmp_credentials(
+    body: &str,
+    repo: &Arc<Mutex<Repository>>,
+    cfg: &Arc<Mutex<AppConfig>>,
+) -> (&'static str, String) {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        device_ids: Vec<i64>,
+        credentials: crate::snmp::credentials::SnmpCredentials,
+        #[serde(default)]
+        preserve_secrets: bool,
+    }
+    metadata_response((|| {
+        let mut request: Request = serde_json::from_str(body).map_err(|_| {
+            AppError::Validation("invalid SNMP credential request (contents redacted)".into())
+        })?;
+        request.credentials.normalize()?;
+        let global = cfg
+            .lock()
+            .map_err(|_| AppError::Validation("configuration lock failed".into()))?
+            .snmp
+            .clone();
+        let repository = repo
+            .lock()
+            .map_err(|_| AppError::Validation("repository lock failed".into()))?;
+        if request.preserve_secrets {
+            if request.device_ids.len() != 1 {
+                return Err(AppError::Validation(
+                    "preserving secrets requires one device".into(),
+                ));
+            }
+            let devices = repository.list_devices()?;
+            let selected =
+                crate::device::metadata::selected_devices(&request.device_ids, &devices)?;
+            let device = selected[0];
+            let stored = repository.device_snmp_credentials(&device.ip)?;
+            if request.credentials.community.is_none() {
+                request.credentials.community = stored
+                    .community
+                    .or_else(|| (!device.community.is_empty()).then(|| device.community.clone()));
+            }
+            if request.credentials.v3_auth_password.is_none() {
+                request.credentials.v3_auth_password = stored.v3_auth_password;
+            }
+            if request.credentials.v3_priv_password.is_none() {
+                request.credentials.v3_priv_password = stored.v3_priv_password;
+            }
+        }
+        request
+            .credentials
+            .resolve(&global, "")
+            .validate_resolved()?;
+        repository.set_device_snmp_credentials(&request.device_ids, request.credentials)?;
+        Ok(serde_json::json!({"updated": request.device_ids.len()}))
+    })())
+}
+
 fn api_get_settings(cfg: &Arc<Mutex<AppConfig>>) -> String {
     let Ok(c) = cfg.lock() else {
         return r#"{"error":"lock failed"}"#.to_string();
     };
     serde_json::json!({
         "polling": { "interval_seconds": c.polling.interval_seconds },
-        "snmp": { "default_community": "", "community_configured": !c.snmp.default_community.is_empty() },
+        "snmp": { "default_community": "", "community_configured": !c.snmp.default_community.is_empty(),
+            "version": c.snmp.credentials.version.as_deref().unwrap_or("2c"),
+            "v3_configured": c.snmp.credentials.v3_username.is_some() },
         "display": { "timezone": c.display.timezone },
         "alert": c.alert,
         "retention": { "history_days": c.retention.history_days },
@@ -1712,6 +1859,25 @@ fn api_post_settings(
     let mut alert_fields = serde_json::Map::new();
     for (key, value) in fields {
         match key.as_str() {
+            "snmp_credentials" => {
+                let Ok(mut credentials) =
+                    serde_json::from_value::<crate::snmp::credentials::SnmpCredentials>(value)
+                else {
+                    return r#"{"error":"invalid SNMP credentials (contents redacted)"}"#.into();
+                };
+                if let Err(error) = credentials.normalize() {
+                    return serde_json::json!({"error":error.to_string()}).to_string();
+                }
+                let resolved = credentials.resolve(&updated.snmp, "");
+                if let Err(error) = resolved.validate_resolved() {
+                    return serde_json::json!({"error":error.to_string()}).to_string();
+                }
+                if let Some(community) = credentials.community.clone() {
+                    updated.snmp.default_community = community;
+                }
+                updated.snmp.credentials = resolved;
+                updated.snmp.credentials.community = None;
+            }
             "interval_seconds" => match value.as_u64() {
                 Some(interval) if (5..=600).contains(&interval) => {
                     updated.polling.interval_seconds = interval
@@ -1841,65 +2007,43 @@ fn api_post_alert_thresholds(
     r#"{"ok":true}"#.into()
 }
 
-fn api_post_oid_overrides(
-    body: &str,
-    cfg: &Arc<Mutex<AppConfig>>,
-    cfg_path: &std::path::Path,
-) -> String {
-    fn parse_str_field(body: &str, key: &str) -> Option<String> {
-        let pat = format!("\"{}\":\"", key);
-        let start = body.find(&pat)? + pat.len();
-        let end = body[start..].find('"')?;
-        Some(body[start..start + end].to_string())
+fn definitions_response(result: Result<serde_json::Value, AppError>) -> String {
+    match result {
+        Ok(value) => serde_json::json!({"ok": true, "data": value}).to_string(),
+        Err(error) => {
+            tracing::warn!(%error, "SNMP definition operation failed");
+            serde_json::json!({"error": error.to_string()}).to_string()
+        }
     }
+}
 
-    // "hardware_oid_overrides":["1.2.3","4.5.6"] のような文字列配列を抽出する簡易パーサ。
-    fn parse_str_array_field(body: &str, key: &str) -> Option<Vec<String>> {
-        let pat = format!("\"{}\":[", key);
-        let start = body.find(&pat)? + pat.len();
-        let end = body[start..].find(']')?;
-        let inner = &body[start..start + end];
-        let items: Vec<String> = inner
-            .split(',')
-            .filter_map(|part| {
-                let trimmed = part.trim();
-                let unquoted = trimmed.strip_prefix('"')?.strip_suffix('"')?;
-                let value = unquoted.trim();
-                if value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                }
-            })
-            .collect();
-        Some(items)
+fn api_convert_definition(body: &str) -> String {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Conversion {
+        toml: Option<String>,
+        document: Option<serde_json::Value>,
     }
-
-    let Ok(mut c) = cfg.lock() else {
-        return r#"{"error":"lock failed"}"#.to_string();
-    };
-
-    if let Some(v) = parse_str_field(body, "cpu_oid_override") {
-        c.snmp.cpu_oid_override = v.trim().to_string();
-    }
-    if let Some(v) = parse_str_field(body, "memory_oid_override") {
-        c.snmp.memory_oid_override = v.trim().to_string();
-    }
-    if let Some(v) = parse_str_array_field(body, "hardware_oid_overrides") {
-        c.snmp.hardware_oid_overrides = v;
-    }
-
-    if let Err(e) = persist_config(&c, cfg_path) {
-        return format!(
-            r#"{{"error":"failed to write config: {}"}}"#,
-            escape_json(&e)
-        );
-    }
-
-    r#"{"ok":true}"#.to_string()
+    let result = (|| {
+        use crate::snmp::management::{document, export_document};
+        let input: Conversion =
+            serde_json::from_str(body).map_err(|error| AppError::Validation(error.to_string()))?;
+        match (input.toml, input.document) {
+            (Some(text), None) => {
+                let template: crate::snmp::VendorOidTemplate = toml::from_str(&text)?;
+                Ok(serde_json::json!({"document": document(&template)?}))
+            }
+            (None, Some(value)) => Ok(serde_json::json!({"toml": export_document(&value)?})),
+            _ => Err(AppError::Validation(
+                "supply either toml or document".into(),
+            )),
+        }
+    })();
+    definitions_response(result)
 }
 
 fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), String> {
+    AppConfig::verify_stored_key(cfg_path).map_err(|error| error.to_string())?;
     // [notifier] や [license] など、AppConfig が管理しないセクションを壊さないようマージ保存する。
     let mut root: toml::value::Table = match std::fs::read_to_string(cfg_path) {
         Ok(content) => content
@@ -1952,6 +2096,21 @@ fn persist_config(c: &AppConfig, cfg_path: &std::path::Path) -> Result<(), Strin
     );
 
     let snmp = section(&mut root, "snmp");
+    let credentials = zeroize::Zeroizing::new(
+        serde_json::to_string(&c.snmp.credentials)
+            .map_err(|_| "credential serialization failed".to_string())?,
+    );
+    snmp.remove("credentials");
+    snmp.insert(
+        "credentials_encrypted".into(),
+        toml::Value::String(
+            key.encrypt(
+                credentials.as_bytes(),
+                b"TracePulse/config/snmp/credentials",
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+    );
     snmp.insert(
         "default_community".to_string(),
         toml::Value::String(envelope),
@@ -2441,8 +2600,52 @@ fn enrich_topology_nodes(report: &mut WebTopologyReport, repo: &Arc<Mutex<Reposi
     let Ok(repo) = repo.lock() else {
         return;
     };
+    let devices = repo.list_devices().unwrap_or_default();
 
     for node in report.nodes.iter_mut() {
+        if node.ip.trim().is_empty() {
+            let Some(hostname) = node.hostname.as_deref() else {
+                continue;
+            };
+            let hostname = hostname.trim().trim_end_matches('.');
+            if hostname.is_empty() {
+                continue;
+            }
+            let exact_matches: Vec<_> = devices
+                .iter()
+                .filter(|device| {
+                    device
+                        .name
+                        .trim()
+                        .trim_end_matches('.')
+                        .eq_ignore_ascii_case(hostname)
+                })
+                .collect();
+            let candidates = if exact_matches.is_empty() {
+                let short_name = hostname.split('.').next().unwrap_or_default();
+                if short_name.is_empty() {
+                    continue;
+                }
+                devices
+                    .iter()
+                    .filter(|device| {
+                        device
+                            .name
+                            .trim()
+                            .split('.')
+                            .next()
+                            .unwrap_or_default()
+                            .eq_ignore_ascii_case(short_name)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                exact_matches
+            };
+            let [device] = candidates.as_slice() else {
+                continue;
+            };
+            node.ip = device.ip.clone();
+        }
         let Ok(Some(device)) = repo.find_device_by_ip(&node.ip) else {
             continue;
         };
@@ -2835,6 +3038,27 @@ fn topology_edge(seed_ip: &str, neighbor: NormalizedNeighbor) -> WebTopologyEdge
 
 /// POST /api/discovery/register
 fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) -> String {
+    #[derive(serde::Deserialize)]
+    struct CredentialsRegistration {
+        ip: String,
+        snmp_credentials: Option<crate::snmp::credentials::SnmpCredentials>,
+    }
+    let mut credentials = std::collections::HashMap::new();
+    match serde_json::from_str::<Vec<CredentialsRegistration>>(body) {
+        Ok(requests) => {
+            for request in requests {
+                if let Some(mut profile) = request.snmp_credentials {
+                    if let Err(error) = profile.normalize() {
+                        return serde_json::json!({"error":error.to_string()}).to_string();
+                    }
+                    credentials.insert(request.ip, profile);
+                }
+            }
+        }
+        Err(_) => {
+            return r#"{"error":"invalid device registration JSON (contents redacted)"}"#.into();
+        }
+    }
     let devices = match parse_register_body(body) {
         Ok(devices) => devices,
         Err(error) => return serde_json::json!({"error":error.to_string()}).to_string(),
@@ -2880,7 +3104,8 @@ fn api_register(body: &str, repo: &Arc<Mutex<Repository>>, limits: WebLimits) ->
                     ));
                     continue;
                 }
-                match repo.save_device_config(&device) {
+                match repo.register_device_with_credentials(&device, credentials.remove(&device.ip))
+                {
                     Ok(_) => {
                         registered.push(device.ip.clone());
                         remaining_slots = remaining_slots.saturating_sub(1);
@@ -2931,21 +3156,24 @@ fn page_dashboard(
                     return "<!doctype html><html><body><main><p role='alert'>Device credentials could not be read. Check the master key and database.</p></main></body></html>".to_string();
                 }
             };
+            let dashboard_data = match r.dashboard_device_data(&devs, alert_config.spike_threshold)
+            {
+                Ok(data) => data,
+                Err(error) => {
+                    tracing::warn!(%error, "Dashboard device metrics could not be read");
+                    HashMap::new()
+                }
+            };
             let mut sc = 0usize;
             let json: Vec<String> = devs
                 .iter()
-                .map(|d| {
-                    let spike =
-                        d.id.and_then(|id| {
-                            r.check_interface_spikes(id, alert_config.spike_threshold)
-                                .ok()
-                        })
-                        .map(|spikes| !spikes.is_empty())
-                        .unwrap_or(false);
+                .map(|device| {
+                    let data = device.id.and_then(|id| dashboard_data.get(&id));
+                    let spike = data.is_some_and(|data| data.error_spike);
                     if spike {
                         sc += 1;
                     }
-                    dashboard_device_json(&r, d, spike, redact, &alert_config)
+                    dashboard_device_json(device, data, redact, &alert_config)
                 })
                 .collect();
             let alerts = r.get_recent_alerts(10).unwrap_or_default();
@@ -3008,7 +3236,9 @@ fn page_dashboard(
     html.push_str("<th id='th-last_seen' onclick='sortBy(\"last_seen\")' data-i18n='time'>Last Seen <span class='sort-icon' id='sort-last_seen'></span></th>");
     html.push_str("<th data-i18n='actions'>Actions</th>");
     html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table></div>");
-    html.push_str("<section class='detail-section' style='margin-top:1.25rem'>");
+    html.push_str(
+        "<section class='detail-section dashboard-recent-alerts' style='margin-top:1.25rem'>",
+    );
     html.push_str("<h2 data-i18n='recent_alerts_title'>Recent Alerts</h2>");
     html.push_str("<table id='alert-table'><thead><tr><th data-i18n='time'>Time</th><th data-i18n='hostname'>Device</th><th data-i18n='type'>Type</th><th data-i18n='severity'>Severity</th><th data-i18n='details'>Details</th></tr></thead><tbody>");
     if recent_alerts.is_empty() {
@@ -3052,6 +3282,13 @@ fn page_dashboard(
     html
 }
 
+fn page_snmp_definitions(extension: Option<&dyn WebExtensionProvider>) -> String {
+    format!(
+        "{HTML_DOCTYPE}<html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>{BRAND_HEAD_HTML}<script src='/static/js/theme.js'></script><title>TracePulse – SNMP Settings</title>{COMMON_CSS}{SETTINGS_CSS}</head><body data-title-key='snmp_settings_title'>{}<main><p><a href='/settings' data-i18n='back_to_settings'>Back to Settings</a></p><h1 data-i18n='snmp_settings_title'>SNMP Settings</h1>{SNMP_CONNECTION_HTML}<section class='settings-section' id='snmp-definitions' aria-live='polite'></section></main><script src='/static/js/i18n.js'></script><script src='/static/js/snmp-definitions.js'></script></body></html>",
+        navigation_html(extension),
+    )
+}
+
 fn page_settings(
     cfg: &Arc<Mutex<AppConfig>>,
     extension: Option<&dyn WebExtensionProvider>,
@@ -3078,6 +3315,7 @@ fn page_settings(
     } else {
         html.push_str("<main><h1 data-i18n='settings_title'>Settings</h1>");
     }
+    html.push_str("<section class='settings-section'><h2 data-i18n='snmp_settings_title'>SNMP Settings</h2><p data-i18n='snmp_settings_help'>Manage connection credentials, monitoring profiles, and TOML import/export.</p><p><a href='/settings/snmp' data-i18n='manage_snmp_settings'>Manage SNMP Settings</a></p></section>");
     if let Some(extension) = extension {
         html.push_str(&extension.settings_html());
         if !show_core_settings {
@@ -3342,18 +3580,6 @@ fn page_diagnostics_from_params(
         .lock()
         .map(|c| c.snmp.default_community.clone())
         .unwrap_or_else(|_| "public".to_string());
-    let saved_cpu_oid = cfg
-        .lock()
-        .map(|c| c.snmp.cpu_oid_override.clone())
-        .unwrap_or_else(|_| String::new());
-    let saved_memory_oid = cfg
-        .lock()
-        .map(|c| c.snmp.memory_oid_override.clone())
-        .unwrap_or_else(|_| String::new());
-    let saved_hardware_oids = cfg
-        .lock()
-        .map(|c| c.snmp.hardware_oid_overrides.clone())
-        .unwrap_or_default();
     let ip = params.get("ip").cloned().unwrap_or_default();
     let community = params
         .get("community")
@@ -3460,10 +3686,7 @@ fn page_diagnostics_from_params(
     }
 
     let mut result_html = String::new();
-    let mut attempted = false;
-
     if !ip.trim().is_empty() {
-        attempted = true;
         let client = {
             let overrides = cfg.lock().ok().map(|c| c.snmp.clone()).unwrap_or_default();
             SnmpClient::with_snmp_config(community.clone(), overrides)
@@ -3576,10 +3799,6 @@ fn page_diagnostics_from_params(
         }
     }
 
-    if !attempted {
-        result_html.push_str("<section class='settings-section'><p class='diag-note' data-i18n='diagnostics_help'>Check sysObjectID, vendor presets, CPU candidates, and ifIndex mappings.</p></section>");
-    }
-
     let mut html = String::new();
     html.push_str(HTML_DOCTYPE);
     html.push_str("<html lang='en'><head>");
@@ -3602,16 +3821,16 @@ fn page_diagnostics_from_params(
     );
     html.push_str("<div class='field-row'>");
     html.push_str("<div class='field-group'>");
-    html.push_str("<label data-i18n='ip_address'>IP Address</label>");
+    html.push_str("<label for='diag-ip' data-i18n='ip_address'>IP Address</label>");
     html.push_str(&format!(
-        "<input type='text' name='ip' value='{}' placeholder='192.168.1.1'>",
+        "<input type='text' id='diag-ip' name='ip' value='{}' placeholder='192.168.1.1' required>",
         escape_html(&ip)
     ));
     html.push_str("</div>");
     html.push_str("<div class='field-group'>");
-    html.push_str("<label data-i18n='community'>Community</label>");
+    html.push_str("<label for='diag-community' data-i18n='community'>Community</label>");
     html.push_str(&format!(
-        "<input type='password' name='community' value='{}' autocomplete='new-password' placeholder='Leave blank to use configured community'>",
+        "<input type='password' id='diag-community' name='community' value='{}' autocomplete='new-password' placeholder='Leave blank to use configured community' data-i18n-placeholder='diagnostics_community_hint'>",
         ""
     ));
     html.push_str("</div>");
@@ -3622,67 +3841,6 @@ fn page_diagnostics_from_params(
     html.push_str("</div>");
     html.push_str("</form>");
     html.push_str("<p class='diag-note' data-i18n='diagnostics_help'>Check sysObjectID, vendor presets, CPU candidates, and ifIndex mappings.</p>");
-    html.push_str("</div>");
-    html.push_str("<div class='settings-section'>");
-    html.push_str("<h2 data-i18n='oid_overrides'>OID Overrides</h2>");
-    html.push_str("<div class='field-row'>");
-    html.push_str("<div class='field-group'>");
-    html.push_str("<label data-i18n='cpu_oid_override'>CPU OID</label>");
-    html.push_str(&format!(
-        "<input type='text' id='cpu-oid-override' value='{}' placeholder='1.3.6.1.4.1....'>",
-        escape_html(&saved_cpu_oid)
-    ));
-    html.push_str("</div>");
-    html.push_str("<div class='field-group'>");
-    html.push_str("<label data-i18n='memory_oid_override'>Memory OID</label>");
-    html.push_str(&format!(
-        "<input type='text' id='memory-oid-override' value='{}' placeholder='1.3.6.1.4.1....'>",
-        escape_html(&saved_memory_oid)
-    ));
-    html.push_str("</div>");
-    html.push_str("</div>");
-    html.push_str("<div class='hardware-oid-fields'>");
-    fn hardware_oid_field_html(
-        sensor_type: &str,
-        label_key: &str,
-        label_text: &str,
-        oid: &str,
-    ) -> String {
-        format!(
-            "<div class='field-group'><label data-i18n='{}'>{}</label><input type='text' class='hardware-oid-input' data-sensor-type='{}' value='{}' placeholder='1.3.6.1.4.1....'></div>",
-            label_key,
-            label_text,
-            sensor_type,
-            escape_html(oid),
-        )
-    }
-    let hardware_oid_map: std::collections::HashMap<&str, &str> = saved_hardware_oids
-        .iter()
-        .filter_map(|entry| entry.split_once('|'))
-        .collect();
-    html.push_str(&hardware_oid_field_html(
-        "temperature",
-        "hardware_oid_temperature",
-        "Temperature OID",
-        hardware_oid_map.get("temperature").copied().unwrap_or(""),
-    ));
-    html.push_str(&hardware_oid_field_html(
-        "power",
-        "hardware_oid_power",
-        "Power OID",
-        hardware_oid_map.get("power").copied().unwrap_or(""),
-    ));
-    html.push_str(&hardware_oid_field_html(
-        "fan",
-        "hardware_oid_fan",
-        "Fan OID",
-        hardware_oid_map.get("fan").copied().unwrap_or(""),
-    ));
-    html.push_str("</div>");
-    html.push_str("<div class='actions'>");
-    html.push_str("<button class='btn btn-primary' type='button' onclick='saveOidOverrides()' data-i18n='save_oid_overrides'>OID の手動保存</button>");
-    html.push_str("<span id='oid-save-result' class='diag-note'></span>");
-    html.push_str("</div>");
     html.push_str("</div>");
     html.push_str(&result_html);
     html.push_str("</main>");
@@ -3773,6 +3931,10 @@ const COMMON_CSS: &str = "<style>
   .status-warning { color: #fbbf24; }
   .status-critical { color: #f87171; font-weight: 700; }
   .status-unknown { color: #94a3b8; }
+    html[data-theme='light'] .status-online, html[data-theme='light'] .link-up { color:#15803d; }
+    html[data-theme='light'] .status-offline, html[data-theme='light'] .status-critical, html[data-theme='light'] .link-down { color:#b91c1c; }
+    html[data-theme='light'] .status-warning { color:#b45309; }
+    html[data-theme='light'] .status-unknown { color:#64748b; }
   .btn { background: #3b82f6; color: #fff; border: none; padding: .55rem 1.1rem; border-radius: .375rem; font-size: .9rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
   html[data-theme='light'] .btn { background:#2563eb; }
   .btn:hover:not(:disabled) { background: #2563eb; }
@@ -3933,20 +4095,42 @@ const SETTINGS_CSS: &str = "<style>
   .field-hint { font-size:.75rem; color:#64748b; margin-top:.15rem; }
     .metric-thresholds { width:100%; border-collapse:collapse; margin-bottom:1rem; table-layout:fixed; }
     .metric-thresholds th, .metric-thresholds td { padding:.6rem .4rem; text-align:left; border-bottom:1px solid #334155; }
+    .metric-thresholds td { vertical-align:top; }
     .metric-thresholds input { width:100%; min-width:0; box-sizing:border-box; background:#0f172a; border:1px solid #334155; color:#f1f5f9; padding:.45rem; border-radius:.375rem; }
     .metric-thresholds th { font-size:.82rem; color:#94a3b8; }
     @media(max-width:600px) { .field-row { grid-template-columns:1fr; } .settings-section { padding:1rem; } }
     html[data-theme='light'] .metric-thresholds input { background:#fff; color:#0f172a; border-color:#cbd5e1; }
+    body main .metric-thresholds input[aria-invalid='true'] { border-color:#ef4444 !important; box-shadow:0 0 0 1px #ef4444 !important; }
+    .settings-field-error { margin:.4rem 0 0; color:#f87171; font-size:.78rem; line-height:1.5; overflow-wrap:anywhere; }
+    .settings-field-error[hidden] { display:none; }
+    html[data-theme='light'] .settings-field-error { color:#b91c1c; }
   .score-bar { display:flex; align-items:center; gap:.75rem; margin-top:.5rem; }
   .score-bar span { font-size:.82rem; color:#94a3b8; min-width:6rem; }
     .score-legend { display:grid; gap:.3rem; margin-top:.5rem; font-size:.82rem; color:#94a3b8; }
     .score-legend[hidden] { display:none; }
   .threshold-visual { flex:1; height:.5rem; border-radius:.25rem; background:linear-gradient(to right, #ef4444 0%, #ef4444 var(--crit), #f59e0b var(--crit), #f59e0b var(--warn), #4ade80 var(--warn), #4ade80 100%); }
   .actions { display:flex; align-items:center; gap:1rem; margin-top:1rem; }
-  .toast { padding:.5rem 1rem; border-radius:.375rem; font-size:.9rem; display:none; }
+    .settings-toasts { position:fixed; top:1rem; right:1rem; width:min(26rem,calc(100% - 2rem)); z-index:1000; pointer-events:none; }
+    .settings-toasts .toast { box-sizing:border-box; width:100%; pointer-events:auto; box-shadow:0 4px 16px rgb(0 0 0 / .2); }
+    .toast { padding:.75rem 1rem; border-radius:.375rem; font-size:.9rem; line-height:1.5; overflow-wrap:anywhere; display:none; }
   .toast-ok { background:#14532d; color:#4ade80; border:1px solid #166534; }
   .toast-err { background:#450a0a; color:#f87171; border:1px solid #7f1d1d; }
 </style>";
+
+const SNMP_CONNECTION_HTML: &str = "<section class='settings-section'>
+  <h2 data-i18n='snmp_connection_title'>Connection and Authentication</h2>
+  <p class='field-hint' data-i18n='snmp_template_disclaimer'>TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.</p>
+  <form id='snmp-connection-form'>
+    <div class='field-row'><div class='field-group'>
+      <label for='community' data-i18n='default_community'>Default Community String</label>
+      <input type='password' id='community' autocomplete='new-password' placeholder='Leave blank to keep existing' data-i18n-placeholder='secret_keep_existing'>
+      <div class='field-hint' data-i18n='default_community_hint'>Used when no community is specified per device</div>
+    </div></div>
+    <button class='btn btn-primary' id='save-snmp-connection' type='submit' data-i18n='save_snmp_connection'>Save Connection Settings</button>
+    <p id='snmp-connection-status' role='status' aria-live='polite'></p>
+    <p id='snmp-connection-error' role='alert'></p>
+  </form>
+</section>";
 
 const SETTINGS_HTML: &str = "<main>
 <h1 data-i18n='settings_title'>Settings</h1>
@@ -3958,18 +4142,6 @@ const SETTINGS_HTML: &str = "<main>
       <label data-i18n='polling_interval_label'>Polling Interval (seconds)</label>
       <input type='number' id='interval' min='5' max='600' step='5'>
       <div class='field-hint' data-i18n='polling_interval_hint'>Range: 5 – 600 seconds (default: 30)</div>
-    </div>
-  </div>
-</div>
-
-<div class='settings-section'>
-  <h2 data-i18n='snmp'>SNMP</h2>
-  <p class='field-hint' data-i18n='snmp_template_disclaimer'>TracePulse uses RFC-compliant baseline monitoring and automatically selects bundled vendor templates for recognized devices. When using proprietary vendor OIDs or third-party templates, please ensure compliance with your respective hardware vendor's EULA and support agreements. TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics.</p>
-  <div class='field-row'>
-    <div class='field-group'>
-      <label data-i18n='default_community'>Default Community String</label>
-      <input type='password' id='community' autocomplete='new-password' placeholder='Leave blank to keep existing' data-i18n-placeholder='secret_keep_existing'>
-      <div class='field-hint' data-i18n='default_community_hint'>Used when no community is specified per device</div>
     </div>
   </div>
 </div>
@@ -4052,8 +4224,10 @@ const SETTINGS_HTML: &str = "<main>
 const SETTINGS_ACTIONS_HTML: &str = "<div class='actions'>
     <button class='btn btn-primary' onclick='saveSettings()' data-i18n='save_settings'>Save Settings</button>
     <button class='btn' onclick='resetDefaults()' style='background:#334155' data-i18n='reset_defaults'>Reset to Defaults</button>
-    <span class='toast toast-ok' id='toast-ok' data-i18n='settings_saved'>&#10003; Settings saved</span>
-    <span class='toast toast-err' id='toast-err'></span>
+</div>
+<div class='settings-toasts'>
+    <div class='toast toast-ok' id='toast-ok' role='status' aria-atomic='true' data-i18n='settings_saved'>Settings saved</div>
+    <div class='toast toast-err' id='toast-err' role='alert' aria-atomic='true'></div>
 </div>";
 
 const DIAGNOSTICS_CSS: &str = "<style>
@@ -4095,6 +4269,19 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .hardware-card .label { font-size:.78rem; color:#94a3b8; margin-bottom:.25rem; }
   .hardware-card .value { font-size:.95rem; color:#f8fafc; }
   .hardware-card .state { font-size:.78rem; margin-top:.35rem; color:#cbd5e1; }
+    .hardware-card .value.status-online { color:#4ade80; }
+    .hardware-card .value.status-critical { color:#f87171; }
+    .hardware-card .value.status-warning { color:#fbbf24; }
+    .hardware-card .value.status-unknown { color:#94a3b8; }
+    html[data-theme='light'] .hardware-card { background:#f8fafc; border-color:#cbd5e1; }
+    html[data-theme='light'] .hardware-card .label { color:#64748b; }
+    html[data-theme='light'] .hardware-card .value, html[data-theme='light'] .hardware-card .state { color:#0f172a; }
+    html[data-theme='light'] .hardware-card.warn { background:#fff7ed; border-color:#fdba74; }
+    html[data-theme='light'] .hardware-card.crit { background:#fef2f2; border-color:#fca5a5; }
+    html[data-theme='light'] .hardware-card .value.status-online { color:#15803d; }
+    html[data-theme='light'] .hardware-card .value.status-critical { color:#b91c1c; }
+    html[data-theme='light'] .hardware-card .value.status-warning { color:#b45309; }
+    html[data-theme='light'] .hardware-card .value.status-unknown { color:#64748b; }
   .chart-wrap { width:100%; overflow-x:auto; }
   .table-scroll { width:100%; overflow-x:auto; }
     .interface-table-scroll { overflow:visible; }
@@ -4104,6 +4291,9 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .iface-filter { display:flex; flex-wrap:wrap; gap:.45rem .85rem; margin:0 0 1rem; padding:.75rem .85rem; border:1px solid #334155; border-radius:.45rem; background:#0f172a; }
   .iface-filter-item { display:inline-flex; align-items:center; gap:.35rem; font-size:.84rem; color:#cbd5e1; white-space:nowrap; }
   .iface-filter-item input { accent-color:#38bdf8; }
+    html[data-theme='light'] .iface-filter { border-color:#cbd5e1; background:#f8fafc; }
+    html[data-theme='light'] .iface-filter-item { color:#334155; }
+    html[data-theme='light'] .iface-filter-item input { accent-color:#148f83; }
   .iface-filter-actions { display:flex; gap:.5rem; align-items:center; margin:0 0 1rem; flex-wrap:wrap; }
   .iface-filter-note { font-size:.78rem; color:#64748b; }
   #if-table th, #alert-table th { cursor:default; white-space:nowrap; }
@@ -4141,13 +4331,13 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   #spike-table th { white-space:nowrap; }
   /* 破損パケット内訳（EtherLike-MIB Error Breakdown）: ホバーポップオーバー */
   .err-cell { position:relative; cursor:help; border-bottom:1px dotted #64748b; }
-  .err-pop { display:none; position:absolute; left:0; top:100%; margin-top:.35rem; min-width:220px; z-index:20; background:#0f172a; border:1px solid #334155; border-radius:.4rem; padding:.55rem .7rem; font-size:.78rem; color:#cbd5e1; box-shadow:0 8px 20px rgba(0,0,0,.35); white-space:normal; }
-    .err-cell.flip .err-pop { top:auto; bottom:100%; margin-top:0; margin-bottom:.35rem; }
-  .err-cell:hover .err-pop, .err-cell:focus .err-pop { display:block; }
+    .err-pop { display:none; position:fixed; inset:auto; margin:0; box-sizing:border-box; width:min(20rem,calc(100vw - 16px)); min-width:0; max-height:calc(100dvh - 16px); overflow:auto; overscroll-behavior:contain; z-index:1000; background:#0f172a; border:1px solid #334155; border-radius:.4rem; padding:.55rem .7rem; font-size:.78rem; color:#cbd5e1; box-shadow:0 8px 20px rgba(0,0,0,.35); white-space:normal; }
+    .err-pop.is-open { display:block; }
   .err-pop-title { font-weight:700; color:#f1f5f9; margin-bottom:.3rem; }
   .err-pop-row { display:flex; justify-content:space-between; gap:.75rem; padding:.1rem 0; }
   .err-pop-row .n { color:#94a3b8; }
-  .err-pop-row .v { font-variant-numeric:tabular-nums; }
+    .err-pop-row .n { min-width:0; overflow-wrap:anywhere; }
+    .err-pop-row .v { flex-shrink:0; font-variant-numeric:tabular-nums; }
     .err-pop-divider { border-top:1px solid #334155; margin:.35rem 0; }
   /* 破損パケット内訳カード: セレクタ + Stacked Bar + 数値テーブル */
   .error-breakdown { display:flex; flex-direction:column; gap:.85rem; }
@@ -4164,6 +4354,15 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .breakdown-table { width:100%; border-collapse:collapse; }
   .breakdown-table th, .breakdown-table td { padding:.5rem .65rem; border-bottom:1px solid #334155; font-size:.85rem; text-align:left; }
   .breakdown-table th { color:#94a3b8; font-weight:600; }
+    html[data-theme='light'] .err-pop { background:#fff; border-color:#cbd5e1; color:#334155; box-shadow:0 8px 20px rgba(15,23,42,.16); }
+    html[data-theme='light'] .err-pop-title { color:#152337; }
+    html[data-theme='light'] .err-pop-row .n { color:#64748b; }
+    html[data-theme='light'] .err-pop-divider { border-top-color:#cbd5e1; }
+    html[data-theme='light'] .error-breakdown-select select { background:#fff; border-color:#cbd5e1; color:#0f172a; }
+    html[data-theme='light'] .breakdown-bar { background:#f1f5f9; border-color:#cbd5e1; }
+    html[data-theme='light'] .breakdown-legend { color:#334155; }
+    html[data-theme='light'] .breakdown-table th, html[data-theme='light'] .breakdown-table td { border-bottom-color:#e2e8f0; }
+    html[data-theme='light'] .breakdown-table th { color:#64748b; }
     .traffic-protocols { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:1rem; align-items:stretch; }
     .traffic-card { min-width:0; background:rgba(15,23,42,.6); border:1px solid #334155; border-radius:.5rem; padding:1rem; }
     .traffic-card h3 { margin:0 0 .75rem; color:#e2e8f0; font-size:.95rem; }
@@ -4201,6 +4400,20 @@ const DEVICE_DETAIL_CSS: &str = "<style>
     .traffic-talkers-table { min-width:980px; }
   .traffic-empty { color:#64748b; font-style:italic; padding:.75rem 0; }
   .traffic-note { margin:-.35rem 0 .85rem; color:#94a3b8; font-size:.82rem; }
+    html[data-theme='light'] .traffic-card { background:#fff; border-color:#d5e0e8; }
+    html[data-theme='light'] .traffic-card h3 { color:#152337; }
+    html[data-theme='light'] .traffic-card-label { color:#5d7084; }
+    html[data-theme='light'] .traffic-refresh-select { background:#fff; border-color:#cbd8e2; color:#152337; }
+    html[data-theme='light'] .traffic-controls button { background:#edf3f6; border-color:#cbd8e2; color:#33495e; }
+    html[data-theme='light'] .traffic-controls button:hover { background:#dfe9ee; color:#152337; }
+    html[data-theme='light'] .traffic-kpi-row div { background:#f1f5f9; }
+    html[data-theme='light'] .traffic-kpi-row span, html[data-theme='light'] .traffic-share-label span:last-child { color:#5d7084; }
+    html[data-theme='light'] .traffic-kpi-row strong { color:#152337; }
+    html[data-theme='light'] .traffic-legend, html[data-theme='light'] .traffic-share-label { color:#33495e; }
+    html[data-theme='light'] .traffic-share-track { background:#e2e8f0; }
+    html[data-theme='light'] .traffic-donut::after { background:#fff; }
+    html[data-theme='light'] .talker-table th { color:#42576b; }
+    html[data-theme='light'] .traffic-note { color:#5d7084; }
     @media (max-width:900px) { .traffic-timeseries-card, .traffic-protocol-card { grid-column:span 12; } }
     @media (max-width:760px) { .traffic-protocols { grid-template-columns:1fr; } .traffic-summary-card, .traffic-timeseries-card, .traffic-protocol-card, .traffic-applications-card, .traffic-endpoints-card, .traffic-talkers-card { grid-column:span 1; } .traffic-kpi-row { grid-template-columns:repeat(2,minmax(0,1fr)); } .traffic-donut-wrap { justify-content:center; flex-wrap:wrap; } }
 </style>";
@@ -4209,6 +4422,7 @@ const DEVICE_DETAIL_BUNDLE_JS: &str = include_str!("../../frontend/dist/device-d
 const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js");
 const SETTINGS_BUNDLE_JS: &str = include_str!("../../frontend/dist/settings.js");
 const DIAGNOSTICS_BUNDLE_JS: &str = include_str!("../../frontend/dist/diagnostics.js");
+const SNMP_DEFINITIONS_BUNDLE_JS: &str = include_str!("../../frontend/dist/snmp-definitions.js");
 const DISCOVERY_BUNDLE_JS: &str = include_str!("../../frontend/dist/discovery.js");
 const TOPOLOGY_BUNDLE_JS: &str = include_str!("../../frontend/dist/topology.js");
 const THEME_BUNDLE_JS: &str = include_str!("../../frontend/dist/theme.js");
@@ -4223,6 +4437,10 @@ const APPLE_TOUCH_ICON_PNG: &[u8] = include_bytes!("../../frontend/assets/apple-
 const BRAND_HEAD_HTML: &str = "<link rel='icon' href='/favicon.svg?v=3' type='image/svg+xml'><link rel='icon' href='/favicon.ico?v=3' type='image/x-icon' media='(prefers-color-scheme: light)'><link rel='icon' href='/favicon-dark.ico?v=3' type='image/x-icon' media='(prefers-color-scheme: dark)'><link rel='apple-touch-icon' href='/apple-touch-icon.png?v=3'>";
 
 const DASHBOARD_CSS: &str = "<style>
+    .health-meter { display:inline-block; width:4rem; height:.5rem; margin-left:.5rem; vertical-align:middle; overflow:hidden; background:#334155; border-radius:4px; }
+    .health-meter-fill { display:block; height:100%; background:currentColor; }
+    html[data-theme='light'] .health-meter { background:#e2e8f0; }
+    .dashboard-recent-alerts > h2 { margin:0; padding:.85rem 1rem; }
     .dashboard-table-scroll { max-height:min(60vh, 560px); overflow:auto; border:1px solid #334155; border-radius:.5rem; background:#1e293b; }
     html[data-theme='light'] .dashboard-table-scroll { border-color:#cbd5e1; background:#fff; }
     .dashboard-table-scroll #dash-table { min-width:760px; border:0; border-radius:0; }
@@ -4295,6 +4513,12 @@ const DISCOVERY_CSS: &str = "<style>
   .host-hint { font-size:.78rem; color:#64748b; margin-top:.25rem; line-height:1.5; }
     .host-hint:empty { display:none; }
   .host-hint.warn { color:#fbbf24; }
+    html[data-theme='light'] .progress-stats { color:#334155; }
+    html[data-theme='light'] .progress-bar-track { background:#e2e8f0; }
+    html[data-theme='light'] #scan-error, html[data-theme='light'] body main #register-result.reg-error { background:#fef2f2; border-color:#fca5a5; color:#991b1b; }
+    html[data-theme='light'] body main #register-result.reg-success { background:#f0fdf4; border-color:#86efac; color:#166534; }
+    html[data-theme='light'] .badge-registered { background:#dbeafe; color:#1d4ed8; }
+    html[data-theme='light'] .host-hint.warn { color:#b45309; }
   #topology-section { display:none; margin-top:1.25rem; }
   .topology-header { display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; margin-bottom:.6rem; }
   .topology-toolbar { margin-left:auto; display:flex; flex-wrap:wrap; gap:.35rem; }
@@ -4342,6 +4566,12 @@ const DISCOVERY_CSS: &str = "<style>
   .inspector-if.warn { color:#f59e0b; }
   .inspector-if.crit { color:#ef4444; font-weight:600; }
   .inspector-if-icon { margin-right:.25rem; }
+    .inspector-body .inspector-state.good { color:#4ade80; }
+    .inspector-body .inspector-state.bad { color:#f87171; }
+    .inspector-body .inspector-state.unknown { color:#94a3b8; }
+    html[data-theme='light'] .inspector-body .inspector-state.good { color:#15803d; }
+    html[data-theme='light'] .inspector-body .inspector-state.bad { color:#b91c1c; }
+    html[data-theme='light'] .inspector-body .inspector-state.unknown { color:#64748b; }
   .topology-list { margin-top:.5rem; display:grid; gap:.4rem; }
   .topology-edge { background:#1e293b; border:1px solid #334155; border-radius:.375rem; padding:.55rem .7rem; font-size:.85rem; color:#cbd5e1; }
   @keyframes topo-predictive-dash { to { stroke-dashoffset:-28; } }
@@ -4402,7 +4632,7 @@ const DISCOVERY_HTML: &str = "<main>
       </div>
       <div class='form-group' style='flex:1;min-width:120px'>
         <label data-i18n='community'>Community</label>
-        <input id='manual-community' type='password' autocomplete='new-password' value='public' data-i18n-placeholder='public_placeholder'>
+        <input id='manual-community' type='password' autocomplete='new-password' placeholder='Blank: global default / 空欄: システム共通設定'>
       </div>
       <button class='btn' style='margin-top:1.45rem' onclick='addManual()' data-i18n='add'>Add</button>
       <button class='btn btn-secondary' style='margin-top:1.45rem' onclick='hideManual()' data-i18n='cancel'>Cancel</button>
@@ -4556,8 +4786,8 @@ fn parse_register_body(body: &str) -> Result<Vec<DeviceConfig>, AppError> {
     struct Registration {
         ip: String,
         name: Option<String>,
-        #[serde(default = "crate::config::defaults::default_snmp_community")]
-        community: String,
+        #[serde(default)]
+        community: Option<String>,
     }
     let requests: Vec<Registration> = serde_json::from_str(body).map_err(|_| {
         AppError::Validation("invalid device registration JSON (contents redacted)".into())
@@ -4569,7 +4799,7 @@ fn parse_register_body(body: &str) -> Result<Vec<DeviceConfig>, AppError> {
                 .ip
                 .parse::<std::net::IpAddr>()
                 .map_err(|_| AppError::Validation("invalid device IP address".into()))?;
-            let mut device = DeviceConfig::new(request.ip, request.community);
+            let mut device = DeviceConfig::new(request.ip, request.community.unwrap_or_default());
             if let Some(name) = request.name {
                 device.name = name;
             }
@@ -4619,7 +4849,12 @@ fn run_polling_loop_with_observer(
 
         let devices = match repo.lock() {
             Ok(r) => match r.list_devices() {
-                Ok(devices) => devices,
+                Ok(devices) => devices.into_iter().filter_map(|device| {
+                    match r.resolved_snmp_config(&device.ip, &snmp_overrides, &device.community) {
+                        Ok(config) => Some((device, config)),
+                        Err(error) => { tracing::error!(ip=%device.ip, %error, "Polling skipped: invalid SNMP credentials"); None }
+                    }
+                }).collect::<Vec<_>>(),
                 Err(error) => {
                     tracing::error!(%error, "Polling skipped: device credentials could not be read");
                     continue;
@@ -4641,7 +4876,7 @@ fn run_polling_loop_with_observer(
         // （SNMP はネットワーク I/O なのでスレッド並列が有効）
         let handles: Vec<_> = devices
             .into_iter()
-            .map(|device| {
+            .map(|(device, snmp_overrides)| {
                 let now = now.clone();
                 let snmp_overrides = snmp_overrides.clone();
                 std::thread::spawn(move || -> PollResult {
@@ -4659,8 +4894,7 @@ fn run_polling_loop_with_observer(
                         last_seen_at: device.last_seen_at.clone(),
                     };
 
-                    let client =
-                        SnmpClient::with_snmp_config(&dev_config.community, snmp_overrides);
+                    let client = SnmpClient::with_snmp_config(snmp_overrides.default_community.clone(), snmp_overrides);
 
                     // 死活確認
                     let is_online = client.probe_device(&dev_config).is_ok();
@@ -4694,7 +4928,9 @@ fn run_polling_loop_with_observer(
                         device_id,
                         previous_status: device.status.clone(),
                         status: status.to_string(),
+                        sampled_at: now.clone(),
                         metrics: None,
+                        template_metrics: vec![],
                         samples: vec![],
                     };
 
@@ -4709,6 +4945,11 @@ fn run_polling_loop_with_observer(
                                 memory_used_bytes: info.memory_used_bytes,
                                 sampled_at: now.clone(),
                             });
+                        }
+
+                        match client.query_template_metrics(&dev_config) {
+                            Ok(metrics) => result.template_metrics = metrics,
+                            Err(error) => tracing::warn!(device = %device.ip, %error, "Optional template metric collection unavailable"),
                         }
 
                         // インターフェース
@@ -4788,6 +5029,15 @@ fn run_polling_loop_with_observer(
 
             if let Ok(r) = repo.lock() {
                 let _ = r.update_device_status(&result.ip, &result.status);
+                if !result.template_metrics.is_empty()
+                    && let Err(error) = r.save_template_metric_samples(
+                        result.device_id,
+                        &result.template_metrics,
+                        &result.sampled_at,
+                    )
+                {
+                    tracing::warn!(device = %result.ip, %error, "Template metric history could not be saved");
+                }
 
                 let dev_config = DeviceConfig {
                     id: Some(result.device_id),
@@ -4933,7 +5183,9 @@ struct PollResult {
     device_id: i64,
     previous_status: String,
     status: String,
+    sampled_at: String,
     metrics: Option<crate::db::models::DeviceMetrics>,
+    template_metrics: Vec<crate::snmp::client::TemplateMetricReading>,
     samples: Vec<crate::db::models::InterfaceSample>,
 }
 
@@ -4946,7 +5198,9 @@ impl PollResult {
             device_id: 0,
             previous_status: "offline".to_string(),
             status: "offline".to_string(),
+            sampled_at: chrono_now(),
             metrics: None,
+            template_metrics: vec![],
             samples: vec![],
         }
     }
@@ -4954,6 +5208,112 @@ impl PollResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_snmp_editor_reads_metadata_preserves_secrets_and_resets_overrides() {
+        use super::*;
+        let repository =
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+                .unwrap();
+        let id = repository
+            .save_device_config(&DeviceConfig::new("192.0.2.61", "old-community"))
+            .unwrap();
+        repository
+            .set_device_snmp_credentials(
+                &[id],
+                crate::snmp::credentials::SnmpCredentials {
+                    version: Some("3".into()),
+                    community: Some("private-community-marker".into()),
+                    v3_username: Some("monitor".into()),
+                    v3_auth_protocol: Some("sha256".into()),
+                    v3_auth_password: Some("private-auth-marker".into()),
+                    v3_priv_protocol: Some("aes128".into()),
+                    v3_priv_password: Some("private-privacy-marker".into()),
+                },
+            )
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repository));
+        let cfg = Arc::new(Mutex::new(AppConfig::default()));
+        let (status, body) = api_get_device_snmp_credentials("192.0.2.61", &repo);
+        assert_eq!(status, "200 OK");
+        for secret in [
+            "private-community-marker",
+            "private-auth-marker",
+            "private-privacy-marker",
+        ] {
+            assert!(!body.contains(secret));
+        }
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["devices"]["credentials"]["version"], "3");
+        assert_eq!(value["devices"]["secret_configured"]["community"], true);
+        let request = serde_json::json!({"device_ids":[id],"preserve_secrets":true,"credentials":{"version":"3","v3_username":"new-monitor","v3_auth_protocol":"sha256","v3_priv_protocol":"aes128"}});
+        assert_eq!(
+            api_device_snmp_credentials(&request.to_string(), &repo, &cfg).0,
+            "200 OK"
+        );
+        let stored = repo
+            .lock()
+            .unwrap()
+            .device_snmp_credentials("192.0.2.61")
+            .unwrap();
+        assert_eq!(stored.v3_username.as_deref(), Some("new-monitor"));
+        assert_eq!(
+            stored.community.as_deref(),
+            Some("private-community-marker")
+        );
+        assert_eq!(
+            stored.v3_auth_password.as_deref(),
+            Some("private-auth-marker")
+        );
+        assert_eq!(
+            stored.v3_priv_password.as_deref(),
+            Some("private-privacy-marker")
+        );
+        let reset = serde_json::json!({"device_ids":[id],"credentials":{}});
+        assert_eq!(
+            api_device_snmp_credentials(&reset.to_string(), &repo, &cfg).0,
+            "200 OK"
+        );
+        let (_, body) = api_get_device_snmp_credentials("192.0.2.61", &repo);
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(value["devices"]["individual_configured"], false);
+        assert_eq!(value["devices"]["secret_configured"]["community"], false);
+        assert!(
+            repo.lock()
+                .unwrap()
+                .find_device_by_ip("192.0.2.61")
+                .unwrap()
+                .unwrap()
+                .community
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn diagnostic_results_are_not_separated_from_target_by_the_definition_editor() {
+        use super::*;
+        let cfg = Arc::new(Mutex::new(AppConfig::default()));
+        let diagnostics = page_diagnostics("/diagnostics", &cfg, None);
+        assert!(!diagnostics.contains("id='snmp-definitions'"));
+        assert!(!diagnostics.contains("/static/js/snmp-definitions.js"));
+        assert_eq!(
+            diagnostics.matches("data-i18n='diagnostics_help'").count(),
+            1
+        );
+        assert!(diagnostics.contains("</div></main>"));
+        let settings = page_settings(&cfg, None, true);
+        assert!(settings.contains("href='/settings/snmp'"));
+        assert!(!settings.contains("id='community'"));
+        assert!(!settings.contains("id='snmp-connection-form'"));
+        let editor = page_snmp_definitions(None);
+        assert!(editor.contains("id='snmp-connection-form'"));
+        assert!(editor.contains("id='community'"));
+        assert!(editor.contains("href='/settings'"));
+        assert!(editor.contains("id='snmp-definitions'"));
+        assert!(editor.contains("/static/js/snmp-definitions.js"));
+        assert!(!editor.contains("/static/js/diagnostics.js"));
+        assert!(!editor.contains("id='diag-run-btn'"));
+    }
+
     #[test]
     fn credential_responses_are_masked_and_empty_settings_preserve_encrypted_values() {
         use super::*;
@@ -4975,6 +5335,7 @@ mod tests {
             api_get_settings(&cfg),
             page_dashboard(&repo, &cfg, None, false),
             page_settings(&cfg, None, true),
+            page_snmp_definitions(None),
             page_diagnostics("/diagnostics", &cfg, None),
         ] {
             assert!(!response.contains(secret));
@@ -5411,7 +5772,8 @@ mod tests {
         let html = super::page_settings(&config, None, true);
         assert!(!html.contains("destination-grid"));
         assert!(!html.contains("notifications.js"));
-        assert!(html.contains(
+        assert!(html.contains("href='/settings/snmp'"));
+        assert!(super::page_snmp_definitions(None).contains(
             "TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics."
         ));
     }
@@ -5966,6 +6328,99 @@ mod tests {
         };
         report.rebuild_nodes(&BTreeMap::new());
         report
+    }
+
+    #[test]
+    fn topology_hostname_enrichment_requires_a_unique_registered_device() {
+        let cases: &[(&str, &str, &[&str], Option<usize>)] = &[
+            ("switch01", "", &["switch01"], Some(0)),
+            ("SWITCH01", "", &["switch01"], Some(0)),
+            ("switch01.domain.com", "", &["switch01"], Some(0)),
+            ("switch01", "", &["SWITCH01.domain.com"], Some(0)),
+            (
+                " switch01.domain.com. ",
+                "",
+                &["switch01.domain.com"],
+                Some(0),
+            ),
+            ("switch01", "", &["switch01", "SWITCH01"], None),
+            ("switch01", "", &["switch01.a.com", "switch01.b.com"], None),
+            (
+                "switch01.c.com",
+                "",
+                &["switch01.a.com", "switch01.b.com"],
+                None,
+            ),
+            (
+                "switch01.a.com",
+                "",
+                &["switch01.a.com", "switch01.b.com"],
+                Some(0),
+            ),
+            (
+                "switch01.a.com",
+                "",
+                &["switch01.a.com", "SWITCH01.A.COM"],
+                None,
+            ),
+            ("missing", "", &["switch01"], None),
+            ("", "", &[""], None),
+            (".domain.com", "", &[".other.com"], None),
+            ("display-only", "", &["switch01"], None),
+            ("switch01", "192.0.2.99", &["switch01"], None),
+            ("switch01", "192.0.2.2", &["switch01", "other"], Some(1)),
+        ];
+        for &(hostname, existing_ip, names, expected_index) in cases {
+            let connection = initialize_database(std::path::Path::new(":memory:")).unwrap();
+            let repository = Repository::new(connection).unwrap();
+            for (index, name) in names.iter().enumerate() {
+                repository
+                    .save_device(&Device {
+                        id: None,
+                        name: (*name).to_string(),
+                        display_name: Some("display-only".to_string()),
+                        tags: Vec::new(),
+                        ip: format!("192.0.2.{}", index + 1),
+                        community: String::new(),
+                        device_type: "switch".to_string(),
+                        status: "online".to_string(),
+                        last_seen_at: None,
+                        created_at: None,
+                        updated_at: None,
+                    })
+                    .unwrap();
+            }
+            let repository = Arc::new(Mutex::new(repository));
+            let mut report = topology_report_with(2);
+            report.edges[0].target = format!("name:{hostname}");
+            report.edges[0].remote_hostname = Some(hostname.to_string());
+            report.edges[0].remote_ip = (!existing_ip.is_empty()).then(|| existing_ip.to_string());
+            report.rebuild_nodes(&BTreeMap::new());
+            let edges = report.edges.clone();
+            let node_id = report.nodes[1].id.clone();
+
+            super::enrich_topology_nodes(&mut report, &repository);
+
+            let expected_ip = expected_index
+                .map(|index| format!("192.0.2.{}", index + 1))
+                .unwrap_or_else(|| existing_ip.to_string());
+            assert_eq!(
+                report.nodes[1].ip, expected_ip,
+                "hostname: {hostname}, names: {names:?}"
+            );
+            assert_eq!(report.nodes[1].id, node_id);
+            assert_eq!(report.edges, edges);
+            assert_eq!(
+                report.nodes[1].status,
+                if expected_index.is_some() {
+                    "online"
+                } else {
+                    "unknown"
+                }
+            );
+            let json: serde_json::Value = serde_json::from_str(&report.to_json()).unwrap();
+            assert_eq!(json["nodes"][1]["ip"], expected_ip);
+        }
     }
 
     #[test]

@@ -23,7 +23,7 @@ RUN apt-get update \
 WORKDIR /opt/tracepulse
 COPY --from=backend /build/target/release/tracepulse ./tracepulse
 COPY config/services.toml ./config/services.toml
-COPY LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES.html ./
+COPY LICENSE-APACHE THIRD_PARTY_LICENSES.html ./
 COPY docker/config.toml /etc/tracepulse/config.toml
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV TRACEPULSE_DATA_DIR=/data \

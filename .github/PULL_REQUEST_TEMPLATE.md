@@ -1,3 +1,5 @@
+> External code pull requests are not accepted and will be closed. Please use a GitHub Issue for bug reports, device/OID compatibility feedback, or feature requests. Only the project owner and authorized maintainers/collaborators should use this template.
+
 ## Summary
 
 <!-- What changed and why? Link the related Issue or Discussion when applicable. -->

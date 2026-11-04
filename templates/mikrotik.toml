@@ -1,0 +1,25 @@
+name = "MikroTik RouterOS"
+description = "RouterOS processor load and hardware voltage and temperature"
+sysObjectID_prefix = "1.3.6.1.4.1.14988"
+enterprise_id = 14988
+
+# HOST-RESOURCES-MIB reports processor load as 0..100 percent.
+[cpu]
+candidates = ["1.3.6.1.2.1.25.3.3.1.2"]
+
+# MIKROTIK-MIB values are reported in tenths and scaled to volts / Celsius.
+[[metrics]]
+key = "hardware_voltage"
+oid = "1.3.6.1.4.1.14988.1.1.3.8.0"
+unit = "V"
+label = "Hardware Voltage"
+data_type = "gauge"
+scale = 0.1
+
+[[metrics]]
+key = "cpu_temperature"
+oid = "1.3.6.1.4.1.14988.1.1.3.10.0"
+unit = "C"
+label = "CPU Temperature"
+data_type = "gauge"
+scale = 0.1
