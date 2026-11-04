@@ -1,0 +1,30 @@
+changelog:
+  exclude:
+    labels:
+      - dependencies
+      - chore
+      - skip-changelog
+  categories:
+    - title: "🚀 New Features & Enhancements"
+      labels:
+        - feature
+        - enhancement
+    - title: "📡 Vendor Templates & SNMP Definitions"
+      labels:
+        - vendor
+        - template
+    - title: "🐛 Bug Fixes & UX Improvements"
+      labels:
+        - bug
+        - fix
+        - ui/ux
+    - title: "🔒 Security & Core Architecture"
+      labels:
+        - security
+        - core
+    - title: "📝 Documentation"
+      labels:
+        - documentation
+    - title: "Other Changes"
+      labels:
+        - "*"
