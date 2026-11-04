@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+const DEFAULT_SNMP_PORT: u16 = 161;
+
 /// `walk_oid` の既定取得上限。
 pub const DEFAULT_WALK_MAX_VARBINDS: usize = 1024;
 
@@ -34,6 +36,7 @@ pub struct SnmpClient {
     community: String,
     overrides: Option<SnmpConfig>,
     templates: std::sync::Arc<TemplateRegistry>,
+    destination_port: u16,
 }
 
 impl std::fmt::Debug for SnmpClient {
@@ -304,6 +307,7 @@ impl SnmpClient {
             community: community.into(),
             overrides,
             templates,
+            destination_port: DEFAULT_SNMP_PORT,
         }
     }
 
@@ -313,7 +317,13 @@ impl SnmpClient {
             community: community.into(),
             overrides,
             templates,
+            destination_port: DEFAULT_SNMP_PORT,
         }
+    }
+
+    pub fn with_destination_port(mut self, port: u16) -> Self {
+        self.destination_port = port;
+        self
     }
 
     pub fn query_device(&self, device: &DeviceConfig) -> Result<SnmpDeviceInfo, AppError> {
@@ -851,7 +861,7 @@ impl SnmpClient {
                 .ip
                 .parse()
                 .map_err(|_| AppError::Validation("invalid SNMP device IP".into()))?,
-            161,
+            self.destination_port,
         );
         if let Some(config) = &self.overrides
             && config.credentials.version.as_deref() == Some("3")
@@ -2424,6 +2434,7 @@ mod template_collection_tests {
                     .join("templates")
                     .join("absent"),
             )),
+            destination_port: DEFAULT_SNMP_PORT,
         }
     }
 
@@ -2541,6 +2552,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
             community: "public".into(),
             overrides: None,
             templates: first.registry.clone(),
+            destination_port: DEFAULT_SNMP_PORT,
         };
         let mut definitions = first.definitions.clone();
         definitions.profiles.get_mut(id).unwrap()["cpu"]["candidates"] =
@@ -2558,6 +2570,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
             community: "public".into(),
             overrides: None,
             templates: second.registry.clone(),
+            destination_port: DEFAULT_SNMP_PORT,
         };
         let mut agent = TemplateAgent::new(vec![
             ("1.3.6.1.4.1.65000.3.0", tlv(0x02, &[21])),
@@ -2809,6 +2822,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
             community: "public".into(),
             overrides: None,
             templates: std::sync::Arc::new(registry),
+            destination_port: DEFAULT_SNMP_PORT,
         };
         let (mut session, server) = mock_session(vec![
             ("1.3.6.1.2.1.1.2.0", encoded_oid("1.3.6.1.4.1.65000.1")),
@@ -2945,6 +2959,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
                 community: "public".into(),
                 overrides: None,
                 templates: std::sync::Arc::new(registry),
+                destination_port: DEFAULT_SNMP_PORT,
             };
             let (session, server) = mock_session(vec![
                 ("1.3.6.1.2.1.1.2.0", encoded_oid(sys_object_id)),
@@ -2990,6 +3005,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
             community: "public".into(),
             overrides: None,
             templates: std::sync::Arc::new(registry),
+            destination_port: DEFAULT_SNMP_PORT,
         };
         let (mut session, server) = mock_session(vec![
             ("1.3.6.1.2.1.1.2.0", encoded_oid("1.3.6.1.4.1.65000.1")),

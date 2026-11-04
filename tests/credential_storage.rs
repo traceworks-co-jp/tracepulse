@@ -421,7 +421,8 @@ fn repository_credentials_authenticate_an_actual_loopback_snmp_exchange() {
     let repo = repository(&path);
     let ip = "127.0.0.241";
     repo.save_device_config(&DeviceConfig::new(ip, "")).unwrap();
-    let socket = UdpSocket::bind((ip, 161)).unwrap();
+    let socket = UdpSocket::bind((ip, 0)).unwrap();
+    let port = socket.local_addr().unwrap().port();
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -479,7 +480,8 @@ fn repository_credentials_authenticate_an_actual_loopback_snmp_exchange() {
         let client = tracepulse::snmp::SnmpClient::with_snmp_config(
             config.default_community.clone(),
             config,
-        );
+        )
+        .with_destination_port(port);
         assert_eq!(
             client
                 .probe_device_once(&DeviceConfig::new(ip, ""), Duration::from_secs(3))
