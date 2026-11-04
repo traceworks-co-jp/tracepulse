@@ -63,8 +63,10 @@ interface TopologyProgress {
     partial: number;
     retry_after_seconds: number;
     last_activity_at: string | null;
-    devices: { device_id: number; name: string; ip: string; state: string; updated_at: string | null;
-        checks?: { scope: string; status: string; reason_code: string }[] }[];
+    devices: {
+        device_id: number; name: string; ip: string; state: string; updated_at: string | null;
+        checks?: { scope: string; status: string; reason_code: string }[]
+    }[];
 }
 let topologyGeneration = 0;
 let topologyController: AbortController | null = null;
@@ -90,10 +92,12 @@ function drawTopology(): void {
     const data = topologyState.data;
     if (!svg || !data) return;
     if (!map) map = new TopologyMap(svg, { onNodeSelect: openNodeInspector, onEdgeSelect: openEdgeInspector, onBackground: closeInspector });
-    map.render((data.nodes || []).map(node => ({ ...node, seed: node.seed || node.ip === data.seed_ip,
+    map.render((data.nodes || []).map(node => ({
+        ...node, seed: node.seed || node.ip === data.seed_ip,
         kind: node.kind || (node.device_id !== undefined ? "switch" : "endpoint"),
         stale: node.stale || node.status === "stale", stateLabel: node.stateLabel || (node.health ? `${t(`topology_risk_${node.health.severity || "unknown"}`)}${node.health.stale ? ` / ${t("topology_risk_stale")}` : ""}` : undefined),
-    })), (data.edges || []).map(edge => ({ ...edge, stale: edge.stale || edge.link_status === "stale",
+    })), (data.edges || []).map(edge => ({
+        ...edge, stale: edge.stale || edge.link_status === "stale",
         stroke: edge.stroke || (edge.health ? topologyRiskColor(edge.health.severity) : undefined),
         label: edge.label || (edge.source_port || edge.target_port ? `${edge.source_port || "?"} ↔ ${edge.target_port || "?"}` : ""),
         local_ip: edge.local_ip || edge.source_ip, local_port: edge.local_port || edge.source_port || undefined,

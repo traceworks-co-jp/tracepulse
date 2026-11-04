@@ -4,10 +4,7 @@ enterprise_id = 41112
 
 # Use the vendor CPU gauge when exposed, then standard HOST-RESOURCES-MIB.
 [cpu]
-candidates = [
-    "1.3.6.1.4.1.41112.1.4.1.1.4.1",
-    "1.3.6.1.2.1.25.3.3.1.2",
-]
+candidates = ["1.3.6.1.4.1.41112.1.4.1.1.4.1", "1.3.6.1.2.1.25.3.3.1.2"]
 aggregation = "max"
 
 # Calculate used bytes and utilization by matching total/free table row indexes.

@@ -110,7 +110,8 @@ test("DOM power columns show dBm and bandwidth uses percentage values without re
         document.body.insertAdjacentHTML("beforeend", "<table><tbody id='if-tbody'></tbody></table>");
     });
     await page.addScriptTag({ url: "/static/js/device-detail.js" });
-    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderInterfaces([
+    await page.addScriptTag({
+        content: `TracePulseDeviceDetail.renderInterfaces([
         {if_index:7,if_name:"xe-0/0/0",link_status:"up",tx_power_dbm:-4.2,rx_power_dbm:-3.5,metrics:{bandwidth_utilization:77.29}},
         {if_index:8,if_name:"ge-0/0/1",link_status:"up",tx_power_dbm:null,rx_power_dbm:null,predictive_status:{rx_optical_power_dbm:-5},metrics:{bandwidth_utilization:7.72}},
         {if_index:9,if_name:"weak",link_status:"up",tx_power_dbm:-20,rx_power_dbm:-40,metrics:{bandwidth_utilization:0}},
@@ -143,7 +144,8 @@ test("vendor hardware states render normal power and critical failures correctly
         document.body.insertAdjacentHTML("beforeend", "<div id='hardware-status'></div>");
     });
     await page.addScriptTag({ url: "/static/js/device-detail.js" });
-    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderHardwareStatus([
+    await page.addScriptTag({
+        content: `TracePulseDeviceDetail.renderHardwareStatus([
         {name:"Cisco PSU 1",sensor_type:"power",status:2,status_text:"On",status_kind:"normal",is_alarm:false},
         {name:"Cisco PSU 2",sensor_type:"power",status:8,status_text:"Failed",status_kind:"critical",is_alarm:true},
         {name:"Juniper Fan",sensor_type:"fan",status:6,status_text:"Online",status_kind:"normal",is_alarm:false},
@@ -164,16 +166,18 @@ test("vendor hardware states render normal power and critical failures correctly
 
 test("hardware status cards use readable colors in light mode and retain dark mode styling", async ({ page }) => {
     await page.request.post("/api/discovery/register", { data: [{ ip: "192.0.2.251", name: "hardware-color-test", community: "public" }] });
-    await page.route("**/api/device/192.0.2.251", route => route.fulfill({ json: {
-        ip: "192.0.2.251", name: "hardware-color-test", status: "online", metrics: [], alerts: [], spikes: [],
-        interfaces: ["up", "down", "unknown", "testing", "dormant", "notPresent", "lowerLayerDown"].map((link_status, index) => ({ if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status })),
-        hardware_sensors: [
-            { index: 1, name: "Power Supply 1", sensor_type: "power", status: 2, status_text: "On", status_kind: "normal", is_alarm: false },
-            { index: 2, name: "Fan 1", sensor_type: "fan", status: 1, status_text: "Warning", status_kind: "warning", is_alarm: false },
-            { index: 3, name: "Power Supply 2", sensor_type: "power", status: 8, status_text: "Failed", status_kind: "critical", is_alarm: true },
-            { index: 4, name: "Temperature", sensor_type: "temperature", value: 42, unit: "C", status: null, is_alarm: false },
-        ],
-    } }));
+    await page.route("**/api/device/192.0.2.251", route => route.fulfill({
+        json: {
+            ip: "192.0.2.251", name: "hardware-color-test", status: "online", metrics: [], alerts: [], spikes: [],
+            interfaces: ["up", "down", "unknown", "testing", "dormant", "notPresent", "lowerLayerDown"].map((link_status, index) => ({ if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status })),
+            hardware_sensors: [
+                { index: 1, name: "Power Supply 1", sensor_type: "power", status: 2, status_text: "On", status_kind: "normal", is_alarm: false },
+                { index: 2, name: "Fan 1", sensor_type: "fan", status: 1, status_text: "Warning", status_kind: "warning", is_alarm: false },
+                { index: 3, name: "Power Supply 2", sensor_type: "power", status: 8, status_text: "Failed", status_kind: "critical", is_alarm: true },
+                { index: 4, name: "Temperature", sensor_type: "temperature", value: 42, unit: "C", status: null, is_alarm: false },
+            ],
+        }
+    }));
     await page.goto("/device/192.0.2.251");
     const cards = page.locator("#hardware-status .hardware-card");
     await expect(cards).toHaveCount(4);
@@ -215,10 +219,12 @@ test("hardware status cards use readable colors in light mode and retain dark mo
 
 test("interface selection uses light-theme colors and retains dark-theme styling", async ({ page }) => {
     await page.request.post("/api/discovery/register", { data: [{ ip: "192.0.2.252", name: "interface-filter-test", community: "public" }] });
-    await page.route("**/api/device/192.0.2.252", route => route.fulfill({ json: {
-        ip: "192.0.2.252", name: "interface-filter-test", status: "online", metrics: [], alerts: [], spikes: [],
-        interfaces: Array.from({ length: 4 }, (_, index) => ({ if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status: "up", metrics: {} })),
-    } }));
+    await page.route("**/api/device/192.0.2.252", route => route.fulfill({
+        json: {
+            ip: "192.0.2.252", name: "interface-filter-test", status: "online", metrics: [], alerts: [], spikes: [],
+            interfaces: Array.from({ length: 4 }, (_, index) => ({ if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status: "up", metrics: {} })),
+        }
+    }));
     await page.goto("/device/192.0.2.252");
     const filter = page.locator("#iface-filter");
     const items = filter.locator(".iface-filter-item");
@@ -237,15 +243,19 @@ test("interface selection uses light-theme colors and retains dark-theme styling
 
 test("device traffic and error breakdown panels adapt to light mode", async ({ page }) => {
     await page.request.post("/api/discovery/register", { data: [{ ip: "192.0.2.253", name: "light-theme-test", community: "public" }] });
-    await page.route("**/api/device/192.0.2.253", route => route.fulfill({ json: {
-        ip: "192.0.2.253", name: "light-theme-test", status: "online", metrics: [], alerts: [], spikes: [],
-        interfaces: [{ if_index: 1, if_name: "Gi0/1", link_status: "up", metrics: { in_errors: 1, in_errors_delta: 1 }, error_breakdown: { fcs_errors: 1, fcs_errors_delta: 1 } }],
-    } }));
-    await page.route("**/api/flow/analytics*", route => route.fulfill({ json: {
-        summary: { total_bps: 800, total_pps: 1, active_flows: 1, top_protocol: "TCP" },
-        protocols: [{ protocol: "TCP", bytes: 100, percentage: 100, bps: 800, pps: 1 }],
-        applications: [], top_sources: [], top_destinations: [], top_talkers: [], timeseries: [],
-    } }));
+    await page.route("**/api/device/192.0.2.253", route => route.fulfill({
+        json: {
+            ip: "192.0.2.253", name: "light-theme-test", status: "online", metrics: [], alerts: [], spikes: [],
+            interfaces: [{ if_index: 1, if_name: "Gi0/1", link_status: "up", metrics: { in_errors: 1, in_errors_delta: 1 }, error_breakdown: { fcs_errors: 1, fcs_errors_delta: 1 } }],
+        }
+    }));
+    await page.route("**/api/flow/analytics*", route => route.fulfill({
+        json: {
+            summary: { total_bps: 800, total_pps: 1, active_flows: 1, top_protocol: "TCP" },
+            protocols: [{ protocol: "TCP", bytes: 100, percentage: 100, bps: 800, pps: 1 }],
+            applications: [], top_sources: [], top_destinations: [], top_talkers: [], timeseries: [],
+        }
+    }));
     await page.goto("/device/192.0.2.253");
     const trafficCard = page.locator("#traffic-protocols .traffic-card").first();
     await expect(trafficCard).toBeVisible();
@@ -303,7 +313,8 @@ test("numeric template metrics render exact values and explicit errors safely", 
     });
     await page.addScriptTag({ url: "/static/js/device-detail.js" });
     await expect(page.locator("#template-metrics")).toHaveText("No numeric metrics configured for this device.");
-    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderTemplateMetrics([
+    await page.addScriptTag({
+        content: `TracePulseDeviceDetail.renderTemplateMetrics([
         {key:"cpu",label:"<img src=x onerror=alert(1)>",unit:"percent",data_type:"gauge",oid:"1.3.6.1.2.1.1.3.0",value:0,value_text:"0"},
         {key:"packets",label:"Packets",unit:"count",data_type:"counter",oid:"1.3.6.1.2.1.1.3.0",value:9007199254740992,value_text:"9007199254740993"},
         {key:"missing",label:"Missing",unit:"celsius",data_type:"gauge",oid:"1.3.6.1.2.1.1.3.0",value:null,error:"OID <unavailable>"}
@@ -807,9 +818,11 @@ test("dashboard health score remains separate from metric alarm status", async (
 
 test("dashboard health meters follow API health status across themes and viewports", async ({ page }) => {
     const statuses = ["online", "warning", "critical", "unknown"];
-    await page.route("**/api/devices", route => route.fulfill({ json: statuses.map((health_status, index) => ({
-        ip: `192.0.2.${index + 1}`, name: `health-${health_status}`, status: health_status, health_score: [90, 67, 44, 50][index], health_status,
-    })) }));
+    await page.route("**/api/devices", route => route.fulfill({
+        json: statuses.map((health_status, index) => ({
+            ip: `192.0.2.${index + 1}`, name: `health-${health_status}`, status: health_status, health_score: [90, 67, 44, 50][index], health_status,
+        }))
+    }));
     for (const width of [1280, 375]) {
         await page.setViewportSize({ width, height: 900 });
         await page.goto("/");
@@ -841,10 +854,12 @@ test("dashboard health meters follow API health status across themes and viewpor
 test("discovery result states distinguish offline warnings and unknown across themes", async ({ page }) => {
     const statuses = ["online", "offline", "warning", "critical", "unknown"];
     await page.route("**/api/discovery/scan", route => route.fulfill({ json: { job_id: "status-test", total: 5 } }));
-    await page.route("**/api/discovery/scan/status-test", route => route.fulfill({ json: {
-        status: "done", scanned: 5, total: 5, elapsed: 1,
-        devices: statuses.map((status, index) => ({ ip: `192.0.2.${index + 1}`, name: `discovered-${status}`, status })),
-    } }));
+    await page.route("**/api/discovery/scan/status-test", route => route.fulfill({
+        json: {
+            status: "done", scanned: 5, total: 5, elapsed: 1,
+            devices: statuses.map((status, index) => ({ ip: `192.0.2.${index + 1}`, name: `discovered-${status}`, status })),
+        }
+    }));
     await page.goto("/discovery");
     await page.locator("#cidr").fill("192.0.2.0/29");
     await page.locator("#scan-btn").click();
@@ -1019,13 +1034,15 @@ test("discovery loads TypeScript discovery and topology bundles", async ({ page 
 });
 
 test("topology inspector colors device and interface states across themes and viewports", async ({ page }) => {
-    await page.route("**/api/discovery/topology", route => route.fulfill({ json: {
-        seed_ip: "192.0.2.1", edges: [],
-        nodes: ["online", "offline", "unknown"].map((status, index) => ({
-            id: status, label: `switch-${status}`, ip: `192.0.2.${index + 1}`, status,
-            interfaces: ["up", "down", "unknown", "testing"].map((link_status, port) => ({ if_index: port + 1, if_name: `Gi0/${port + 1}`, link_status })),
-        })),
-    } }));
+    await page.route("**/api/discovery/topology", route => route.fulfill({
+        json: {
+            seed_ip: "192.0.2.1", edges: [],
+            nodes: ["online", "offline", "unknown"].map((status, index) => ({
+                id: status, label: `switch-${status}`, ip: `192.0.2.${index + 1}`, status,
+                interfaces: ["up", "down", "unknown", "testing"].map((link_status, port) => ({ if_index: port + 1, if_name: `Gi0/${port + 1}`, link_status })),
+            })),
+        }
+    }));
     for (const width of [1280, 375]) {
         await page.setViewportSize({ width, height: 900 });
         await page.goto("/discovery");

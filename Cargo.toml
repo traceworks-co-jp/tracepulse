@@ -22,7 +22,10 @@ thiserror = "2.0"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-snmp2 = { version = "0.5.2", default-features = false, features = ["crypto-rust", "heap_buffers"] }
+snmp2 = { version = "0.5.2", default-features = false, features = [
+    "crypto-rust",
+    "heap_buffers",
+] }
 ratatui = "0.28"
 crossterm = "0.28"
 socket2 = "0.5"

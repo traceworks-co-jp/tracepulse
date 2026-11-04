@@ -251,7 +251,7 @@ export function initializeTemplateManager(): void {
     let busy = false;
     let message = "";
     let error = "";
-    let capture = (): void => {};
+    let capture = (): void => { };
     let category: Category = "system";
     let activeDialog: HTMLDialogElement | undefined;
     let modalDirty = false;
@@ -309,7 +309,7 @@ export function initializeTemplateManager(): void {
                         || /(?:\.sensors\.(?:temperature|power|fan)|\.metrics)\.\d+$/.test(path) && ["alarm_states", "name_oid", "match_name", "unit_oid", "match_unit", "scale_oid", "precision_oid", "warning_value"].includes(key)
                         ? () => { delete value[key]; } : undefined, notify, refresh);
                 if (locked) field.querySelectorAll("input").forEach((input) => { input.disabled = true; });
-                    (advancedKeys.has(key) ? advanced : group).append(field);
+                (advancedKeys.has(key) ? advanced : group).append(field);
             }
             if (path.endsWith(".state_labels")) {
                 const key = element("input"); key.type = "number"; key.step = "1"; key.setAttribute("aria-label", fieldLabel(`${path}.0`));
@@ -357,7 +357,7 @@ export function initializeTemplateManager(): void {
         const node = dialog(`${text("edit")}: ${row.label}`);
         const form = element("form"), body = element("div"), alert = element("p"); alert.setAttribute("role", "alert");
         const actions = element("div"); actions.className = "template-dialog-actions";
-        const apply = button(text("applyItem"), () => {}); apply.type = "submit";
+        const apply = button(text("applyItem"), () => { }); apply.type = "submit";
         actions.append(button(text("cancel"), () => node.close()), apply);
         form.append(body, alert, actions); node.append(form);
         let local = clone(row.value);
@@ -426,9 +426,11 @@ export function initializeTemplateManager(): void {
         }
         if (category === "system") return [
             { label: text("cpuCandidate"), path: `profile.cpu.candidates.${array(object(doc.cpu).candidates).length}`, value: "", commit: next => { doc.cpu = { ...object(doc.cpu), candidates: [...array(object(doc.cpu).candidates), next] }; } },
-            { label: text("memorySource"), path: "profile.memory", value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false }, commit: next => {
-                if ("memory" in doc) object(doc.memory).fallbacks = [...array(object(doc.memory).fallbacks), next]; else doc.memory = next;
-            } },
+            {
+                label: text("memorySource"), path: "profile.memory", value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false }, commit: next => {
+                    if ("memory" in doc) object(doc.memory).fallbacks = [...array(object(doc.memory).fallbacks), next]; else doc.memory = next;
+                }
+            },
             { label: text("customMetric"), path: `profile.metrics.${array(doc.metrics).length}`, value: arraySeed("profile.metrics", []), commit: next => { doc.metrics = [...array(doc.metrics), next]; } },
         ];
         if (category === "interfaces") return [
@@ -441,7 +443,7 @@ export function initializeTemplateManager(): void {
         return [];
     };
     const render = (): void => {
-        capture = () => {};
+        capture = () => { };
         root.replaceChildren(element("h2", text("title")));
         const alert = element("p", error); alert.setAttribute("role", "alert"); root.append(alert);
         const reload = button(text("reload"), () => { if (!dirty || window.confirm(text("discard"))) void run(load); });
@@ -475,7 +477,7 @@ export function initializeTemplateManager(): void {
                 const original = view!.profiles.find(item => item.id === selected);
                 if (profile.base && original) { original.document = clone(profile.base); original.source = "file"; }
                 else { view!.profiles = view!.profiles.filter(item => item.id !== selected); selected = "generic"; }
-                capture = () => {}; changed(); render();
+                capture = () => { }; changed(); render();
             }));
             toolbar.append(button(text("export"), () => void run(async () => {
                 const data = await api<{ toml: string }>("/api/snmp/definitions/convert", { document: doc });
@@ -492,7 +494,7 @@ export function initializeTemplateManager(): void {
                 const imported = result.document;
                 const id = typeof imported.sysObjectID_prefix === "string" ? imported.sysObjectID_prefix.replace(/^\.|\.$/g, "") : Number(imported.enterprise_id) ? `1.3.6.1.4.1.${imported.enterprise_id}` : "generic";
                 if (choices.has(id) && !window.confirm(`${text("import")}: ${id}?`)) return;
-                draft.profiles[id] = imported; selected = id; capture = () => {}; changed();
+                draft.profiles[id] = imported; selected = id; capture = () => { }; changed();
             });
         };
         toolbar.append(file, button(text("import"), () => file.click()), reload);
@@ -501,7 +503,7 @@ export function initializeTemplateManager(): void {
             const newLabel = element("label", text("newProfile")), prefix = element("input"); prefix.id = "template-new-prefix"; prefix.placeholder = "1.3.6.1.4.1.12345"; prefix.required = true;
             prefix.oninput = () => { modalDirty = true; };
             newLabel.append(prefix); const failure = element("p"); failure.setAttribute("role", "alert");
-            const create = button(text("create"), () => {}); create.type = "submit";
+            const create = button(text("create"), () => { }); create.type = "submit";
             form.append(newLabel, failure, button(text("cancel"), () => node.close()), create); node.append(form);
             form.onsubmit = event => {
                 event.preventDefault();
