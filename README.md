@@ -278,6 +278,7 @@ The workflow's OCI source label links the package to its source repository.
    - Registered device list with status indicators and recent alert stream.
 2. **Device Detail**
    - Real-time Sparkline charts for Bandwidth Utilization (%), Error/Discard counters, CPU/Memory Utilization (%).
+  - Choose a shared monitoring graph period: last 1 hour, 6 hours, 24 hours, 7 days, or a custom start/end in local time (up to 31 days). Available data depends on retention; long histories are sampled to at most 600 points per series. The interface status table continues to show current values.
    - Diagnostic status badges per port (e.g., Duplex Mismatch, Congestion, L1 Error).
    - Hardware environmental status (Temperature °C, Fan RPM, Power Supply status).
   - Interface counter details show the latest polling deltas for In/Out Errors, In/Out Discards, and Late Collisions, plus EtherLike-MIB FCS/CRC, Alignment, Oversized Frame, and MAC Receive breakdowns. The detail popover flips upward near the bottom rows to avoid clipping.
@@ -285,6 +286,7 @@ The workflow's OCI source label links the package to its source repository.
 
 3. **Device Discovery & Topology Map**
   - Use the CIDR Range and Scan controls to find SNMP-responsive devices for registration.
+  - Scans do not automatically register devices. Register a device from its result row, or select multiple rows for bulk registration. Confirmed registrations and existing devices immediately become non-selectable Registered rows; failed rows retain a retryable button and a localized error.
   - Enter a Seed Device IP and select Draw Topology to generate an LLDP/CDP topology map independently of a CIDR scan.
 4. **Settings & Diagnostics**
    - Configure polling intervals, alert thresholds, and retention periods.
@@ -652,6 +654,7 @@ cargo run -- --web
    - 登録機器一覧、障害・スパイク発生インジケーター、アラートログ
 2. **Device Detail (デバイス詳細)**
    - 帯域利用率 (%)、エラー / ディスカードカウンタ、CPU / メモリ使用率 (%) のリアルタイム Sparkline グラフ
+  - 監視グラフ共通の表示期間を直近1時間・6時間・24時間・7日、または開始／終了日時（ローカル時刻、最大31日間）から選択できます。履歴の保存期間によって表示可能なデータは異なり、長い履歴は各系列最大600点に間引きます。インターフェース状態表は現在値を維持します。
    - ポート単位の健康状態・診断バッジ (Duplex Mismatch, Congestion, L1 Error 等)
    - ハードウェア環境センサー (温度 °C、ファン rpm、電源ステータス)
     - インターフェース表のエラー項目から、直近ポーリング差分（入力/出力エラー、入力/出力ディスカード、Late Collision）と、EtherLike-MIBのFCS/CRC、アライメント、フレーム超過、MAC受信エラーの内訳を確認可能。最下行付近ではポップオーバーを上向きに表示し、画面外へのクリップを防止。
@@ -659,6 +662,7 @@ cargo run -- --web
 
 3. **Device Discovery (デバイス探索)**
   - 「CIDR 範囲」と「スキャン」で SNMP 応答のある機器を検出して登録
+  - スキャンでは自動登録しません。結果行の「登録」で1台ずつ、またはチェックした複数台を一括登録できます。登録成功・重複確認済みの行は即座に「登録済み」となり選択対象から外れます。失敗した行はエラーを表示し、再試行できます。
   - 「シード機器 IP」を入力し「トポロジー描画」を選択すると、CIDR スキャンを実行せずに LLDP / CDP 隣接関係のトポロジーマップを生成
 4. **Settings & Diagnostics (設定・診断)**
    - ポーリング間隔、アラート閾値の設定

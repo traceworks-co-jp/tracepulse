@@ -109,6 +109,35 @@ var TracePulseDeviceDetail = (() => {
     });
   }
 
+  // frontend/src/shared/operation-progress.ts
+  function showOperationProgress(container, label, message) {
+    if (!document.getElementById("operation-progress-styles")) {
+      const style = document.createElement("style");
+      style.id = "operation-progress-styles";
+      style.textContent = `.operation-progress{box-sizing:border-box;flex-basis:100%;width:100%;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40);color:var(--tp-text,#e2e8f0)}.operation-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}.operation-progress p{margin:8px 0 0;overflow-wrap:anywhere}`;
+      document.head.append(style);
+    }
+    const element = document.createElement("div");
+    element.className = "operation-progress";
+    const bar = document.createElement("progress");
+    bar.setAttribute("aria-label", label);
+    const status = document.createElement("p");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    element.append(bar, status);
+    container.append(element);
+    const started = performance.now();
+    const update = () => {
+      status.textContent = message(Math.floor((performance.now() - started) / 1e3));
+    };
+    update();
+    const timer = window.setInterval(update, 1e3);
+    return () => {
+      window.clearInterval(timer);
+      element.remove();
+    };
+  }
+
   // frontend/src/shared/device-metadata.ts
   if (!document.getElementById("metadata-styles")) {
     const style = document.createElement("style");
@@ -123,6 +152,9 @@ var TracePulseDeviceDetail = (() => {
         .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
         .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
         .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
+        .bulk-action-progress{margin-top:12px;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40)}
+        .bulk-action-progress[hidden]{display:none}.bulk-action-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}
+        .bulk-action-progress p{margin:8px 0 0}.bulk-action-progress small{color:var(--tp-muted,#94a3b8)}
         .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
@@ -171,6 +203,9 @@ var TracePulseDeviceDetail = (() => {
       targets: "Selected devices",
       appendHint: "Existing tags are retained. Duplicate tags are ignored.",
       unregisterHint: "Unregister these devices and delete their monitoring history? This cannot be undone.",
+      unregistering: "Unregistering {count} devices... ({seconds}s elapsed)",
+      tagging: "Adding tags to {count} devices... ({seconds}s elapsed)",
+      unregisterWait: "Deleting monitoring history may take some time. Please keep this page open.",
       confirm: "Confirm"
     },
     ja: {
@@ -207,6 +242,9 @@ var TracePulseDeviceDetail = (() => {
       targets: "\u9078\u629E\u3057\u305F\u6A5F\u5668",
       appendHint: "\u65E2\u5B58\u30BF\u30B0\u3092\u4FDD\u6301\u3057\u3066\u8FFD\u52A0\u3057\u307E\u3059\u3002\u91CD\u8907\u3059\u308B\u30BF\u30B0\u306F\u8FFD\u52A0\u3057\u307E\u305B\u3093\u3002",
       unregisterHint: "\u4EE5\u4E0B\u306E\u6A5F\u5668\u306E\u767B\u9332\u3068\u76E3\u8996\u5C65\u6B74\u3092\u524A\u9664\u3057\u307E\u3059\u3002\u5143\u306B\u623B\u305B\u307E\u305B\u3093\u3002\u5B9F\u884C\u3057\u307E\u3059\u304B\uFF1F",
+      unregistering: "{count}\u53F0\u306E\u767B\u9332\u3092\u89E3\u9664\u3057\u3066\u3044\u307E\u3059...\uFF08\u7D4C\u904E {seconds}\u79D2\uFF09",
+      tagging: "{count}\u53F0\u306B\u30BF\u30B0\u3092\u8FFD\u52A0\u3057\u3066\u3044\u307E\u3059...\uFF08\u7D4C\u904E {seconds}\u79D2\uFF09",
+      unregisterWait: "\u76E3\u8996\u5C65\u6B74\u306E\u524A\u9664\u306B\u306F\u6642\u9593\u304C\u304B\u304B\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u3053\u306E\u30DA\u30FC\u30B8\u3092\u958B\u3044\u305F\u307E\u307E\u304A\u5F85\u3061\u304F\u3060\u3055\u3044\u3002",
       confirm: "\u78BA\u5B9A"
     }
   };
@@ -338,10 +376,12 @@ var TracePulseDeviceDetail = (() => {
       });
     };
     const controller = new AbortController();
+    let stopSaveProgress;
     element.addEventListener("cancel", (event) => {
       if (busy && !loading) event.preventDefault();
     });
     element.addEventListener("close", () => {
+      stopSaveProgress?.();
       controller.abort();
       clearCredentials(element);
     });
@@ -350,6 +390,17 @@ var TracePulseDeviceDetail = (() => {
       const credentials = defaults ? {} : readCredentials(element);
       setBusy(true);
       failure.textContent = "";
+      const progressContainer = document.createElement("div");
+      failure.before(progressContainer);
+      const stopProgress = showOperationProgress(progressContainer, credentialTitle(), (seconds) => {
+        const japanese3 = document.documentElement.lang === "ja";
+        return japanese3 ? `${devices.length}\u53F0\u306E${defaults ? "\u8A8D\u8A3C\u60C5\u5831\u3092\u5171\u901A\u8A2D\u5B9A\u3078\u623B\u3057\u3066\u3044\u307E\u3059" : "SNMP\u8A8D\u8A3C\u60C5\u5831\u3092\u4FDD\u5B58\u3057\u3066\u3044\u307E\u3059"}...\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `${defaults ? "Restoring global defaults for" : "Saving SNMP credentials for"} ${devices.length} devices... (${seconds}s elapsed)`;
+      });
+      stopSaveProgress = () => {
+        stopProgress();
+        progressContainer.remove();
+      };
+      progressContainer.scrollIntoView({ block: "nearest" });
       try {
         await post("/api/devices/snmp-credentials", { device_ids: devices.map((device) => device.id), credentials, preserve_secrets: !defaults && individual });
         clearCredentials(element);
@@ -358,6 +409,8 @@ var TracePulseDeviceDetail = (() => {
       } catch (reason) {
         failure.textContent = String(reason);
       } finally {
+        stopSaveProgress?.();
+        stopSaveProgress = void 0;
         setBusy(false);
       }
     };
@@ -498,6 +551,111 @@ var TracePulseDeviceDetail = (() => {
   var lastDeviceDetail = null;
   var ifaceSelectionReady = false;
   var resizeTimer = null;
+  var monitoringHistory = null;
+  var monitoringRange = "24h";
+  var customHistoryStart = "";
+  var customHistoryEnd = "";
+  var historyController = null;
+  var historyGeneration = 0;
+  var historyLoading = false;
+  var stopHistoryProgress = () => {
+  };
+  var historyCopy = {
+    en: { title: "Monitoring graph period", range: "Time range", hour: "Last hour", six: "Last 6 hours", day: "Last 24 hours", week: "Last 7 days", custom: "Custom range", start: "Start (local time)", end: "End (local time)", apply: "Apply", refresh: "Refresh graphs", invalid: "Choose a valid start and end time, with an end after the start and a range of up to 31 days.", loading: "Loading monitoring history", failed: "Could not load monitoring history" },
+    ja: { title: "\u76E3\u8996\u30B0\u30E9\u30D5\u306E\u8868\u793A\u671F\u9593", range: "\u8868\u793A\u671F\u9593", hour: "\u76F4\u8FD11\u6642\u9593", six: "\u76F4\u8FD16\u6642\u9593", day: "\u76F4\u8FD124\u6642\u9593", week: "\u76F4\u8FD17\u65E5", custom: "\u65E5\u6642\u6307\u5B9A", start: "\u958B\u59CB\uFF08\u30ED\u30FC\u30AB\u30EB\u6642\u523B\uFF09", end: "\u7D42\u4E86\uFF08\u30ED\u30FC\u30AB\u30EB\u6642\u523B\uFF09", apply: "\u9069\u7528", refresh: "\u30B0\u30E9\u30D5\u3092\u518D\u8AAD\u8FBC", invalid: "\u958B\u59CB\u30FB\u7D42\u4E86\u65E5\u6642\u3092\u6B63\u3057\u304F\u6307\u5B9A\u3057\u3066\u304F\u3060\u3055\u3044\u3002\u7D42\u4E86\u306F\u958B\u59CB\u3088\u308A\u5F8C\u3001\u6307\u5B9A\u671F\u9593\u306F31\u65E5\u4EE5\u5185\u306B\u3057\u3066\u304F\u3060\u3055\u3044\u3002", loading: "\u76E3\u8996\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059", failed: "\u76E3\u8996\u5C65\u6B74\u3092\u8AAD\u307F\u8FBC\u3081\u307E\u305B\u3093\u3067\u3057\u305F" }
+  };
+  function historyText() {
+    return historyCopy[document.documentElement.lang === "ja" ? "ja" : "en"];
+  }
+  function initializeHistoryControls() {
+    const root = document.getElementById("monitoring-history-controls");
+    if (!root) return;
+    const previousStart = root.querySelector("#monitoring-start")?.value;
+    const previousEnd = root.querySelector("#monitoring-end")?.value;
+    const copy2 = historyText();
+    const localInput = (time) => {
+      const date = new Date(time);
+      return new Date(time - date.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+    };
+    root.innerHTML = `<h2>${copy2.title}</h2><form class='chart-history-controls'><label for='monitoring-range'>${copy2.range}<select id='monitoring-range'>${[["1h", copy2.hour], ["6h", copy2.six], ["24h", copy2.day], ["7d", copy2.week], ["custom", copy2.custom]].map(([value, label]) => `<option value='${value}'>${label}</option>`).join("")}</select></label><div class='chart-history-custom' hidden><label for='monitoring-start'>${copy2.start}<input id='monitoring-start' type='datetime-local' required></label><label for='monitoring-end'>${copy2.end}<input id='monitoring-end' type='datetime-local' required></label><button class='btn' type='submit'>${copy2.apply}</button></div></form>`;
+    const select = root.querySelector("#monitoring-range");
+    const start = root.querySelector("#monitoring-start");
+    const end = root.querySelector("#monitoring-end");
+    select.value = monitoringRange;
+    start.value = previousStart ?? localInput(Date.now() - 864e5);
+    end.value = previousEnd ?? localInput(Date.now());
+    const toggle = () => {
+      const custom = select.value === "custom";
+      root.querySelector(".chart-history-custom").hidden = !custom;
+      start.disabled = end.disabled = !custom;
+    };
+    toggle();
+    const refresh = document.createElement("button");
+    refresh.id = "monitoring-history-refresh";
+    refresh.type = "button";
+    refresh.className = "btn btn-secondary";
+    refresh.textContent = copy2.refresh;
+    refresh.onclick = () => {
+      if (monitoringRange === "custom") root.querySelector("form").requestSubmit();
+      else void loadMonitoringHistory(true);
+    };
+    root.querySelector("form").append(refresh);
+    select.onchange = () => {
+      monitoringRange = select.value;
+      toggle();
+      if (monitoringRange !== "custom") void loadMonitoringHistory(true);
+    };
+    root.querySelector("form").onsubmit = (event) => {
+      event.preventDefault();
+      const from = new Date(start.value), to = new Date(end.value);
+      if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from || to.getTime() - from.getTime() > 31 * 864e5) {
+        document.getElementById("monitoring-history-error").textContent = historyText().invalid;
+        return;
+      }
+      customHistoryStart = from.toISOString();
+      customHistoryEnd = to.toISOString();
+      void loadMonitoringHistory(true);
+    };
+  }
+  function renderMonitoringCharts() {
+    const selected = document.getElementById("monitoring-history-controls") ? monitoringHistory : lastDeviceDetail;
+    renderBwChart(selected?.if_series || []);
+    renderErrChart(selected?.if_series || []);
+    renderSysChart(selected?.metrics || []);
+  }
+  async function loadMonitoringHistory(force = false) {
+    const host = document.getElementById("monitoring-history-progress");
+    if (!host || historyLoading && !force || monitoringRange === "custom" && (!customHistoryStart || !customHistoryEnd)) return;
+    const generation = ++historyGeneration;
+    historyController?.abort();
+    stopHistoryProgress();
+    const controller = new AbortController();
+    historyController = controller;
+    historyLoading = true;
+    const error = document.getElementById("monitoring-history-error");
+    error.textContent = "";
+    const stop = showOperationProgress(host, historyText().title, (seconds) => `${historyText().loading}... ${document.documentElement.lang === "ja" ? `\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `(${seconds}s elapsed)`}`);
+    stopHistoryProgress = stop;
+    const params = new URLSearchParams({ range: monitoringRange });
+    if (monitoringRange === "custom") {
+      params.set("start", customHistoryStart);
+      params.set("end", customHistoryEnd);
+    }
+    try {
+      const response = await fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}/history?${params}`, { cache: "no-store", signal: controller.signal });
+      const history = await response.json();
+      if (!response.ok || history.error) throw new Error(history.error || `HTTP ${response.status}`);
+      if (generation !== historyGeneration) return;
+      monitoringHistory = history;
+      document.getElementById("monitoring-history-period").textContent = `${fmtTime(history.start)} - ${fmtTime(history.end)}`;
+      renderMonitoringCharts();
+    } catch (reason) {
+      if (!controller.signal.aborted && generation === historyGeneration) error.textContent = `${historyText().failed}: ${String(reason)}`;
+    } finally {
+      stop();
+      if (generation === historyGeneration) historyLoading = false;
+    }
+  }
   function loadAnalyticsPollingMs() {
     try {
       const seconds = Number(localStorage.getItem("tracepulse-traffic-refresh-seconds"));
@@ -955,8 +1113,9 @@ var TracePulseDeviceDetail = (() => {
     svg.classList.remove("chart-empty");
     const times = allPoints.map((point) => parseTracePulseTime(point.t).getTime());
     const values = allPoints.map((point) => point.v);
-    const timeMin = Math.min(...times);
-    let timeMax = Math.max(...times);
+    const historyBounds = monitoringHistory && ["bw-chart", "err-chart", "cpu-chart", "memory-chart"].includes(svgId) ? monitoringHistory : null;
+    const timeMin = historyBounds ? new Date(historyBounds.start).getTime() : Math.min(...times);
+    let timeMax = historyBounds ? new Date(historyBounds.end).getTime() : Math.max(...times);
     const valueMin = 0;
     const valueMax = yLabel === "%" ? 100 : Math.max(...values) * 1.15 || 1;
     if (timeMin === timeMax) timeMax = timeMin + 1;
@@ -1027,7 +1186,7 @@ var TracePulseDeviceDetail = (() => {
     sparkline("cpu-chart", [{
       label: "CPU %",
       color: "#38bdf8",
-      points: metrics.filter((metric) => metric.cpu !== null && metric.cpu !== void 0 && metric.cpu > 0).map((metric) => ({ t: metric.t, v: metric.cpu || 0 }))
+      points: metrics.filter((metric) => metric.cpu !== null && metric.cpu !== void 0 && metric.cpu >= 0).map((metric) => ({ t: metric.t, v: metric.cpu || 0 }))
     }], "%");
   }
   function renderMemoryChart(metrics = []) {
@@ -1102,19 +1261,30 @@ var TracePulseDeviceDetail = (() => {
     renderInterfaces(ifaces);
     renderErrorBreakdownCard(ifaces);
     refreshTrafficProtocols();
-    renderBwChart(device.if_series || []);
-    renderErrChart(device.if_series || []);
-    renderSysChart(device.metrics || []);
+    renderMonitoringCharts();
     renderHardwareStatus(device.hardware_sensors || []);
     renderTemplateMetrics(device.template_metrics || [], device.template_metrics_error);
     renderSpikes(device.spikes || []);
     renderAlerts(device.alerts || []);
     updateLastRefreshed();
   }
+  var deviceDetailLoading = false;
   function loadDeviceDetail() {
+    if (deviceDetailLoading) return;
+    const refreshing = lastDeviceDetail !== null;
+    deviceDetailLoading = true;
+    const header = document.getElementById("device-refresh")?.parentElement;
+    const stopProgress = header ? showOperationProgress(header, "Device details", (seconds) => {
+      const japanese2 = document.documentElement.lang === "ja";
+      return japanese2 ? `${lastDeviceDetail ? "\u30C7\u30D0\u30A4\u30B9\u60C5\u5831\u3092\u66F4\u65B0\u3057\u3066\u3044\u307E\u3059" : "\u30C7\u30D0\u30A4\u30B9\u60C5\u5831\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059"}...\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `${lastDeviceDetail ? "Updating device details" : "Loading device details"}... (${seconds}s elapsed)`;
+    }) : () => {
+    };
     Promise.all([
       fetch("/api/settings", { cache: "no-store" }).then((response) => response.json()).catch(() => null),
-      fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => response.json())
+      fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
     ]).then(([settings, device]) => {
       const configuredInterval = Number(settings?.polling?.interval_seconds);
       if (Number.isFinite(configuredInterval) && configuredInterval >= 5 && configuredInterval <= 600) {
@@ -1136,9 +1306,13 @@ var TracePulseDeviceDetail = (() => {
         return;
       }
       renderDetail(device);
+      if (refreshing || !monitoringHistory) void loadMonitoringHistory();
     }).catch((error) => {
       const title = document.getElementById("dev-title");
       if (title) title.textContent = `Error: ${String(error)}`;
+    }).finally(() => {
+      stopProgress();
+      deviceDetailLoading = false;
     });
   }
   window.esc = esc;
@@ -1169,10 +1343,13 @@ var TracePulseDeviceDetail = (() => {
   window.toggleInterfaceSelection = toggleInterfaceSelection;
   window.tracePulseTimeZone = tracePulseTimeZone;
   window.applyPageLanguage = () => {
+    initializeHistoryControls();
     if (lastDeviceDetail) renderHeader(lastDeviceDetail);
     updateLastRefreshed();
     refreshTrafficProtocols();
   };
+  initializeHistoryControls();
+  void loadMonitoringHistory();
   loadDeviceDetail();
   scheduleDeviceRefresh();
   scheduleAnalyticsPolling();

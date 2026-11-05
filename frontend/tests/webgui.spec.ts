@@ -1,4 +1,149 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+type DiscoveryReply = { status?: number; json?: unknown; abort?: boolean };
+async function registrationFixture(page: Page) {
+    const devices = Array.from({ length: 5 }, (_, index) => ({ ip: `198.51.100.${index + 201}`, name: `registration-${index + 1}`, status: "online" }));
+    let scanDevices = devices;
+    let scans = 0;
+    let finish: ((reply: DiscoveryReply) => void) | undefined;
+    const payloads: Array<Array<{ ip: string; name: string; community: string }>> = [];
+    await page.route("**/api/discovery/scan", route => {
+        scans++;
+        return route.fulfill({ json: { job_id: `registration-${scans}`, total: scanDevices.length } });
+    });
+    await page.route("**/api/discovery/scan/registration-*", route => route.fulfill({ json: { status: "done", scanned: scanDevices.length, total: scanDevices.length, elapsed: 1, devices: scanDevices } }));
+    await page.route("**/api/discovery/register", async route => {
+        expect(route.request().headers()["x-csrf-token"]).toBe("registration-csrf");
+        payloads.push(route.request().postDataJSON());
+        const reply = await new Promise<DiscoveryReply>(resolve => { finish = resolve; });
+        if (reply.abort) await route.abort("failed");
+        else await route.fulfill({ status: reply.status ?? 200, json: reply.json });
+    });
+    await page.goto("/discovery");
+    await page.evaluate(ip => { window.tracepulseCsrf = "registration-csrf"; window.DISCOVERY_EXISTING = new Set([ip]); }, devices[0].ip);
+    const scan = async (next = devices, community = "scan-only-secret") => {
+        scanDevices = next;
+        await page.locator("#community").fill(community);
+        await page.locator("#cidr").fill("198.51.100.192/28");
+        await page.locator("#scan-btn").click();
+        await expect(page.locator("#results-body tr")).toHaveCount(next.length);
+        await expect(page.locator("#results-body tr").first()).toContainText(next[0].ip);
+    };
+    await scan();
+    return { devices, payloads, scan, get scans() { return scans; }, reply: (reply: DiscoveryReply) => finish!(reply), row: (index: number) => page.locator("#results-body tr").filter({ hasText: devices[index].ip }) };
+}
+
+for (const [width, language, theme] of [[1280, "en", "light"], [1280, "ja", "dark"], [375, "en", "dark"], [375, "ja", "light"]] as const) {
+    test(`discovery individual registration and partial bulk results at ${width} ${language} ${theme}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        await page.addInitScript(lang => { localStorage.setItem("tracepulse-onboarding-v1", "done"); localStorage.setItem("tracepulse-lang", lang); }, language);
+        const setup = await registrationFixture(page);
+        await page.locator("#theme-select").selectOption(theme);
+        expect(setup.payloads).toHaveLength(0);
+        await expect(setup.row(0).locator(".badge-registered")).toHaveText(language === "ja" ? "登録済み" : "Registered");
+        await expect(setup.row(0).locator("input")).toBeDisabled();
+        await expect(page.locator(".register-device")).toHaveCount(4);
+        await page.locator("#select-all").check();
+        await page.locator("#community").fill("changed-after-scan-secret");
+        const originalButton = await setup.row(1).locator(".register-device").elementHandle();
+        await setup.row(1).locator(".register-device").click();
+        await expect(setup.row(1).getByRole("progressbar")).toBeVisible();
+        await expect(setup.row(1).getByRole("status")).toHaveText(language === "ja" ? "登録中…" : "Registering…");
+        await expect(page.locator("#results-section .operation-progress").getByRole("status")).toHaveText(language === "ja" ? /経過 [1-9]\d*秒/ : /[1-9]\d*s elapsed/);
+        await originalButton!.evaluate(button => button.dispatchEvent(new MouseEvent("click")));
+        await page.locator("#register-btn").dispatchEvent("click");
+        expect(setup.payloads).toHaveLength(1);
+        expect(setup.payloads[0]).toEqual([{ ip: setup.devices[1].ip, name: setup.devices[1].name, community: "scan-only-secret" }]);
+        setup.reply({ json: { registered: [setup.devices[1].ip], skipped: [], errors: [] } });
+        await expect(setup.row(1).locator(".badge-registered")).toBeVisible();
+        await expect(setup.row(1).locator("input")).not.toBeChecked();
+        await expect(setup.row(1).locator("input")).toBeDisabled();
+        await expect(page.locator("#select-count")).toContainText("3");
+        await page.locator("#register-btn").click();
+        await expect.poll(() => setup.payloads.length).toBe(2);
+        expect(setup.payloads[1].map(device => device.ip)).toEqual(setup.devices.slice(2).map(device => device.ip));
+        expect(setup.payloads[1].every(device => device.community === "scan-only-secret")).toBeTruthy();
+        setup.reply({ json: { registered: [setup.devices[2].ip], skipped: [setup.devices[3].ip], errors: [`${setup.devices[4].ip}: Device registration limit reached; scan-only-secret internal-stack-marker`] } });
+        await expect(page.locator("#results-body .badge-registered")).toHaveCount(4);
+        await expect(setup.row(4).getByRole("alert")).toHaveText(language === "ja" ? "機器の登録上限に達しています。" : "The device registration limit has been reached.");
+        await expect(setup.row(4).locator("input")).toBeChecked();
+        await expect(setup.row(4).locator(".register-device")).toBeEnabled();
+        await expect(page.locator("#select-count")).toContainText("1");
+        for (const [reply, message] of [
+            [{ status: 403, json: { error: "private-token internal-stack-marker" } }, language === "ja" ? "登録が許可されていません。権限とセッションを確認してください。" : "Registration is not permitted. Check your permissions and session."],
+            [{ abort: true }, language === "ja" ? "サーバーに接続できませんでした。再試行してください。" : "Could not reach the server. Please retry."],
+            [{ json: { registered: [], skipped: [], errors: [] } }, language === "ja" ? "登録に失敗しました。再試行してください。" : "Registration failed. Please retry."],
+        ] as Array<[DiscoveryReply, string]>) {
+            const before = setup.payloads.length;
+            await setup.row(4).locator(".register-device").click();
+            await expect.poll(() => setup.payloads.length).toBe(before + 1);
+            setup.reply(reply);
+            await expect(setup.row(4).getByRole("alert")).toHaveText(message);
+            await expect(setup.row(4).locator(".register-device")).toBeEnabled();
+        }
+        await expect(page.locator("body")).not.toContainText("scan-only-secret");
+        await expect(page.locator("body")).not.toContainText("internal-stack-marker");
+        await expect(page.locator("body")).not.toContainText("private-token");
+        if (width === 375) {
+            expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+            expect(await page.locator(".discovery-results-scroll").evaluate(element => element.scrollWidth > element.clientWidth)).toBeTruthy();
+        }
+        await setup.row(4).screenshot({ path: `test-results/discovery-row-register-${width}-${language}-${theme}.png` });
+        await setup.row(4).locator(".register-device").click();
+        await expect.poll(() => setup.payloads.length).toBe(6);
+        setup.reply({ json: { registered: [], skipped: [setup.devices[4].ip], errors: [] } });
+        await expect(page.locator("#results-body .badge-registered")).toHaveCount(5);
+        await expect(page.locator("#select-all")).toBeDisabled();
+        await expect(page.locator("#select-all")).not.toBeChecked();
+        await expect(page.locator("#register-action")).toBeHidden();
+        await expect(page.locator("#results-section .operation-progress")).toHaveCount(0);
+        expect(setup.scans).toBe(1);
+        const known = await page.evaluate(() => [...window.DISCOVERY_EXISTING!]);
+        expect(known.sort()).toEqual(setup.devices.map(device => device.ip).sort());
+        await page.locator("#lang-select").selectOption(language === "ja" ? "en" : "ja");
+        await expect(setup.row(4).locator(".badge-registered")).toHaveText(language === "ja" ? "Registered" : "登録済み");
+    });
+}
+
+test("discovery registration ignores stale row failures after rescan and keeps scan credentials", async ({ page }) => {
+    await page.addInitScript(() => { localStorage.setItem("tracepulse-onboarding-v1", "done"); localStorage.setItem("tracepulse-lang", "en"); });
+    const setup = await registrationFixture(page);
+    await setup.row(1).locator(".register-device").click();
+    await expect.poll(() => setup.payloads.length).toBe(1);
+    const replacement = [{ ip: setup.devices[1].ip, name: "rescanned-device", status: "online" }];
+    await setup.scan(replacement, "new-scan-secret");
+    setup.reply({ json: { registered: [], skipped: [], errors: [`${setup.devices[1].ip}: internal-stack-marker`] } });
+    await expect(page.locator("#results-body .register-device")).toBeEnabled();
+    await expect(page.locator("#results-body [role=alert]")).toHaveCount(0);
+    await expect(page.locator("#results-body")).toContainText("rescanned-device");
+    await page.locator(".register-device").click();
+    await expect.poll(() => setup.payloads.length).toBe(2);
+    expect(setup.payloads[0][0].community).toBe("scan-only-secret");
+    expect(setup.payloads[1][0]).toEqual({ ip: replacement[0].ip, name: replacement[0].name, community: "new-scan-secret" });
+    setup.reply({ json: { registered: [replacement[0].ip], skipped: [], errors: [] } });
+    await expect(page.locator("#results-body .badge-registered")).toBeVisible();
+    await setup.scan([setup.devices[2]], "third-scan-secret");
+    await page.locator(".register-device").click();
+    await expect.poll(() => setup.payloads.length).toBe(3);
+    await setup.scan([setup.devices[3]], "fourth-scan-secret");
+    setup.reply({ json: { registered: [setup.devices[2].ip], skipped: [], errors: [] } });
+    await expect(page.locator(".register-device")).toBeEnabled();
+    await expect(page.locator("#results-body .badge-registered")).toHaveCount(0);
+    expect(await page.evaluate(ip => window.DISCOVERY_EXISTING!.has(ip), setup.devices[2].ip)).toBeTruthy();
+    expect(await page.evaluate(ip => window.DISCOVERY_EXISTING!.has(ip), setup.devices[3].ip)).toBeFalsy();
+});
+
+test("discovery registration rejects malformed success responses and clears progress", async ({ page }) => {
+    await page.addInitScript(() => { localStorage.setItem("tracepulse-onboarding-v1", "done"); localStorage.setItem("tracepulse-lang", "en"); });
+    const setup = await registrationFixture(page);
+    await setup.row(1).locator(".register-device").click();
+    await expect.poll(() => setup.payloads.length).toBe(1);
+    setup.reply({ json: { registered: "internal-stack-marker", skipped: [], errors: [] } });
+    await expect(setup.row(1).getByRole("alert")).toHaveText("Registration failed. Please retry.");
+    await expect(setup.row(1).locator(".register-device")).toBeEnabled();
+    await expect(page.locator("#results-section .operation-progress")).toHaveCount(0);
+    await expect(setup.row(1).locator(".badge-registered")).toHaveCount(0);
+});
 
 test.describe("interface error breakdown overlay", () => {
     test.use({ hasTouch: true });
@@ -67,6 +212,196 @@ test.describe("interface error breakdown overlay", () => {
         });
     }
 });
+
+for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja"]] as const) {
+    test(`device detail loading and refresh show elapsed progress at ${width} ${theme} ${language}`, async ({ page, request }) => {
+        const ip = "192.0.2.245";
+        await request.post("/api/discovery/register", { data: [{ ip, name: "detail-progress", community: "public" }] });
+        try {
+            await page.setViewportSize({ width, height: 900 });
+            await page.addInitScript(({ language, theme }) => {
+                localStorage.setItem("tracepulse-onboarding-v1", "done");
+                localStorage.setItem("tracepulse-lang", language);
+                localStorage.setItem("tracepulse-theme", theme);
+            }, { language, theme });
+            await page.route("**/api/settings", route => route.fulfill({ json: { polling: { interval_seconds: 600 } } }));
+            let finish: ((success: boolean) => void) | undefined;
+            let requests = 0;
+            await page.route(`**/api/device/${ip}`, async route => {
+                requests++;
+                const success = await new Promise<boolean>(resolve => { finish = resolve; });
+                await route.fulfill(success ? { json: { ip, name: "detail-progress", status: "online", interfaces: [], metrics: [], hardware_sensors: [], alerts: [], spikes: [] } } : { status: 500, json: { error: "Detail failed" } });
+            });
+            await page.goto(`/device/${ip}`);
+            await page.locator("#theme-select").selectOption(theme);
+            const progress = page.locator("#device-refresh").locator("..").locator(".operation-progress");
+            await expect(progress).toBeInViewport();
+            await expect(progress.getByRole("status")).toContainText(language === "ja" ? "デバイス情報を読み込んでいます" : "Loading device details");
+            await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /経過 [1-9]\d*秒/ : /[1-9]\d*s elapsed/);
+            await page.evaluate(() => { window.loadDeviceDetail?.(); window.loadDeviceDetail?.(); });
+            expect(requests).toBe(1);
+            await page.locator("#device-refresh").locator("..").screenshot({ path: `test-results/device-loading-progress-${width}-${theme}.png` });
+            finish!(true);
+            await expect(progress).toHaveCount(0);
+            await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            await page.evaluate(() => window.loadDeviceDetail?.());
+            await expect(progress).toBeVisible();
+            await expect(progress.getByRole("status")).toContainText(language === "ja" ? "デバイス情報を更新しています" : "Updating device details");
+            await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            await expect.poll(() => requests).toBe(2);
+            finish!(false);
+            await expect(progress).toHaveCount(0);
+            await expect(page.locator("#dev-title")).toContainText("HTTP 500");
+            await page.evaluate(() => window.loadDeviceDetail?.());
+            await expect.poll(() => requests).toBe(3);
+            finish!(true);
+            await expect(progress).toHaveCount(0);
+            await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+        } finally { await request.delete(`/api/device/${ip}`); }
+    });
+}
+
+for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark"]] as const) {
+    test(`remaining discovery registration progress at ${width} ${language}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        await page.addInitScript(lang => {
+            localStorage.setItem("tracepulse-onboarding-v1", "done");
+            localStorage.setItem("tracepulse-lang", lang);
+        }, language);
+        const devices = [1, 2, 3].map(id => ({ ip: `198.51.100.${id}`, name: `register-${id}`, status: "online" }));
+        await page.route("**/api/discovery/scan", route => route.fulfill({ json: { job_id: "progress", total: 3 } }));
+        await page.route("**/api/discovery/scan/progress", route => route.fulfill({ json: { status: "done", scanned: 3, total: 3, elapsed: 1, devices } }));
+        let finish: ((success: boolean) => void) | undefined;
+        let requests = 0;
+        await page.route("**/api/discovery/register", async route => {
+            requests++;
+            expect(route.request().postDataJSON()).toHaveLength(3);
+            const success = await new Promise<boolean>(resolve => { finish = resolve; });
+            await route.fulfill(success ? { json: { registered: devices.map(device => device.ip), skipped: [], errors: [] } } : { status: 500, json: { error: "Registration failed" } });
+        });
+        await page.goto("/discovery");
+        await page.locator("#theme-select").selectOption(theme);
+        await page.locator("#cidr").fill("198.51.100.0/29");
+        await page.locator("#scan-btn").click();
+        await expect(page.locator("#results-body tr")).toHaveCount(3);
+        await page.locator("#select-all").check();
+        await page.locator("#register-btn").click();
+        const progress = page.locator("#results-section .operation-progress");
+        await expect(progress).toBeInViewport();
+        await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /3台の機器を登録.*経過 [1-9]\d*秒/ : /Registering 3 devices.*[1-9]\d*s elapsed/);
+        await expect(page.locator("#register-btn")).toBeDisabled();
+        await expect(page.locator("#select-all")).toBeDisabled();
+        await expect(page.locator(".row-cb").first()).toBeDisabled();
+        await page.locator("#register-btn").dispatchEvent("click");
+        expect(requests).toBe(1);
+        await progress.screenshot({ path: `test-results/discovery-register-progress-${width}-${theme}.png` });
+        finish!(false);
+        await expect(progress).toHaveCount(0);
+        await expect(page.locator("#register-result")).toBeVisible();
+        await expect(page.locator("#register-result")).toContainText(language === "ja" ? "失敗: 3台" : "Failed: 3");
+        await expect(page.locator(".registration-error").first()).toHaveText(language === "ja" ? "登録に失敗しました。再試行してください。" : "Registration failed. Please retry.");
+        await expect(page.locator("#register-btn")).toBeEnabled();
+        await expect(page.locator("#select-all")).toBeEnabled();
+        await page.locator("#register-btn").click();
+        await expect.poll(() => requests).toBe(2);
+        finish!(true);
+        await expect(progress).toHaveCount(0);
+        await expect(page.locator("#register-result")).toHaveClass("reg-success");
+        await expect(page.locator("#register-result")).toContainText(language === "ja" ? "登録: 3台" : "Registered: 3");
+        await expect(page.locator("#results-body .badge-registered")).toHaveCount(3);
+        await expect(page.locator("#select-all")).toBeDisabled();
+    });
+}
+
+for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark"]] as const) {
+    test(`monitoring graph time ranges filter all charts at ${width} ${language}`, async ({ page, request }) => {
+        const ip = "192.0.2.246";
+        await request.post("/api/discovery/register", { data: [{ ip, name: "history-test", community: "public" }] });
+        try {
+            const actual = await request.get(`/api/device/${ip}/history?range=1h`);
+            expect(actual.ok()).toBeTruthy();
+            expect((await actual.json()).metrics).toEqual([]);
+            expect((await request.get(`/api/device/${ip}/history?range=bad`)).status()).toBe(400);
+            await page.setViewportSize({ width, height: 900 });
+            await page.addInitScript(lang => {
+                localStorage.setItem("tracepulse-onboarding-v1", "done");
+                localStorage.setItem("tracepulse-lang", lang);
+            }, language);
+            await page.route("**/api/settings", route => route.fulfill({ json: { polling: { interval_seconds: 600 }, display: { timezone: "utc" } } }));
+            await page.route(`**/api/device/${ip}`, route => route.fulfill({ json: {
+                ip, name: "history-test", status: "online", interfaces: [{ if_index: 1, if_name: "Gi0/1", link_status: "up", metrics: { bandwidth_utilization: 77.29 } }],
+                metrics: [{ t: "2020-01-01T00:00:00Z", cpu: 99, memory: 99 }], alerts: [], spikes: [],
+            } }));
+            const queries: URLSearchParams[] = [];
+            let fail = false, empty = false, delay = false;
+            let finishOld: (() => void) | undefined;
+            await page.route(`**/api/device/${ip}/history?*`, async route => {
+                const params = new URL(route.request().url()).searchParams;
+                queries.push(params);
+                const range = params.get("range")!;
+                if (delay && range === "6h") await new Promise<void>(resolve => { finishOld = resolve; });
+                if (fail) { await route.fulfill({ status: 500, json: { error: "History failed" } }); return; }
+                const end = range === "custom" ? params.get("end")! : "2026-01-10T12:00:00Z";
+                const start = range === "custom" ? params.get("start")! : new Date(new Date(end).getTime() - ({ "1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800 }[range] || 86400) * 1000).toISOString();
+                await route.fulfill({ json: {
+                    start, end, max_points_per_series: 600,
+                    if_series: empty ? [] : [{ if_index: 1, points: [{ t: start, bw: 7.72, in_err: 1, in_dis: 2 }, { t: end, bw: 77.29, in_err: 4, in_dis: 3 }] }],
+                    metrics: empty ? [] : [{ t: start, cpu: 0, memory: 20 }, { t: end, cpu: 50, memory: 60 }],
+                } });
+            });
+            await page.goto(`/device/${ip}`);
+            await page.locator("#theme-select").selectOption(theme);
+            const controls = page.locator("#monitoring-history-controls");
+            const range = page.locator("#monitoring-range");
+            await expect(range).toHaveValue("24h");
+            for (const id of ["bw-chart", "err-chart", "cpu-chart", "memory-chart"]) await expect(page.locator(`#${id} path`)).toHaveCount(1);
+            for (const value of ["1h", "6h", "24h", "7d"]) {
+                await range.selectOption(value);
+                await expect.poll(() => queries.at(-1)?.get("range")).toBe(value);
+                await expect(page.locator("#monitoring-history-progress .operation-progress")).toHaveCount(0);
+            }
+            await range.selectOption("custom");
+            await page.locator("#monitoring-start").fill("2026-01-02T10:00");
+            await page.locator("#monitoring-end").fill("2026-01-02T09:00");
+            const before = queries.length;
+            await controls.locator("[type=submit]").click();
+            await expect(page.locator("#monitoring-history-error")).not.toBeEmpty();
+            expect(queries).toHaveLength(before);
+            await page.locator("#monitoring-end").fill("2026-03-02T10:00");
+            await controls.locator("[type=submit]").click();
+            expect(queries).toHaveLength(before);
+            await page.locator("#monitoring-end").fill("2026-01-02T12:00");
+            await controls.locator("[type=submit]").click();
+            await expect.poll(() => queries.at(-1)?.get("range")).toBe("custom");
+            const query = queries.at(-1)!;
+            expect(new Date(query.get("end")!).getTime() - new Date(query.get("start")!).getTime()).toBe(7200000);
+            await expect(page.locator("#monitoring-history-error")).toBeEmpty();
+            await expect(page.locator("#if-tbody tr td").nth(9)).toHaveText("77.3%");
+            await page.locator("#iface-select-1").uncheck();
+            await expect(page.locator("#bw-chart path")).toHaveCount(0);
+            await page.locator("#iface-select-1").check();
+            await expect(page.locator("#bw-chart path")).toHaveCount(1);
+            await controls.screenshot({ path: `test-results/monitoring-range-${width}-${theme}.png` });
+            expect(await controls.evaluate(element => element.scrollWidth <= element.clientWidth)).toBeTruthy();
+            fail = true;
+            await page.locator("#monitoring-history-refresh").click();
+            await expect(page.locator("#monitoring-history-error")).toContainText("History failed");
+            await expect(page.locator("#monitoring-history-progress .operation-progress")).toHaveCount(0);
+            fail = false; empty = true;
+            await page.locator("#monitoring-history-refresh").click();
+            for (const id of ["bw-chart", "err-chart", "cpu-chart", "memory-chart"]) await expect(page.locator(`#${id}`)).toContainText("N/A");
+            empty = false; delay = true;
+            await range.selectOption("6h");
+            await expect.poll(() => typeof finishOld).toBe("function");
+            await range.selectOption("1h");
+            await expect.poll(() => queries.at(-1)?.get("range")).toBe("1h");
+            finishOld!();
+            await expect(page.locator("#monitoring-history-period")).toContainText("11:00");
+            await expect(range).toHaveValue("1h");
+            for (const id of ["bw-chart", "err-chart", "cpu-chart", "memory-chart"]) await expect(page.locator(`#${id} path`)).toHaveCount(1);
+        } finally { await request.delete(`/api/device/${ip}`); }
+    });
+}
 
 test("recent alert heading aligns with table content across themes and viewport sizes", async ({ page }) => {
     await page.addInitScript(() => {

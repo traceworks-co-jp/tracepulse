@@ -156,7 +156,41 @@ var TracePulseDiscovery = (() => {
     }
   }
 
+  // frontend/src/shared/operation-progress.ts
+  function showOperationProgress(container, label, message) {
+    if (!document.getElementById("operation-progress-styles")) {
+      const style = document.createElement("style");
+      style.id = "operation-progress-styles";
+      style.textContent = `.operation-progress{box-sizing:border-box;flex-basis:100%;width:100%;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40);color:var(--tp-text,#e2e8f0)}.operation-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}.operation-progress p{margin:8px 0 0;overflow-wrap:anywhere}`;
+      document.head.append(style);
+    }
+    const element = document.createElement("div");
+    element.className = "operation-progress";
+    const bar = document.createElement("progress");
+    bar.setAttribute("aria-label", label);
+    const status = document.createElement("p");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    element.append(bar, status);
+    container.append(element);
+    const started = performance.now();
+    const update = () => {
+      status.textContent = message(Math.floor((performance.now() - started) / 1e3));
+    };
+    update();
+    const timer = window.setInterval(update, 1e3);
+    return () => {
+      window.clearInterval(timer);
+      element.remove();
+    };
+  }
+
   // frontend/src/pages/discovery.ts
+  var resultRows = /* @__PURE__ */ new Map();
+  var registeringIps = /* @__PURE__ */ new Set();
+  var registrationBusy = false;
+  var resultGeneration = 0;
+  var registrationSummary = null;
   var scanTimeoutSeconds = 300;
   var pollIntervalMs = 1500;
   var currentJobId = null;
@@ -165,6 +199,7 @@ var TracePulseDiscovery = (() => {
   var scanStartedAt = null;
   var cancelled = false;
   var scanCommunity = "";
+  var scanGeneration = 0;
   function t(key) {
     return typeof window.t === "function" ? window.t(key) : key;
   }
@@ -175,7 +210,7 @@ var TracePulseDiscovery = (() => {
     return window.TRACEPULSE_DISCOVERY_LIMITS?.maxCidrs ?? null;
   }
   function existingIps() {
-    return window.DISCOVERY_EXISTING || /* @__PURE__ */ new Set();
+    return window.DISCOVERY_EXISTING ?? (window.DISCOVERY_EXISTING = /* @__PURE__ */ new Set());
   }
   function cidrHostCount(cidr) {
     const match = cidr.match(/^\d+\.\d+\.\d+\.\d+\/(\d+)$/);
@@ -215,11 +250,12 @@ var TracePulseDiscovery = (() => {
   }
   function applyPageLanguage(_lang) {
     window.refreshTopologyTexts?.();
+    updateRegistrationRows();
+    showRegistrationSummary();
   }
   async function startScan() {
     const cidr = el("cidr").value.trim();
     const community = el("community").value.trim() || "public";
-    scanCommunity = community;
     const seedIp = document.getElementById("seed-ip")?.value.trim() || "";
     if (!cidr) {
       showScanError("Please enter a CIDR range.");
@@ -234,6 +270,8 @@ var TracePulseDiscovery = (() => {
       return;
     }
     const total = entries.map(cidrHostCount).reduce((sum, count) => sum + (count || 0), 0);
+    const generation = ++scanGeneration;
+    scanCommunity = community;
     cancelled = false;
     currentJobId = null;
     stopPolling();
@@ -247,6 +285,7 @@ var TracePulseDiscovery = (() => {
     try {
       const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
       const data = await response.json();
+      if (generation !== scanGeneration) return;
       if (data.error || !data.job_id) {
         finishScanError(data.error || "Failed to start scan");
         return;
@@ -254,9 +293,9 @@ var TracePulseDiscovery = (() => {
       currentJobId = data.job_id;
       scanStartedAt = Date.now();
       if (seedIp && typeof window.startTopologyDiscovery === "function") window.startTopologyDiscovery(seedIp, community);
-      startPolling(data.total || total || 0);
+      startPolling(data.total || total || 0, generation);
     } catch (error) {
-      finishScanError(`Failed to start scan: ${String(error)}`);
+      if (generation === scanGeneration) finishScanError(`Failed to start scan: ${String(error)}`);
     }
   }
   async function runTopologyOnly() {
@@ -273,7 +312,7 @@ var TracePulseDiscovery = (() => {
     el("scan-error").style.display = "none";
     await window.startTopologyDiscovery(seedIp, community);
   }
-  function startPolling(total) {
+  function startPolling(total, generation) {
     elapsedTimer = window.setInterval(() => {
       if (!scanStartedAt) return;
       const elapsed = Math.floor((Date.now() - scanStartedAt) / 1e3);
@@ -285,10 +324,11 @@ var TracePulseDiscovery = (() => {
     }, 1e3);
     pollTimer = window.setInterval(async () => {
       if (!currentJobId || cancelled) return;
+      const job = currentJobId;
       try {
-        const response = await fetch(`/api/discovery/scan/${currentJobId}`);
+        const response = await fetch(`/api/discovery/scan/${job}`);
         const data = await response.json();
-        if (cancelled) return;
+        if (cancelled || generation !== scanGeneration || currentJobId !== job) return;
         if (data.error) {
           finishScanError(data.error);
           return;
@@ -297,7 +337,7 @@ var TracePulseDiscovery = (() => {
         if (data.status === "done") finishScanDone(data.devices || [], data.scanned || 0, data.total || total, data.elapsed || 0);
         else if (data.status === "error") finishScanError(data.error || "Scan failed");
       } catch (error) {
-        finishScanError(`Polling error: ${String(error)}`);
+        if (!cancelled && generation === scanGeneration) finishScanError(`Polling error: ${String(error)}`);
       }
     }, pollIntervalMs);
   }
@@ -315,6 +355,7 @@ var TracePulseDiscovery = (() => {
     elapsedTimer = null;
   }
   function cancelScan() {
+    scanGeneration++;
     cancelled = true;
     currentJobId = null;
     stopPolling();
@@ -343,25 +384,39 @@ var TracePulseDiscovery = (() => {
     error.style.display = "block";
   }
   function renderResults(devices, scanned, total, elapsed) {
+    resultGeneration++;
+    resultRows = /* @__PURE__ */ new Map();
+    registrationSummary = null;
+    el("register-result").style.display = "none";
     const tbody = el("results-body");
     tbody.innerHTML = "";
     el("results-title").textContent = `${t("scan_results_label")} - ${devices.length} ${t("found")} (scanned ${scanned}/${total}, ${elapsed}s)`;
     if (devices.length === 0) tbody.innerHTML = `<tr><td colspan='5' class='empty'>${t("no_snmp_devices_found")}</td></tr>`;
     devices.forEach((device) => {
-      const registered = existingIps().has(device.ip);
       const row = document.createElement("tr");
-      row.innerHTML = `<td><input type='checkbox' class='row-cb' data-ip="${esc(device.ip)}" data-name="${esc(device.name || "")}"${registered ? " disabled" : " onchange='updateRegisterBtn()'"}></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${deviceStatusClass(device.status)}'>${esc(device.status || "unknown")}</span></td><td>${registered ? "registered" : ""}</td>`;
+      row.innerHTML = `<td><input type='checkbox' class='row-cb' aria-label="${esc(`${t("select_device")} ${device.ip}`)}"></td><td>${esc(device.ip)}</td><td>${esc(device.name || "")}</td><td><span class='${deviceStatusClass(device.status)}'>${esc(device.status || "unknown")}</span></td><td class='registration-cell'></td>`;
+      const checkbox = row.querySelector("input");
+      checkbox.dataset.ip = device.ip;
+      checkbox.onchange = updateRegisterBtn;
+      resultRows.set(device.ip, { device, row, checkbox, cell: row.cells[4], community: scanCommunity });
       tbody.appendChild(row);
     });
     el("results-section").style.display = "block";
     el("select-all").checked = false;
-    updateRegisterBtn();
+    updateRegistrationRows();
   }
   function updateRegisterBtn() {
-    const count = document.querySelectorAll(".row-cb:checked").length;
+    const selectable = [...resultRows.values()].filter((state) => !existingIps().has(state.device.ip));
+    const count = selectable.filter((state) => state.checkbox.checked).length;
     el("register-action").style.display = count > 0 ? "flex" : "none";
     el("select-count").textContent = count ? `${count} ${t("selected")}` : "";
-    if (count) el("register-btn").textContent = `+ ${t("register")} ${count} device${count > 1 ? "s" : ""}`;
+    const button = el("register-btn");
+    button.disabled = registrationBusy || count === 0;
+    button.textContent = registrationBusy ? t("registering") : `${t("register")} (${count})`;
+    const master = el("select-all");
+    master.disabled = registrationBusy || selectable.length === 0;
+    master.checked = selectable.length > 0 && count === selectable.length;
+    master.indeterminate = count > 0 && count < selectable.length;
   }
   function toggleAll(master) {
     document.querySelectorAll(".row-cb:not(:disabled)").forEach((checkbox) => {
@@ -369,30 +424,136 @@ var TracePulseDiscovery = (() => {
     });
     updateRegisterBtn();
   }
+  function updateRegistrationRows() {
+    document.querySelector(".discovery-results-scroll")?.setAttribute("aria-label", t("scan_results_label"));
+    for (const state of resultRows.values()) {
+      const ip = state.device.ip;
+      const registered = existingIps().has(ip);
+      state.checkbox.disabled = registered || registrationBusy;
+      state.checkbox.setAttribute("aria-label", `${t("select_device")} ${ip}`);
+      if (registered) {
+        state.checkbox.checked = false;
+        state.error = void 0;
+      }
+      state.cell.replaceChildren();
+      if (registered) {
+        const badge = document.createElement("span");
+        badge.className = "badge-registered";
+        badge.textContent = t("registered");
+        state.cell.append(badge);
+      } else if (registeringIps.has(ip)) {
+        const text2 = document.createElement("span");
+        text2.setAttribute("role", "status");
+        text2.textContent = t("registering");
+        const progress = document.createElement("progress");
+        progress.className = "registration-row-progress";
+        progress.setAttribute("aria-label", t("registering"));
+        state.cell.append(text2, progress);
+      } else {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "btn btn-secondary btn-xs register-device";
+        button.textContent = t("register");
+        button.disabled = registrationBusy;
+        button.onclick = () => {
+          if (resultRows.get(ip) !== state) return;
+          void registerDevices([{ ip, name: state.device.name, community: state.community }]);
+        };
+        state.cell.append(button);
+        if (state.error) {
+          const error = document.createElement("span");
+          error.className = "registration-error";
+          error.setAttribute("role", "alert");
+          error.textContent = t(state.error);
+          state.cell.append(error);
+        }
+      }
+    }
+    updateRegisterBtn();
+    document.querySelectorAll("#manual-box button").forEach((button) => {
+      button.disabled = registrationBusy;
+    });
+  }
+  function showRegistrationSummary() {
+    if (!registrationSummary) return;
+    const { registered, skipped, failed } = registrationSummary;
+    const result = el("register-result");
+    result.className = failed ? "reg-error" : "reg-success";
+    result.textContent = t("registration_summary").replace("{registered}", String(registered)).replace("{skipped}", String(skipped)).replace("{failed}", String(failed));
+    result.style.display = "block";
+  }
+  function registrationError(value) {
+    return typeof value === "string" && /device registration limit reached|node limit|registration limit/i.test(value) ? "registration_limit" : "registration_failed";
+  }
+  async function requestRegistration(targets) {
+    const failed = (key) => ({ registered: [], skipped: [], failures: new Map(targets.map((device) => [device.ip, key])) });
+    try {
+      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(targets) });
+      if (response.status === 401 || response.status === 403) return failed("registration_denied");
+      const data = await response.json();
+      if (!response.ok || !data || data.error) return failed(registrationError(data?.error));
+      const strings = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
+      if (!strings(data.registered) || !strings(data.skipped) || !strings(data.errors)) return failed("registration_failed");
+      const outcome = { registered: [], skipped: [], failures: /* @__PURE__ */ new Map() };
+      for (const target of targets) {
+        const error = data.errors.find((message) => message.startsWith(`${target.ip}:`));
+        if (error) outcome.failures.set(target.ip, registrationError(error));
+        else if (data.registered.includes(target.ip)) outcome.registered.push(target.ip);
+        else if (data.skipped.includes(target.ip)) outcome.skipped.push(target.ip);
+        else outcome.failures.set(target.ip, "registration_failed");
+      }
+      return outcome;
+    } catch {
+      return failed("registration_network_error");
+    }
+  }
+  async function registerDevices(targets, progressAnchor = el("register-result")) {
+    if (registrationBusy || targets.some((target) => registeringIps.has(target.ip))) return null;
+    targets = targets.filter((target) => !existingIps().has(target.ip));
+    if (!targets.length) {
+      updateRegistrationRows();
+      return null;
+    }
+    registrationBusy = true;
+    const generation = resultGeneration;
+    const rows = new Map(resultRows);
+    for (const target of targets) {
+      registeringIps.add(target.ip);
+      const row = rows.get(target.ip);
+      if (row) row.error = void 0;
+    }
+    updateRegistrationRows();
+    const container = document.createElement("div");
+    progressAnchor.before(container);
+    const stop = showOperationProgress(container, t("registering"), (seconds) => t("registration_progress").replace("{count}", String(targets.length)).replace("{seconds}", String(seconds)));
+    if (targets.length > 1) container.scrollIntoView({ block: "nearest" });
+    try {
+      const outcome = await requestRegistration(targets);
+      for (const ip of [...outcome.registered, ...outcome.skipped]) existingIps().add(ip);
+      if (generation === resultGeneration) {
+        for (const [ip, error] of outcome.failures) {
+          const state = rows.get(ip);
+          if (state && resultRows.get(ip) === state) state.error = error;
+        }
+        registrationSummary = { registered: outcome.registered.length, skipped: outcome.skipped.length, failed: outcome.failures.size };
+        showRegistrationSummary();
+      }
+      return outcome;
+    } finally {
+      stop();
+      container.remove();
+      registrationBusy = false;
+      for (const target of targets) registeringIps.delete(target.ip);
+      updateRegistrationRows();
+    }
+  }
   async function registerSelected() {
-    const selected = Array.from(document.querySelectorAll(".row-cb:checked")).map((checkbox) => ({ ip: checkbox.dataset.ip, name: checkbox.dataset.name, community: scanCommunity }));
+    const selected = [...resultRows.values()].filter((state) => state.checkbox.checked && !existingIps().has(state.device.ip)).map((state) => ({ ip: state.device.ip, name: state.device.name, community: state.community }));
     if (!selected.length) {
       window.alert(t("select_at_least_one_device"));
       return;
     }
-    const button = el("register-btn");
-    button.disabled = true;
-    button.textContent = t("registering");
-    try {
-      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(selected) });
-      const data = await response.json();
-      const result = el("register-result");
-      result.className = data.error || data.registered.length === 0 ? "reg-error" : "reg-success";
-      result.textContent = data.error || `Registered: ${data.registered.join(", ")}. Skipped: ${data.skipped.join(", ")}.`;
-      result.style.display = "block";
-      data.registered.forEach((ip) => existingIps().add(ip));
-      updateRegisterBtn();
-    } catch (error) {
-      el("register-result").textContent = String(error);
-    } finally {
-      button.disabled = false;
-      updateRegisterBtn();
-    }
+    await registerDevices(selected);
   }
   function showManual() {
     el("manual-box").style.display = "block";
@@ -408,22 +569,23 @@ var TracePulseDiscovery = (() => {
     const snmp_credentials = readCredentials(el("manual-box"));
     const result = el("manual-result");
     if (!ip) {
-      result.textContent = "! IP address is required.";
+      result.textContent = t("registration_ip_required");
       return;
     }
-    try {
-      const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify([{ ip, name, community, snmp_credentials }]) });
-      const data = await response.json();
-      result.textContent = data.error || data.errors?.join("; ") || (data.skipped.length ? `${ip} is already registered.` : `${ip} registered successfully.`);
-      if (data.registered.length) {
-        existingIps().add(ip);
-        el("manual-ip").value = "";
-        el("manual-name").value = "";
-        el("manual-community").value = "";
-        clearCredentials(el("manual-box"));
-      }
-    } catch (error) {
-      result.textContent = String(error);
+    if (existingIps().has(ip)) {
+      result.textContent = `${ip} ${t("registered")}`;
+      updateRegistrationRows();
+      return;
+    }
+    const outcome = await registerDevices([{ ip, name, community, snmp_credentials }], result);
+    if (!outcome) return;
+    const error = outcome.failures.get(ip);
+    result.textContent = error ? t(error) : `${ip} ${outcome.registered.length ? t("registration_manual_success") : t("registered")}`;
+    if (!error) {
+      el("manual-ip").value = "";
+      el("manual-name").value = "";
+      el("manual-community").value = "";
+      clearCredentials(el("manual-box"));
     }
   }
   window.addManual = addManual;

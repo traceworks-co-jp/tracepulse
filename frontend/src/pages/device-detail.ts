@@ -1,6 +1,7 @@
 import { esc as escapeHtml } from "../shared/escape";
 import { deviceLabel, editDeviceMetadata, metadataText } from "../shared/device-metadata";
 import { interfaceStatusClass } from "../shared/status";
+import { showOperationProgress } from "../shared/operation-progress";
 import {
     fmtNum,
     fmtTime,
@@ -25,6 +26,103 @@ let ifaceSelected = new Set<string>();
 let lastDeviceDetail: DeviceDetail | null = null;
 let ifaceSelectionReady = false;
 let resizeTimer: number | null = null;
+interface MonitoringHistory { if_series?: InterfaceSeries[]; metrics?: SystemMetric[]; start: string; end: string; error?: string; }
+let monitoringHistory: MonitoringHistory | null = null;
+let monitoringRange = "24h";
+let customHistoryStart = "";
+let customHistoryEnd = "";
+let historyController: AbortController | null = null;
+let historyGeneration = 0;
+let historyLoading = false;
+let stopHistoryProgress = (): void => {};
+
+const historyCopy = {
+    en: { title: "Monitoring graph period", range: "Time range", hour: "Last hour", six: "Last 6 hours", day: "Last 24 hours", week: "Last 7 days", custom: "Custom range", start: "Start (local time)", end: "End (local time)", apply: "Apply", refresh: "Refresh graphs", invalid: "Choose a valid start and end time, with an end after the start and a range of up to 31 days.", loading: "Loading monitoring history", failed: "Could not load monitoring history" },
+    ja: { title: "監視グラフの表示期間", range: "表示期間", hour: "直近1時間", six: "直近6時間", day: "直近24時間", week: "直近7日", custom: "日時指定", start: "開始（ローカル時刻）", end: "終了（ローカル時刻）", apply: "適用", refresh: "グラフを再読込", invalid: "開始・終了日時を正しく指定してください。終了は開始より後、指定期間は31日以内にしてください。", loading: "監視履歴を読み込んでいます", failed: "監視履歴を読み込めませんでした" },
+};
+function historyText(): typeof historyCopy.en { return historyCopy[document.documentElement.lang === "ja" ? "ja" : "en"]; }
+
+function initializeHistoryControls(): void {
+    const root = document.getElementById("monitoring-history-controls");
+    if (!root) return;
+    const previousStart = root.querySelector<HTMLInputElement>("#monitoring-start")?.value;
+    const previousEnd = root.querySelector<HTMLInputElement>("#monitoring-end")?.value;
+    const copy = historyText();
+    const localInput = (time: number): string => {
+        const date = new Date(time);
+        return new Date(time - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    };
+    root.innerHTML = `<h2>${copy.title}</h2><form class='chart-history-controls'><label for='monitoring-range'>${copy.range}<select id='monitoring-range'>${[["1h", copy.hour], ["6h", copy.six], ["24h", copy.day], ["7d", copy.week], ["custom", copy.custom]].map(([value, label]) => `<option value='${value}'>${label}</option>`).join("")}</select></label><div class='chart-history-custom' hidden><label for='monitoring-start'>${copy.start}<input id='monitoring-start' type='datetime-local' required></label><label for='monitoring-end'>${copy.end}<input id='monitoring-end' type='datetime-local' required></label><button class='btn' type='submit'>${copy.apply}</button></div></form>`;
+    const select = root.querySelector<HTMLSelectElement>("#monitoring-range")!;
+    const start = root.querySelector<HTMLInputElement>("#monitoring-start")!;
+    const end = root.querySelector<HTMLInputElement>("#monitoring-end")!;
+    select.value = monitoringRange;
+    start.value = previousStart ?? localInput(Date.now() - 86400000);
+    end.value = previousEnd ?? localInput(Date.now());
+    const toggle = (): void => {
+        const custom = select.value === "custom";
+        root.querySelector<HTMLElement>(".chart-history-custom")!.hidden = !custom;
+        start.disabled = end.disabled = !custom;
+    };
+    toggle();
+    const refresh = document.createElement("button");
+    refresh.id = "monitoring-history-refresh"; refresh.type = "button"; refresh.className = "btn btn-secondary";
+    refresh.textContent = copy.refresh;
+    refresh.onclick = () => { if (monitoringRange === "custom") root.querySelector<HTMLFormElement>("form")!.requestSubmit(); else void loadMonitoringHistory(true); };
+    root.querySelector("form")!.append(refresh);
+    select.onchange = () => {
+        monitoringRange = select.value;
+        toggle();
+        if (monitoringRange !== "custom") void loadMonitoringHistory(true);
+    };
+    root.querySelector<HTMLFormElement>("form")!.onsubmit = event => {
+        event.preventDefault();
+        const from = new Date(start.value), to = new Date(end.value);
+        if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || to <= from || to.getTime() - from.getTime() > 31 * 86400000) {
+            document.getElementById("monitoring-history-error")!.textContent = historyText().invalid;
+            return;
+        }
+        customHistoryStart = from.toISOString(); customHistoryEnd = to.toISOString();
+        void loadMonitoringHistory(true);
+    };
+}
+
+function renderMonitoringCharts(): void {
+    const selected = document.getElementById("monitoring-history-controls") ? monitoringHistory : lastDeviceDetail;
+    renderBwChart(selected?.if_series || []);
+    renderErrChart(selected?.if_series || []);
+    renderSysChart(selected?.metrics || []);
+}
+
+async function loadMonitoringHistory(force = false): Promise<void> {
+    const host = document.getElementById("monitoring-history-progress");
+    if (!host || (historyLoading && !force) || (monitoringRange === "custom" && (!customHistoryStart || !customHistoryEnd))) return;
+    const generation = ++historyGeneration;
+    historyController?.abort();
+    stopHistoryProgress();
+    const controller = new AbortController(); historyController = controller;
+    historyLoading = true;
+    const error = document.getElementById("monitoring-history-error")!;
+    error.textContent = "";
+    const stop = showOperationProgress(host, historyText().title, seconds => `${historyText().loading}... ${document.documentElement.lang === "ja" ? `（経過 ${seconds}秒）` : `(${seconds}s elapsed)`}`);
+    stopHistoryProgress = stop;
+    const params = new URLSearchParams({ range: monitoringRange });
+    if (monitoringRange === "custom") { params.set("start", customHistoryStart); params.set("end", customHistoryEnd); }
+    try {
+        const response = await fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}/history?${params}`, { cache: "no-store", signal: controller.signal });
+        const history = await response.json() as MonitoringHistory;
+        if (!response.ok || history.error) throw new Error(history.error || `HTTP ${response.status}`);
+        if (generation !== historyGeneration) return;
+        monitoringHistory = history;
+        document.getElementById("monitoring-history-period")!.textContent = `${fmtTime(history.start)} - ${fmtTime(history.end)}`;
+        renderMonitoringCharts();
+    } catch (reason) {
+        if (!controller.signal.aborted && generation === historyGeneration) error.textContent = `${historyText().failed}: ${String(reason)}`;
+    } finally {
+        stop();
+        if (generation === historyGeneration) historyLoading = false;
+    }
+}
 
 function loadAnalyticsPollingMs(): number {
     try {
@@ -780,8 +878,9 @@ export function sparkline(svgId: string, series: ChartSeries[], yLabel: string):
 
     const times = allPoints.map((point) => parseTracePulseTime(point.t).getTime());
     const values = allPoints.map((point) => point.v);
-    const timeMin = Math.min(...times);
-    let timeMax = Math.max(...times);
+    const historyBounds = monitoringHistory && ["bw-chart", "err-chart", "cpu-chart", "memory-chart"].includes(svgId) ? monitoringHistory : null;
+    const timeMin = historyBounds ? new Date(historyBounds.start).getTime() : Math.min(...times);
+    let timeMax = historyBounds ? new Date(historyBounds.end).getTime() : Math.max(...times);
     const valueMin = 0;
     const valueMax = yLabel === "%" ? 100 : Math.max(...values) * 1.15 || 1;
     if (timeMin === timeMax) timeMax = timeMin + 1;
@@ -860,7 +959,7 @@ export function renderCpuChart(metrics: SystemMetric[] = []): void {
     sparkline("cpu-chart", [{
         label: "CPU %",
         color: "#38bdf8",
-        points: metrics.filter((metric) => metric.cpu !== null && metric.cpu !== undefined && metric.cpu > 0).map((metric) => ({ t: metric.t, v: metric.cpu || 0 })),
+        points: metrics.filter((metric) => metric.cpu !== null && metric.cpu !== undefined && metric.cpu >= 0).map((metric) => ({ t: metric.t, v: metric.cpu || 0 })),
     }], "%");
 }
 
@@ -943,9 +1042,7 @@ export function renderDetail(device: DeviceDetail): void {
     renderInterfaces(ifaces);
     renderErrorBreakdownCard(ifaces);
     refreshTrafficProtocols();
-    renderBwChart(device.if_series || []);
-    renderErrChart(device.if_series || []);
-    renderSysChart(device.metrics || []);
+    renderMonitoringCharts();
     renderHardwareStatus(device.hardware_sensors || []);
     renderTemplateMetrics(device.template_metrics || [], device.template_metrics_error);
     renderSpikes(device.spikes || []);
@@ -953,10 +1050,25 @@ export function renderDetail(device: DeviceDetail): void {
     updateLastRefreshed();
 }
 
+let deviceDetailLoading = false;
+
 export function loadDeviceDetail(): void {
+    if (deviceDetailLoading) return;
+    const refreshing = lastDeviceDetail !== null;
+    deviceDetailLoading = true;
+    const header = document.getElementById("device-refresh")?.parentElement;
+    const stopProgress = header ? showOperationProgress(header, "Device details", seconds => {
+        const japanese = document.documentElement.lang === "ja";
+        return japanese
+            ? `${lastDeviceDetail ? "デバイス情報を更新しています" : "デバイス情報を読み込んでいます"}...（経過 ${seconds}秒）`
+            : `${lastDeviceDetail ? "Updating device details" : "Loading device details"}... (${seconds}s elapsed)`;
+    }) : () => {};
     Promise.all([
         fetch("/api/settings", { cache: "no-store" }).then((response) => response.json() as Promise<SettingsResponse>).catch(() => null),
-        fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => response.json() as Promise<DeviceDetail>),
+        fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json() as Promise<DeviceDetail>;
+        }),
     ])
         .then(([settings, device]) => {
             const configuredInterval = Number(settings?.polling?.interval_seconds);
@@ -980,11 +1092,13 @@ export function loadDeviceDetail(): void {
                 return;
             }
             renderDetail(device);
+            if (refreshing || !monitoringHistory) void loadMonitoringHistory();
         })
         .catch((error: unknown) => {
             const title = document.getElementById("dev-title");
             if (title) title.textContent = `Error: ${String(error)}`;
-        });
+        })
+        .finally(() => { stopProgress(); deviceDetailLoading = false; });
 }
 
 window.esc = escapeHtml;
@@ -1015,11 +1129,14 @@ window.sparkline = sparkline;
 window.toggleInterfaceSelection = toggleInterfaceSelection;
 window.tracePulseTimeZone = tracePulseTimeZone;
 window.applyPageLanguage = () => {
+    initializeHistoryControls();
     if (lastDeviceDetail) renderHeader(lastDeviceDetail);
     updateLastRefreshed();
     refreshTrafficProtocols();
 };
 
+initializeHistoryControls();
+void loadMonitoringHistory();
 loadDeviceDetail();
 scheduleDeviceRefresh();
 scheduleAnalyticsPolling();

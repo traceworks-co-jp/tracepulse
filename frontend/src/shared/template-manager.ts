@@ -1,3 +1,5 @@
+import { showOperationProgress } from "./operation-progress";
+
 type Json = string | number | boolean | Json[] | { [key: string]: Json };
 type Document = { [key: string]: Json };
 type Category = "system" | "interfaces" | "hardware" | "profile";
@@ -25,6 +27,7 @@ const messages = {
         empty: "No items configured", cpuCandidate: "CPU utilization OID", memorySource: "Memory source", customMetric: "Additional metric", domMetric: "Optical power metric",
         interfaceSettings: "Interface settings", cpuSettings: "CPU settings", domSettings: "Optical table settings", newProfileTitle: "Create profile",
         notes: "Definition storage and priority", invalidNumber: "Enter a valid number.", confirmRemove: "Remove this item from the draft?",
+        loading: "Loading monitoring definitions", saving: "Saving and applying monitoring definitions", importing: "Importing TOML", exporting: "Exporting TOML", previewing: "Previewing profile selection",
     },
     ja: {
         title: "OID追加・SNMP監視定義",
@@ -43,6 +46,7 @@ const messages = {
         empty: "監視項目は登録されていません", cpuCandidate: "CPU使用率OID", memorySource: "メモリ取得元", customMetric: "追加監視項目", domMetric: "光レベル監視項目",
         interfaceSettings: "インターフェースの詳細設定", cpuSettings: "CPUの詳細設定", domSettings: "光レベルテーブルの詳細設定", newProfileTitle: "プロファイル作成",
         notes: "定義の保存先・適用順", invalidNumber: "有効な数値を入力してください。", confirmRemove: "この項目を下書きから削除しますか？",
+        loading: "監視定義を読み込んでいます", saving: "監視定義を保存・適用しています", importing: "TOMLをインポートしています", exporting: "TOMLをエクスポートしています", previewing: "プロファイル選択をプレビューしています",
     },
 };
 type Key = keyof typeof messages.en;
@@ -255,9 +259,14 @@ export function initializeTemplateManager(): void {
     let category: Category = "system";
     let activeDialog: HTMLDialogElement | undefined;
     let modalDirty = false;
-    const run = async (action: () => Promise<void>): Promise<void> => {
+    let operation: Key = "loading";
+    let operationStarted = 0;
+    let stopOperationProgress = (): void => {};
+    const run = async (action: () => Promise<void>, kind: Key = "loading"): Promise<void> => {
         if (busy) return;
+        operation = kind; operationStarted = performance.now();
         busy = true; error = ""; render();
+        if (view) root.querySelector<HTMLElement>(".operation-progress")?.scrollIntoView({ block: "nearest" });
         try { await action(); } catch (reason) { error = String(reason); }
         finally { busy = false; render(); }
     };
@@ -444,7 +453,14 @@ export function initializeTemplateManager(): void {
     };
     const render = (): void => {
         capture = () => { };
+        stopOperationProgress();
         root.replaceChildren(element("h2", text("title")));
+        if (busy) {
+            stopOperationProgress = showOperationProgress(root, text(operation), () => {
+                const seconds = Math.floor((performance.now() - operationStarted) / 1000);
+                return `${text(operation)}... ${localStorage.getItem("tracepulse-lang") === "ja" ? `（経過 ${seconds}秒）` : `(${seconds}s elapsed)`}`;
+            });
+        }
         const alert = element("p", error); alert.setAttribute("role", "alert"); root.append(alert);
         const reload = button(text("reload"), () => { if (!dirty || window.confirm(text("discard"))) void run(load); });
         if (!view || !definitions) { reload.disabled = busy; root.append(reload); return; }
@@ -468,7 +484,7 @@ export function initializeTemplateManager(): void {
         const save = button(text("save"), () => void run(async () => {
             const next = await api<View>("/api/snmp/definitions", { generation: currentView.generation, definitions: draft });
             view = next; definitions = clone(next.definitions); dirty = false; message = text("saved");
-        }));
+        }, "saving"));
         save.className = "template-save"; toolbar.append(save);
         if (profile) {
             toolbar.append(button(text("reset"), () => {
@@ -484,7 +500,7 @@ export function initializeTemplateManager(): void {
                 const url = URL.createObjectURL(new Blob([data.toml], { type: "application/toml" }));
                 const link = element("a"); link.href = url; link.download = `${selected.split(".").join("-")}.toml`; link.click();
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
-            })));
+            }, "exporting")));
         }
         const file = element("input"); file.type = "file"; file.accept = ".toml"; file.id = "template-import"; file.hidden = true;
         file.onchange = () => {
@@ -495,7 +511,7 @@ export function initializeTemplateManager(): void {
                 const id = typeof imported.sysObjectID_prefix === "string" ? imported.sysObjectID_prefix.replace(/^\.|\.$/g, "") : Number(imported.enterprise_id) ? `1.3.6.1.4.1.${imported.enterprise_id}` : "generic";
                 if (choices.has(id) && !window.confirm(`${text("import")}: ${id}?`)) return;
                 draft.profiles[id] = imported; selected = id; capture = () => { }; changed();
-            });
+            }, "importing");
         };
         toolbar.append(file, button(text("import"), () => file.click()), reload);
         toolbar.append(button(text("newProfileTitle"), () => {
@@ -581,7 +597,7 @@ export function initializeTemplateManager(): void {
         const previewLabel = element("label", text("sysObject")), sysObject = element("input"); sysObject.id = "template-preview-oid"; previewLabel.append(sysObject);
         preview.append(previewLabel, button(text("preview"), () => {
             const oid = sysObject.value;
-            void run(async () => { const result = await api<{ id: string; document: Document }>("/api/snmp/definitions/preview", { definitions: draft, sys_object_id: oid }); message = `${text("preview")}: ${result.document.name} (${result.id})`; });
+            void run(async () => { const result = await api<{ id: string; document: Document }>("/api/snmp/definitions/preview", { definitions: draft, sys_object_id: oid }); message = `${text("preview")}: ${result.document.name} (${result.id})`; }, "previewing");
         }));
         const notes = element("details"); notes.append(element("summary", text("notes")), element("p", text("help")), element("p", text("storage")), element("p", text("disclaimer")));
         root.append(preview, notes);

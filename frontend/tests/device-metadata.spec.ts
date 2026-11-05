@@ -140,6 +140,132 @@ test("bulk actions append tags, retain aliases, confirm unregister and recover f
     }
 });
 
+for (const [width, theme, language] of [[1280, "light", "en"], [1280, "dark", "ja"], [375, "light", "ja"], [375, "dark", "en"]] as const) {
+    test(`bulk unregister shows progress for 50 devices at ${width} in ${theme} ${language}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        let devices = Array.from({ length: 50 }, (_, index) => ({ id: index + 1, ip: `192.0.2.${index + 1}`, name: `progress-${index + 1}`, status: "online" }));
+        await page.route("**/api/devices", route => route.fulfill({ json: devices }));
+        let finish: ((success: boolean) => void) | undefined;
+        const requests: Array<{ action: string; device_ids: number[] }> = [];
+        await page.route("**/api/devices/bulk-action", async route => {
+            requests.push(route.request().postDataJSON());
+            const success = await new Promise<boolean>(resolve => { finish = resolve; });
+            if (success) devices = [];
+            await route.fulfill(success ? { json: { ok: true, devices: [] } } : { status: 500, json: { error: "Temporary failure" } });
+        });
+        await page.goto("/");
+        await page.evaluate(() => window.refreshDashboard?.());
+        await expect(page.locator("#dash-tbody tr")).toHaveCount(50);
+        await page.evaluate(lang => window.setLanguage?.(lang), language);
+        await page.locator("#theme-select").selectOption(theme);
+        await page.locator("#select-visible-devices").check();
+        await page.locator("#bulk-rename").click();
+        await page.locator("#bulk-actions-dialog [data-action=unregister]").click();
+        const dialog = page.locator("#bulk-action-confirm");
+        const progress = dialog.locator(".bulk-action-progress");
+        await expect(progress).toBeHidden();
+        await dialog.locator("[type=submit]").click();
+        await expect(progress).toBeVisible();
+        await expect(progress).toBeInViewport();
+        await expect(dialog).toHaveAttribute("aria-busy", "true");
+        await expect(progress.getByRole("progressbar")).not.toHaveAttribute("value", /.+/);
+        await expect(progress.getByRole("status")).toContainText(language === "ja" ? "50台の登録を解除しています" : "Unregistering 50 devices");
+        await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /経過 [1-9]\d*秒/ : /[1-9]\d*s elapsed/);
+        await expect(dialog.locator("[type=submit]")).toBeDisabled();
+        await expect(dialog.locator("[data-cancel]")).toBeDisabled();
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        await page.evaluate(() => document.querySelector<HTMLFormElement>("#bulk-action-confirm form")!.requestSubmit());
+        expect(requests).toEqual([{ action: "unregister", device_ids: Array.from({ length: 50 }, (_, index) => index + 1) }]);
+        expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBeTruthy();
+        await dialog.screenshot({ path: `test-results/unregister-progress-${width}-${theme}-${language}.png` });
+        finish!(false);
+        await expect(dialog.getByRole("alert")).toContainText("Temporary failure");
+        await expect(progress).toBeHidden();
+        await expect(dialog).toHaveAttribute("aria-busy", "false");
+        await expect(dialog.locator("[type=submit]")).toBeEnabled();
+        await dialog.locator("[type=submit]").click();
+        await expect(progress).toBeVisible();
+        await expect.poll(() => requests.length).toBe(2);
+        finish!(true);
+        await expect(dialog).not.toBeVisible();
+        await expect(progress).toBeHidden();
+        await expect(page.locator("#device-selection-count")).toContainText("0");
+    });
+}
+
+for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark"]] as const) {
+    test(`remaining bulk tag and rename progress at ${width} ${language}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        const devices = [1, 2].map(id => ({ id, ip: `192.0.2.${id}`, name: `remaining-${id}`, status: "online" }));
+        await page.route("**/api/devices", route => route.fulfill({ json: devices }));
+        let finish: ((success: boolean) => void) | undefined;
+        let requests = 0;
+        await page.route(/\/api\/devices\/bulk-(action|rename(?:\/preview)?)$/, async route => {
+            requests++;
+            const success = await new Promise<boolean>(resolve => { finish = resolve; });
+            await route.fulfill(success ? { json: { ok: true, devices: devices.map(device => ({ ...device, display_name: `renamed-${device.id}` })) } } : { status: 500, json: { error: "Bulk failed" } });
+        });
+        await page.goto("/");
+        await page.evaluate(() => window.refreshDashboard?.());
+        await expect(page.locator("#dash-tbody tr")).toHaveCount(2);
+        await page.evaluate(lang => window.setLanguage?.(lang), language);
+        await page.locator("#theme-select").selectOption(theme);
+        const open = async (action: string) => {
+            await page.locator("#select-visible-devices").check();
+            await page.locator("#bulk-rename").click();
+            await page.locator(`#bulk-actions-dialog [data-action=${action}]`).click();
+        };
+        await open("tags");
+        const tags = page.locator("#bulk-action-confirm");
+        await tags.locator("#bulk-tag-input").fill("Core");
+        await tags.locator("[type=submit]").click();
+        const tagProgress = tags.locator(".bulk-action-progress");
+        await expect(tagProgress).toBeInViewport();
+        await expect(tagProgress.getByRole("status")).toHaveText(language === "ja" ? /2台にタグを追加.*経過 [1-9]\d*秒/ : /Adding tags to 2 devices.*[1-9]\d*s elapsed/);
+        finish!(false);
+        await expect(tags.getByRole("alert")).toContainText("Bulk failed");
+        await expect(tagProgress).toBeHidden();
+        await tags.locator("[type=submit]").click();
+        await expect.poll(() => requests).toBe(2);
+        finish!(true);
+        await expect(tags).not.toBeVisible();
+        await open("names");
+        const rename = page.locator("#bulk-rename-dialog");
+        const progress = rename.locator(".operation-progress");
+        await rename.locator("#rename-prefix").fill("renamed-");
+        await rename.locator("#rename-preview-button").click();
+        await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /2台の名称をプレビュー.*経過 [1-9]\d*秒/ : /Previewing names for 2 devices.*[1-9]\d*s elapsed/);
+        await expect.poll(() => requests).toBe(3);
+        finish!(true);
+        await expect(progress).toHaveCount(0);
+        await expect(rename.locator("#rename-preview li")).toHaveCount(2);
+        await rename.locator("[type=submit]").click();
+        await expect(progress).toBeInViewport();
+        await expect(progress.getByRole("status")).toContainText(language === "ja" ? "2台の機器名を変更しています" : "Renaming 2 devices");
+        await expect(rename.locator("[data-cancel]")).toBeDisabled();
+        await page.keyboard.press("Escape");
+        await expect(rename).toBeVisible();
+        await page.evaluate(() => document.querySelector<HTMLFormElement>("#bulk-rename-dialog form")!.requestSubmit());
+        await expect.poll(() => requests).toBe(4);
+        await rename.screenshot({ path: `test-results/rename-progress-${width}-${theme}.png` });
+        finish!(false);
+        await expect(rename.getByRole("alert")).toContainText("Bulk failed");
+        await expect(progress).toHaveCount(0);
+        await expect(rename.locator("[data-cancel]")).toBeEnabled();
+        await expect(rename.locator("[type=submit]")).toBeDisabled();
+        await rename.locator("#rename-preview-button").click();
+        await expect.poll(() => requests).toBe(5);
+        finish!(true);
+        await expect(rename.locator("[type=submit]")).toBeEnabled();
+        await rename.locator("[type=submit]").click();
+        await expect.poll(() => requests).toBe(6);
+        finish!(true);
+        await expect(rename).not.toBeVisible();
+        await expect(progress).toHaveCount(0);
+    });
+}
+
 test("dashboard column hover text remains readable in both themes without losing sort indicators", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.goto("/");

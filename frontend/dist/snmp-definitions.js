@@ -1,5 +1,34 @@
 "use strict";
 var TracePulseSnmpDefinitions = (() => {
+  // frontend/src/shared/operation-progress.ts
+  function showOperationProgress(container, label, message) {
+    if (!document.getElementById("operation-progress-styles")) {
+      const style = document.createElement("style");
+      style.id = "operation-progress-styles";
+      style.textContent = `.operation-progress{box-sizing:border-box;flex-basis:100%;width:100%;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40);color:var(--tp-text,#e2e8f0)}.operation-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}.operation-progress p{margin:8px 0 0;overflow-wrap:anywhere}`;
+      document.head.append(style);
+    }
+    const element2 = document.createElement("div");
+    element2.className = "operation-progress";
+    const bar = document.createElement("progress");
+    bar.setAttribute("aria-label", label);
+    const status = document.createElement("p");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    element2.append(bar, status);
+    container.append(element2);
+    const started = performance.now();
+    const update = () => {
+      status.textContent = message(Math.floor((performance.now() - started) / 1e3));
+    };
+    update();
+    const timer = window.setInterval(update, 1e3);
+    return () => {
+      window.clearInterval(timer);
+      element2.remove();
+    };
+  }
+
   // frontend/src/shared/template-manager.ts
   var messages = {
     en: {
@@ -54,7 +83,12 @@ var TracePulseSnmpDefinitions = (() => {
       newProfileTitle: "Create profile",
       notes: "Definition storage and priority",
       invalidNumber: "Enter a valid number.",
-      confirmRemove: "Remove this item from the draft?"
+      confirmRemove: "Remove this item from the draft?",
+      loading: "Loading monitoring definitions",
+      saving: "Saving and applying monitoring definitions",
+      importing: "Importing TOML",
+      exporting: "Exporting TOML",
+      previewing: "Previewing profile selection"
     },
     ja: {
       title: "OID\u8FFD\u52A0\u30FBSNMP\u76E3\u8996\u5B9A\u7FA9",
@@ -108,7 +142,12 @@ var TracePulseSnmpDefinitions = (() => {
       newProfileTitle: "\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u4F5C\u6210",
       notes: "\u5B9A\u7FA9\u306E\u4FDD\u5B58\u5148\u30FB\u9069\u7528\u9806",
       invalidNumber: "\u6709\u52B9\u306A\u6570\u5024\u3092\u5165\u529B\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
-      confirmRemove: "\u3053\u306E\u9805\u76EE\u3092\u4E0B\u66F8\u304D\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F"
+      confirmRemove: "\u3053\u306E\u9805\u76EE\u3092\u4E0B\u66F8\u304D\u304B\u3089\u524A\u9664\u3057\u307E\u3059\u304B\uFF1F",
+      loading: "\u76E3\u8996\u5B9A\u7FA9\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059",
+      saving: "\u76E3\u8996\u5B9A\u7FA9\u3092\u4FDD\u5B58\u30FB\u9069\u7528\u3057\u3066\u3044\u307E\u3059",
+      importing: "TOML\u3092\u30A4\u30F3\u30DD\u30FC\u30C8\u3057\u3066\u3044\u307E\u3059",
+      exporting: "TOML\u3092\u30A8\u30AF\u30B9\u30DD\u30FC\u30C8\u3057\u3066\u3044\u307E\u3059",
+      previewing: "\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u9078\u629E\u3092\u30D7\u30EC\u30D3\u30E5\u30FC\u3057\u3066\u3044\u307E\u3059"
     }
   };
   var text = (key) => messages[localStorage.getItem("tracepulse-lang") === "ja" ? "ja" : "en"][key];
@@ -344,11 +383,18 @@ var TracePulseSnmpDefinitions = (() => {
     let category = "system";
     let activeDialog;
     let modalDirty = false;
-    const run = async (action) => {
+    let operation = "loading";
+    let operationStarted = 0;
+    let stopOperationProgress = () => {
+    };
+    const run = async (action, kind = "loading") => {
       if (busy) return;
+      operation = kind;
+      operationStarted = performance.now();
       busy = true;
       error = "";
       render();
+      if (view) root.querySelector(".operation-progress")?.scrollIntoView({ block: "nearest" });
       try {
         await action();
       } catch (reason) {
@@ -669,7 +715,14 @@ var TracePulseSnmpDefinitions = (() => {
     const render = () => {
       capture = () => {
       };
+      stopOperationProgress();
       root.replaceChildren(element("h2", text("title")));
+      if (busy) {
+        stopOperationProgress = showOperationProgress(root, text(operation), () => {
+          const seconds = Math.floor((performance.now() - operationStarted) / 1e3);
+          return `${text(operation)}... ${localStorage.getItem("tracepulse-lang") === "ja" ? `\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `(${seconds}s elapsed)`}`;
+        });
+      }
       const alert = element("p", error);
       alert.setAttribute("role", "alert");
       root.append(alert);
@@ -711,7 +764,7 @@ var TracePulseSnmpDefinitions = (() => {
         definitions = clone(next.definitions);
         dirty = false;
         message = text("saved");
-      }));
+      }, "saving"));
       save.className = "template-save";
       toolbar.append(save);
       if (profile) {
@@ -739,7 +792,7 @@ var TracePulseSnmpDefinitions = (() => {
           link.download = `${selected.split(".").join("-")}.toml`;
           link.click();
           setTimeout(() => URL.revokeObjectURL(url), 1e3);
-        })));
+        }, "exporting")));
       }
       const file = element("input");
       file.type = "file";
@@ -759,7 +812,7 @@ var TracePulseSnmpDefinitions = (() => {
           capture = () => {
           };
           changed();
-        });
+        }, "importing");
       };
       toolbar.append(file, button(text("import"), () => file.click()), reload);
       toolbar.append(button(text("newProfileTitle"), () => {
@@ -942,7 +995,7 @@ var TracePulseSnmpDefinitions = (() => {
         void run(async () => {
           const result = await api("/api/snmp/definitions/preview", { definitions: draft, sys_object_id: oid });
           message = `${text("preview")}: ${result.document.name} (${result.id})`;
-        });
+        }, "previewing");
       }));
       const notes = element("details");
       notes.append(element("summary", text("notes")), element("p", text("help")), element("p", text("storage")), element("p", text("disclaimer")));

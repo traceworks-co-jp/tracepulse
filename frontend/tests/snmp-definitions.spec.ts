@@ -38,6 +38,60 @@ async function addItem(page: Page, category: string, label: string) {
     return page.getByRole("dialog");
 }
 
+for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark"]] as const) {
+    test(`remaining definition loading save and import progress at ${width} ${language}`, async ({ page, request }) => {
+        const view = (await (await request.get("/api/snmp/definitions")).json()).data;
+        await page.setViewportSize({ width, height: 900 });
+        await page.addInitScript(lang => localStorage.setItem("tracepulse-lang", lang), language);
+        let finish: ((success: boolean) => void) | undefined;
+        let requests = 0;
+        await page.route("**/api/snmp/definitions", async route => {
+            requests++;
+            const success = await new Promise<boolean>(resolve => { finish = resolve; });
+            await route.fulfill(success ? { json: { ok: true, data: view } } : { status: 500, json: { error: "Definition failed" } });
+        });
+        await page.route("**/api/snmp/definitions/convert", async route => {
+            requests++;
+            const success = await new Promise<boolean>(resolve => { finish = resolve; });
+            await route.fulfill(success ? { json: { ok: true, data: { document: { name: "Progress import", sysObjectID_prefix: "1.3.6.1.4.1.65099", enterprise_id: 65099, cpu: { candidates: [] }, memory: {}, sensors: {}, metrics: [], tables: {} } } } } : { status: 500, json: { error: "Import failed" } });
+        });
+        await page.goto("/settings/snmp");
+        await page.locator("#theme-select").selectOption(theme);
+        const root = page.locator("#snmp-definitions");
+        const progress = root.locator(".operation-progress");
+        await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /監視定義を読み込んでいます.*経過 [1-9]\d*秒/ : /Loading monitoring definitions.*[1-9]\d*s elapsed/);
+        await expect(root.locator("button").first()).toBeDisabled();
+        finish!(true);
+        await expect(progress).toHaveCount(0);
+        await root.locator(".template-save").click();
+        await expect(progress).toBeInViewport();
+        await expect(progress.getByRole("status")).toContainText(language === "ja" ? "監視定義を保存・適用しています" : "Saving and applying monitoring definitions");
+        await expect(root.locator(".template-save")).toBeDisabled();
+        await expect.poll(() => requests).toBe(2);
+        await progress.screenshot({ path: `test-results/definition-progress-${width}-${theme}.png` });
+        finish!(false);
+        await expect(root.getByRole("alert")).toContainText("Definition failed");
+        await expect(progress).toHaveCount(0);
+        await root.locator(".template-save").click();
+        await expect.poll(() => requests).toBe(3);
+        finish!(true);
+        await expect(progress).toHaveCount(0);
+        const file = { name: "progress.toml", mimeType: "application/toml", buffer: Buffer.from('name = "Progress import"\nsysObjectID_prefix = "1.3.6.1.4.1.65099"\n') };
+        await root.locator("#template-import").setInputFiles(file);
+        await expect(progress.getByRole("status")).toContainText(language === "ja" ? "TOMLをインポートしています" : "Importing TOML");
+        await expect.poll(() => requests).toBe(4);
+        finish!(false);
+        await expect(root.getByRole("alert")).toContainText("Import failed");
+        await expect(progress).toHaveCount(0);
+        await root.locator("#template-import").setInputFiles(file);
+        await expect.poll(() => requests).toBe(5);
+        finish!(true);
+        await expect(progress).toHaveCount(0);
+        await expect(root.locator("#template-profile")).toHaveValue("1.3.6.1.4.1.65099");
+        await expect(root.locator("[data-template-status]")).toContainText(language === "ja" ? "未保存" : "Unsaved");
+    });
+}
+
 test("profile selector and action buttons share a baseline and control height", async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem("tracepulse-lang", "ja"));
     await page.goto("/settings/snmp");

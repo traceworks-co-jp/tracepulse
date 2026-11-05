@@ -1615,6 +1615,76 @@ impl Repository {
         Ok(samples)
     }
 
+    pub fn get_monitoring_history(
+        &self,
+        device_id: i64,
+        start: &str,
+        end: &str,
+    ) -> Result<serde_json::Value, AppError> {
+        let mut statement = self.connection.prepare(
+            "WITH ranked AS (
+                SELECT if_index, sampled_at, in_errors, out_errors, in_discards, out_discards,
+                       bandwidth_utilization,
+                       ROW_NUMBER() OVER (PARTITION BY if_index ORDER BY julianday(sampled_at), id) AS position,
+                       COUNT(*) OVER (PARTITION BY if_index) AS total
+                FROM interface_samples
+                WHERE device_id = ?1
+                  AND sampled_at >= date(?2, '-1 day') AND sampled_at < date(?3, '+2 days')
+                  AND julianday(sampled_at) BETWEEN julianday(?2) AND julianday(?3)
+             )
+             SELECT if_index, sampled_at, in_errors, out_errors, in_discards, out_discards,
+                    bandwidth_utilization
+             FROM ranked
+             WHERE (position - 1) % MAX(1, (total + 597) / 599) = 0 OR position = total
+             ORDER BY if_index, julianday(sampled_at)",
+        )?;
+        let rows = statement.query_map(params![device_id, start, end], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                serde_json::json!({
+                    "t": row.get::<_, String>(1)?,
+                    "in_err": row.get::<_, i64>(2)?, "out_err": row.get::<_, i64>(3)?,
+                    "in_dis": row.get::<_, i64>(4)?, "out_dis": row.get::<_, i64>(5)?,
+                    "bw": row.get::<_, f64>(6)?,
+                }),
+            ))
+        })?;
+        let mut interfaces: std::collections::BTreeMap<i32, Vec<serde_json::Value>> =
+            std::collections::BTreeMap::new();
+        for row in rows {
+            let (index, point) = row?;
+            interfaces.entry(index).or_default().push(point);
+        }
+        let mut statement = self.connection.prepare(
+            "WITH ranked AS (
+                SELECT sampled_at, cpu_usage, memory_usage, memory_used_bytes,
+                       ROW_NUMBER() OVER (ORDER BY julianday(sampled_at), id) AS position,
+                       COUNT(*) OVER () AS total
+                FROM device_metrics
+                WHERE device_id = ?1
+                  AND sampled_at >= date(?2, '-1 day') AND sampled_at < date(?3, '+2 days')
+                  AND julianday(sampled_at) BETWEEN julianday(?2) AND julianday(?3)
+             )
+             SELECT sampled_at, cpu_usage, memory_usage, memory_used_bytes
+             FROM ranked
+             WHERE (position - 1) % MAX(1, (total + 597) / 599) = 0 OR position = total
+             ORDER BY julianday(sampled_at)",
+        )?;
+        let metrics = statement.query_map(params![device_id, start, end], |row| {
+            Ok(serde_json::json!({
+                "t": row.get::<_, String>(0)?,
+                "cpu": row.get::<_, Option<i64>>(1)?.filter(|value| (0..=100).contains(value)),
+                "memory": row.get::<_, Option<i64>>(2)?.filter(|value| (0..=100).contains(value)),
+                "memory_bytes": row.get::<_, Option<i64>>(3)?,
+            }))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(serde_json::json!({
+            "if_series": interfaces.into_iter().map(|(index, points)| serde_json::json!({"if_index": index, "points": points})).collect::<Vec<_>>(),
+            "metrics": metrics,
+            "max_points_per_series": 600,
+        }))
+    }
+
     /// 直近 `limit` 件の CPU/メモリ履歴を時系列昇順で返す
     pub fn get_device_metrics_history(
         &self,

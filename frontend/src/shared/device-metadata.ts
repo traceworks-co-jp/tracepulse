@@ -1,5 +1,6 @@
 import { esc } from "./escape";
 import { credentialFields, credentialTitle, clearCredentials, readCredentials } from "./snmp-credentials";
+import { showOperationProgress } from "./operation-progress";
 
 if (!document.getElementById("metadata-styles")) {
     const style = document.createElement("style");
@@ -14,6 +15,9 @@ if (!document.getElementById("metadata-styles")) {
         .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
         .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
         .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
+        .bulk-action-progress{margin-top:12px;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40)}
+        .bulk-action-progress[hidden]{display:none}.bulk-action-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}
+        .bulk-action-progress p{margin:8px 0 0}.bulk-action-progress small{color:var(--tp-muted,#94a3b8)}
         .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
@@ -48,6 +52,9 @@ const copy = {
         bulk: "Bulk actions", actions: "Actions", bulkTags: "Add tags", bulkNames: "Set / change device names",
         unregister: "Unregister", targets: "Selected devices", appendHint: "Existing tags are retained. Duplicate tags are ignored.",
         unregisterHint: "Unregister these devices and delete their monitoring history? This cannot be undone.",
+        unregistering: "Unregistering {count} devices... ({seconds}s elapsed)",
+        tagging: "Adding tags to {count} devices... ({seconds}s elapsed)",
+        unregisterWait: "Deleting monitoring history may take some time. Please keep this page open.",
         confirm: "Confirm",
     },
     ja: {
@@ -60,6 +67,9 @@ const copy = {
         bulk: "一括操作", actions: "操作", bulkTags: "タグ付け", bulkNames: "機器名の設定・変更",
         unregister: "登録解除", targets: "選択した機器", appendHint: "既存タグを保持して追加します。重複するタグは追加しません。",
         unregisterHint: "以下の機器の登録と監視履歴を削除します。元に戻せません。実行しますか？",
+        unregistering: "{count}台の登録を解除しています...（経過 {seconds}秒）",
+        tagging: "{count}台にタグを追加しています...（経過 {seconds}秒）",
+        unregisterWait: "監視履歴の削除には時間がかかる場合があります。このページを開いたままお待ちください。",
         confirm: "確定",
     },
 };
@@ -182,17 +192,28 @@ export function editSnmpCredentials(devices: DeviceIdentity[], saved: () => void
         controls.forEach(control => { control.disabled = value; });
     };
     const controller = new AbortController();
+    let stopSaveProgress: (() => void) | undefined;
     element.addEventListener("cancel", event => { if (busy && !loading) event.preventDefault(); });
-    element.addEventListener("close", () => { controller.abort(); clearCredentials(element); });
+    element.addEventListener("close", () => { stopSaveProgress?.(); controller.abort(); clearCredentials(element); });
     const persist = async (defaults: boolean): Promise<void> => {
         if (busy) return;
         const credentials = defaults ? {} : readCredentials(element);
         setBusy(true); failure.textContent = "";
+        const progressContainer = document.createElement("div");
+        failure.before(progressContainer);
+        const stopProgress = showOperationProgress(progressContainer, credentialTitle(), seconds => {
+            const japanese = document.documentElement.lang === "ja";
+            return japanese
+                ? `${devices.length}台の${defaults ? "認証情報を共通設定へ戻しています" : "SNMP認証情報を保存しています"}...（経過 ${seconds}秒）`
+                : `${defaults ? "Restoring global defaults for" : "Saving SNMP credentials for"} ${devices.length} devices... (${seconds}s elapsed)`;
+        });
+        stopSaveProgress = () => { stopProgress(); progressContainer.remove(); };
+        progressContainer.scrollIntoView({ block: "nearest" });
         try {
             await post("/api/devices/snmp-credentials", { device_ids: devices.map(device => device.id), credentials, preserve_secrets: !defaults && individual });
             clearCredentials(element); element.close(); saved();
         } catch (reason) { failure.textContent = String(reason); }
-        finally { setBusy(false); }
+        finally { stopSaveProgress?.(); stopSaveProgress = undefined; setBusy(false); }
     };
     element.querySelector<HTMLButtonElement>("[data-reset]")!.onclick = () => {
         if (window.confirm(japanese ? "個別のSNMP認証情報を削除し、共通設定へ戻しますか？" : "Remove the device SNMP overrides and use global defaults?")) void persist(true);
@@ -266,6 +287,7 @@ export function bulkActions(devices: DeviceIdentity[], saved: () => void, indivi
             <p>${esc(metadataText(tags ? "appendHint" : "unregisterHint"))}</p>
             ${tags ? `<div id="bulk-tag-chips" class="device-tags"></div>${field("bulk-tag-input", metadataText("tags"), "", "text", "maxlength=64")}
                 <p>${esc(metadataText("tagHint"))}</p><button type="button" id="bulk-tag-add">${esc(metadataText("add"))}</button>` : ""}
+            <div class="bulk-action-progress" hidden><progress aria-label="${esc(metadataText(tags ? "bulkTags" : "unregister"))}"></progress><p role="status" aria-live="polite"></p>${tags ? "" : `<small>${esc(metadataText("unregisterWait"))}</small>`}</div>
             <p role="alert"></p><div class="metadata-actions"><button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
             <button type="submit">${esc(metadataText("confirm"))}</button></div></form>`);
         let busy = false;
@@ -308,11 +330,31 @@ export function bulkActions(devices: DeviceIdentity[], saved: () => void, indivi
             busy = true; error.textContent = "";
             const controls = element.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button");
             controls.forEach((control) => { control.disabled = true; });
+            const progress = element.querySelector<HTMLElement>(".bulk-action-progress");
+            let progressTimer: number | undefined;
+            if (progress) {
+                const started = performance.now();
+                const updateProgress = (): void => {
+                    progress.querySelector<HTMLElement>("[role=status]")!.textContent = metadataText(tags ? "tagging" : "unregistering")
+                        .replace("{count}", String(ids.length))
+                        .replace("{seconds}", String(Math.floor((performance.now() - started) / 1000)));
+                };
+                progress.hidden = false;
+                updateProgress();
+                progress.scrollIntoView({ block: "nearest" });
+                progressTimer = window.setInterval(updateProgress, 1000);
+            }
+            element.setAttribute("aria-busy", "true");
             try {
                 await post("/api/devices/bulk-action", { action, device_ids: ids, ...(tags ? { tags: additions } : {}) });
                 element.close(); saved();
             } catch (failure) { error.textContent = String(failure); }
-            finally { busy = false; controls.forEach((control) => { control.disabled = false; }); }
+            finally {
+                window.clearInterval(progressTimer);
+                if (progress) progress.hidden = true;
+                element.setAttribute("aria-busy", "false");
+                busy = false; controls.forEach((control) => { control.disabled = false; });
+            }
         };
         element.showModal();
     };
@@ -343,11 +385,27 @@ export function bulkRename(ids: number[], saved: () => void): void {
     let approved: { device_ids: number[]; prefix: string; start_number: number; padding: number; suffix: string; sort_by: string } | null = null;
     let revision = 0;
     let busy = false;
+    let applying = false;
+    let stopRenameProgress = (): void => {};
+    const showRenameProgress = (previewing: boolean): void => {
+        const container = document.createElement("div");
+        error.before(container);
+        const stop = showOperationProgress(container, metadataText("rename"), seconds => {
+            const japanese = document.documentElement.lang === "ja";
+            return japanese
+                ? `${ids.length}台の${previewing ? "名称をプレビューしています" : "機器名を変更しています"}...（経過 ${seconds}秒）`
+                : `${previewing ? "Previewing names for" : "Renaming"} ${ids.length} devices... (${seconds}s elapsed)`;
+        });
+        stopRenameProgress = () => { stop(); container.remove(); };
+        container.scrollIntoView({ block: "nearest" });
+    };
     const invalidate = (): void => { revision++; approved = null; submit.disabled = true; preview.replaceChildren(); };
     form.addEventListener("input", invalidate);
     form.addEventListener("change", invalidate);
-    element.querySelector<HTMLButtonElement>("[data-cancel]")!.onclick = () => { revision++; element.close(); };
-    element.addEventListener("cancel", () => { revision++; });
+    const cancel = element.querySelector<HTMLButtonElement>("[data-cancel]")!;
+    cancel.onclick = () => { if (!applying) { revision++; element.close(); } };
+    element.addEventListener("cancel", event => { if (applying) event.preventDefault(); else revision++; });
+    element.addEventListener("close", () => stopRenameProgress());
     previewButton.onclick = async () => {
         if (busy || !form.reportValidity()) return;
         invalidate();
@@ -361,6 +419,7 @@ export function bulkRename(ids: number[], saved: () => void): void {
             sort_by: element.querySelector<HTMLSelectElement>("#rename-sort")!.value,
         };
         busy = true; previewButton.disabled = true; error.textContent = "";
+        showRenameProgress(true);
         try {
             const data = await post<{ devices: RenameItem[] }>("/api/devices/bulk-rename/preview", payload);
             if (version !== revision || !element.open) return;
@@ -372,12 +431,14 @@ export function bulkRename(ids: number[], saved: () => void): void {
             approved = payload;
             submit.disabled = false;
         } catch (failure) { error.textContent = String(failure); }
-        finally { busy = false; previewButton.disabled = false; }
+        finally { stopRenameProgress(); busy = false; previewButton.disabled = false; }
     };
     form.onsubmit = async (event) => {
         event.preventDefault();
         if (!approved || busy) return;
         busy = true; submit.disabled = true; previewButton.disabled = true; error.textContent = "";
+        applying = true; cancel.disabled = true;
+        showRenameProgress(false);
         const inputs = form.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input,select");
         inputs.forEach((input) => { input.disabled = true; });
         try {
@@ -386,6 +447,7 @@ export function bulkRename(ids: number[], saved: () => void): void {
             saved();
         } catch (failure) { error.textContent = String(failure); invalidate(); }
         finally {
+            stopRenameProgress(); applying = false; cancel.disabled = false;
             busy = false; previewButton.disabled = false;
             inputs.forEach((input) => { input.disabled = false; });
         }

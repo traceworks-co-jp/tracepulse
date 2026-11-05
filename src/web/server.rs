@@ -142,6 +142,8 @@ pub trait WebExtensionProvider: Send + Sync {
     ) {
     }
 
+    /// Additional dashboard panels. The `.dashboard-device-management` container
+    /// keeps the shared filters, toolbar and device table together for extensions.
     fn dashboard_html(&self) -> Option<String> {
         None
     }
@@ -729,6 +731,18 @@ fn handle_connection(
                 .trim_end_matches("/snmp-credentials"),
         );
         let (status, body) = api_get_device_snmp_credentials(&ip, &repo);
+        return respond_json(stream, status, body);
+    }
+    if req.method == "GET"
+        && clean_path.starts_with("/api/device/")
+        && clean_path.ends_with("/history")
+    {
+        let ip = url_decode(
+            clean_path
+                .trim_start_matches("/api/device/")
+                .trim_end_matches("/history"),
+        );
+        let (status, body) = api_device_history(&ip, &req.path, &repo);
         return respond_json(stream, status, body);
     }
     if req.method == "GET" && req.path.starts_with("/api/device/") {
@@ -1468,6 +1482,76 @@ fn api_delete_device(ip: &str, repo: &Arc<Mutex<Repository>>) -> (String, String
                 )
             }
         }
+    }
+}
+
+fn api_device_history(
+    ip: &str,
+    path: &str,
+    repo: &Arc<Mutex<Repository>>,
+) -> (&'static str, String) {
+    let result = (|| -> Result<serde_json::Value, (&'static str, String)> {
+        let bad_request = || {
+            (
+                "400 Bad Request",
+                "Invalid history range; use 1h, 6h, 24h, 7d, or RFC3339 start/end within 31 days"
+                    .to_string(),
+            )
+        };
+        let params = parse_form(path.split_once('?').map(|(_, query)| query).unwrap_or(""));
+        let end = chrono::Utc::now();
+        let (start, end) = match params.get("range").map(String::as_str).unwrap_or("24h") {
+            "1h" => (end - chrono::Duration::hours(1), end),
+            "6h" => (end - chrono::Duration::hours(6), end),
+            "24h" => (end - chrono::Duration::hours(24), end),
+            "7d" => (end - chrono::Duration::days(7), end),
+            "custom" => {
+                let parse = |key| {
+                    params
+                        .get(key)
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&chrono::Utc))
+                        .ok_or_else(bad_request)
+                };
+                (parse("start")?, parse("end")?)
+            }
+            _ => return Err(bad_request()),
+        };
+        if start >= end || end.signed_duration_since(start) > chrono::Duration::days(31) {
+            return Err(bad_request());
+        }
+        let repository = repo.lock().map_err(|_| {
+            (
+                "500 Internal Server Error",
+                "Repository unavailable".to_string(),
+            )
+        })?;
+        let device = repository
+            .find_device_by_ip(ip)
+            .map_err(|_| {
+                (
+                    "500 Internal Server Error",
+                    "Device unavailable".to_string(),
+                )
+            })?
+            .ok_or_else(|| ("404 Not Found", "Device not found".to_string()))?;
+        let start = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let end = end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut history = repository
+            .get_monitoring_history(device.id.unwrap(), &start, &end)
+            .map_err(|_| {
+                (
+                    "500 Internal Server Error",
+                    "History unavailable".to_string(),
+                )
+            })?;
+        history["start"] = start.into();
+        history["end"] = end.into();
+        Ok(history)
+    })();
+    match result {
+        Ok(history) => ("200 OK", history.to_string()),
+        Err((status, error)) => (status, serde_json::json!({"error": error}).to_string()),
     }
 }
 
@@ -3221,6 +3305,7 @@ fn page_dashboard(
     {
         html.push_str(&markup);
     }
+    html.push_str("<div class='dashboard-device-management'>");
     html.push_str(
         "<section id='device-attention' class='dashboard-attention' aria-live='polite'></section>",
     );
@@ -3235,7 +3320,7 @@ fn page_dashboard(
     html.push_str("<th id='th-health_score' onclick='sortBy(\"health_score\")' data-i18n='health_score'>Health Score <span class='sort-icon' id='sort-health_score'></span></th>");
     html.push_str("<th id='th-last_seen' onclick='sortBy(\"last_seen\")' data-i18n='time'>Last Seen <span class='sort-icon' id='sort-last_seen'></span></th>");
     html.push_str("<th data-i18n='actions'>Actions</th>");
-    html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table></div>");
+    html.push_str("</tr></thead><tbody id='dash-tbody'></tbody></table></div></div>");
     html.push_str(
         "<section class='detail-section dashboard-recent-alerts' style='margin-top:1.25rem'>",
     );
@@ -3452,6 +3537,7 @@ fn page_device_detail(
     html.push_str("</section>");
 
     // セクション: 帯域利用率グラフ（SVG インライン）
+    html.push_str("<section class='detail-section' id='monitoring-history-section'><div id='monitoring-history-controls'></div><div id='monitoring-history-progress'></div><p id='monitoring-history-error' role='alert'></p><p id='monitoring-history-period' class='chart-history-period'></p></section>");
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2><span data-i18n='bandwidth_title'>Bandwidth Utilization (%)</span> <span class='chart-legend' id='bw-legend'></span></h2>");
     html.push_str("<div class='chart-wrap'><svg id='bw-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
@@ -4287,6 +4373,14 @@ const DEVICE_DETAIL_CSS: &str = "<style>
     html[data-theme='light'] .hardware-card .value.status-warning { color:#b45309; }
     html[data-theme='light'] .hardware-card .value.status-unknown { color:#64748b; }
   .chart-wrap { width:100%; overflow-x:auto; }
+    .chart-history-controls, .chart-history-custom { display:flex; flex-wrap:wrap; gap:.75rem; align-items:end; }
+    .chart-history-controls label { display:grid; gap:.25rem; font-size:.85rem; min-width:0; }
+    .chart-history-controls input, .chart-history-controls select { box-sizing:border-box; max-width:100%; padding:.45rem; }
+    .chart-history-custom[hidden] { display:none; }
+    .chart-history-period { font-size:.8rem; color:var(--tp-muted,#94a3b8); overflow-wrap:anywhere; }
+    #monitoring-history-error { color:#f87171; overflow-wrap:anywhere; }
+    html[data-theme='light'] #monitoring-history-error { color:#b91c1c; }
+    @media(max-width:600px) { .chart-history-controls, .chart-history-custom { align-items:stretch; flex-direction:column; } .chart-history-controls label { width:100%; } }
   .table-scroll { width:100%; overflow-x:auto; }
     .interface-table-scroll { overflow:visible; }
   .chart-svg { width:100%; height:160px; background:#0f172a; border-radius:.375rem; display:block; }
@@ -4513,6 +4607,13 @@ const DISCOVERY_CSS: &str = "<style>
   .reg-error { background:#450a0a; border:1px solid #7f1d1d; color:#fca5a5; }
   table input[type='checkbox']:disabled { opacity:.4; cursor:not-allowed; }
   .badge-registered { font-size:.75rem; background:#1e3a5f; color:#93c5fd; padding:.15rem .5rem; border-radius:9999px; }
+    .registration-cell { min-width:8rem; max-width:18rem; white-space:normal; overflow-wrap:anywhere; }
+    .discovery-results-scroll { width:100%; overflow-x:auto; }
+    #results-table { min-width:620px; }
+    .registration-cell .register-device { min-height:36px; }
+    .registration-row-progress { display:block; width:100%; max-width:9rem; height:6px; margin-top:.4rem; accent-color:var(--tp-accent,#38c5b2); }
+    .registration-error { display:block; margin-top:.4rem; font-size:.8rem; color:#f87171; }
+    html[data-theme='light'] .registration-error { color:#b91c1c; }
   .manual-box { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1rem; margin-bottom:1.5rem; }
   .host-hint { font-size:.78rem; color:#64748b; margin-top:.25rem; line-height:1.5; }
     .host-hint:empty { display:none; }
@@ -4676,7 +4777,7 @@ const DISCOVERY_HTML: &str = "<main>
 
   <div id='results-section'>
     <h2 style='margin:0 0 .75rem' id='results-title' data-i18n='scan_results'>Scan Results</h2>
-    <table id='results-table'>
+    <div class='discovery-results-scroll' role='region' tabindex='0' aria-label='Scan Results'><table id='results-table'>
       <thead>
         <tr>
           <th style='width:2.5rem'><input type='checkbox' id='select-all' onchange='toggleAll(this)' data-i18n-title='select_all'></th>
@@ -4686,8 +4787,8 @@ const DISCOVERY_HTML: &str = "<main>
           <th data-i18n='registration'>Registration</th>
         </tr>
       </thead>
-      <tbody id='results-body'></tbody>
-    </table>
+            <tbody id='results-body'></tbody>
+        </table></div>
     <div id='register-action' style='display:none;margin-top:1rem;align-items:center;gap:1rem'>
       <button class='btn btn-register' id='register-btn' onclick='registerSelected()' data-i18n='register_selected'>&#10003; Register Selected</button>
       <span id='select-count' style='font-size:.85rem;color:#94a3b8'></span>
@@ -5766,6 +5867,18 @@ mod tests {
         assert!(!community.contains("Flow Explorer"));
         assert!(community.contains("--tp-accent:#38c5b2"));
         assert!(community.contains("body main .card { background:var(--tp-surface); }"));
+        assert_eq!(
+            community
+                .matches("class='dashboard-device-management'")
+                .count(),
+            1
+        );
+        assert!(
+            community.contains(
+                "<div class='dashboard-device-management'><section id='device-attention'"
+            )
+        );
+        assert!(community.contains("</tr></thead><tbody id='dash-tbody'></tbody></table></div></div><section class='detail-section dashboard-recent-alerts'"));
 
         let _ = std::fs::remove_file(path);
     }
@@ -6332,6 +6445,75 @@ mod tests {
         };
         report.rebuild_nodes(&BTreeMap::new());
         report
+    }
+
+    #[test]
+    fn monitoring_history_filters_time_ranges_and_bounds_each_series() {
+        let connection = initialize_database(std::path::Path::new(":memory:")).unwrap();
+        connection.execute("INSERT INTO devices(id,name,ip,community,device_type,status) VALUES(1,'history','192.0.2.244','','switch','online'),(2,'other','192.0.2.243','','switch','online')", []).unwrap();
+        let start = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z").unwrap();
+        for index in -1..=1500 {
+            let sampled_at = (start + chrono::Duration::seconds(index)).to_rfc3339();
+            for if_index in [1, 2] {
+                connection.execute("INSERT INTO interface_samples(device_id,if_index,if_name,link_status,bandwidth_utilization,sampled_at) VALUES(1,?1,'Gi0/1','up',77.29,?2)", rusqlite::params![if_index, sampled_at]).unwrap();
+            }
+            connection.execute("INSERT INTO device_metrics(device_id,cpu_usage,memory_usage,memory_used_bytes,sampled_at) VALUES(1,0,60,1024,?1)", [&sampled_at]).unwrap();
+        }
+        connection.execute("INSERT INTO device_metrics(device_id,cpu_usage,memory_usage,sampled_at) VALUES(2,99,99,'2026-01-02T00:00:00Z')", []).unwrap();
+        let repository = Arc::new(Mutex::new(Repository::new(connection).unwrap()));
+        let (status, body) = super::api_device_history(
+            "192.0.2.244",
+            "/api/device/192.0.2.244/history?range=custom&start=2026-01-02T00:00:00Z&end=2026-01-02T00:24:59Z",
+            &repository,
+        );
+        assert_eq!(status, "200 OK", "{body}");
+        let history: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let metrics = history["metrics"].as_array().unwrap();
+        assert!(metrics.len() <= 600 && metrics.len() > 2);
+        assert_eq!(metrics.first().unwrap()["t"], "2026-01-02T00:00:00+00:00");
+        assert_eq!(metrics.last().unwrap()["t"], "2026-01-02T00:24:59+00:00");
+        assert!(
+            metrics
+                .iter()
+                .all(|point| point["cpu"] == 0 && point["memory"] == 60)
+        );
+        let interfaces = history["if_series"].as_array().unwrap();
+        assert_eq!(interfaces.len(), 2);
+        for interface in interfaces {
+            let points = interface["points"].as_array().unwrap();
+            assert!(points.len() <= 600 && points.len() > 2);
+            assert_eq!(points.first().unwrap()["t"], metrics.first().unwrap()["t"]);
+            assert_eq!(points.last().unwrap()["t"], metrics.last().unwrap()["t"]);
+            assert_eq!(points[0]["bw"], 77.29);
+        }
+        for range in ["1h", "6h", "24h", "7d"] {
+            assert_eq!(
+                super::api_device_history(
+                    "192.0.2.244",
+                    &format!("/history?range={range}"),
+                    &repository
+                )
+                .0,
+                "200 OK"
+            );
+        }
+        for query in [
+            "range=invalid",
+            "range=custom",
+            "range=custom&start=bad&end=bad",
+            "range=custom&start=2026-01-02T00:00:00Z&end=2026-01-01T00:00:00Z",
+            "range=custom&start=2026-01-01T00:00:00Z&end=2026-03-01T00:00:00Z",
+        ] {
+            assert_eq!(
+                super::api_device_history("192.0.2.244", &format!("/history?{query}"), &repository)
+                    .0,
+                "400 Bad Request"
+            );
+        }
+        assert_eq!(
+            super::api_device_history("192.0.2.242", "/history?range=1h", &repository).0,
+            "404 Not Found"
+        );
     }
 
     #[test]

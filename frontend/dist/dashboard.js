@@ -507,6 +507,35 @@ var TracePulseDashboard = (() => {
     });
   }
 
+  // frontend/src/shared/operation-progress.ts
+  function showOperationProgress(container, label, message) {
+    if (!document.getElementById("operation-progress-styles")) {
+      const style = document.createElement("style");
+      style.id = "operation-progress-styles";
+      style.textContent = `.operation-progress{box-sizing:border-box;flex-basis:100%;width:100%;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40);color:var(--tp-text,#e2e8f0)}.operation-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}.operation-progress p{margin:8px 0 0;overflow-wrap:anywhere}`;
+      document.head.append(style);
+    }
+    const element = document.createElement("div");
+    element.className = "operation-progress";
+    const bar = document.createElement("progress");
+    bar.setAttribute("aria-label", label);
+    const status = document.createElement("p");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    element.append(bar, status);
+    container.append(element);
+    const started = performance.now();
+    const update = () => {
+      status.textContent = message(Math.floor((performance.now() - started) / 1e3));
+    };
+    update();
+    const timer = window.setInterval(update, 1e3);
+    return () => {
+      window.clearInterval(timer);
+      element.remove();
+    };
+  }
+
   // frontend/src/shared/device-metadata.ts
   if (!document.getElementById("metadata-styles")) {
     const style = document.createElement("style");
@@ -521,6 +550,9 @@ var TracePulseDashboard = (() => {
         .metadata-dialog button:disabled,.device-toolbar button:disabled{opacity:.5;cursor:default}
         .metadata-actions,.device-toolbar,.device-tags{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
         .metadata-actions{justify-content:flex-end;margin-top:12px}.device-toolbar{margin:12px 0}.device-toolbar input{flex:1 1 220px}
+        .bulk-action-progress{margin-top:12px;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40)}
+        .bulk-action-progress[hidden]{display:none}.bulk-action-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}
+        .bulk-action-progress p{margin:8px 0 0}.bulk-action-progress small{color:var(--tp-muted,#94a3b8)}
         .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
@@ -569,6 +601,9 @@ var TracePulseDashboard = (() => {
       targets: "Selected devices",
       appendHint: "Existing tags are retained. Duplicate tags are ignored.",
       unregisterHint: "Unregister these devices and delete their monitoring history? This cannot be undone.",
+      unregistering: "Unregistering {count} devices... ({seconds}s elapsed)",
+      tagging: "Adding tags to {count} devices... ({seconds}s elapsed)",
+      unregisterWait: "Deleting monitoring history may take some time. Please keep this page open.",
       confirm: "Confirm"
     },
     ja: {
@@ -605,6 +640,9 @@ var TracePulseDashboard = (() => {
       targets: "\u9078\u629E\u3057\u305F\u6A5F\u5668",
       appendHint: "\u65E2\u5B58\u30BF\u30B0\u3092\u4FDD\u6301\u3057\u3066\u8FFD\u52A0\u3057\u307E\u3059\u3002\u91CD\u8907\u3059\u308B\u30BF\u30B0\u306F\u8FFD\u52A0\u3057\u307E\u305B\u3093\u3002",
       unregisterHint: "\u4EE5\u4E0B\u306E\u6A5F\u5668\u306E\u767B\u9332\u3068\u76E3\u8996\u5C65\u6B74\u3092\u524A\u9664\u3057\u307E\u3059\u3002\u5143\u306B\u623B\u305B\u307E\u305B\u3093\u3002\u5B9F\u884C\u3057\u307E\u3059\u304B\uFF1F",
+      unregistering: "{count}\u53F0\u306E\u767B\u9332\u3092\u89E3\u9664\u3057\u3066\u3044\u307E\u3059...\uFF08\u7D4C\u904E {seconds}\u79D2\uFF09",
+      tagging: "{count}\u53F0\u306B\u30BF\u30B0\u3092\u8FFD\u52A0\u3057\u3066\u3044\u307E\u3059...\uFF08\u7D4C\u904E {seconds}\u79D2\uFF09",
+      unregisterWait: "\u76E3\u8996\u5C65\u6B74\u306E\u524A\u9664\u306B\u306F\u6642\u9593\u304C\u304B\u304B\u308B\u5834\u5408\u304C\u3042\u308A\u307E\u3059\u3002\u3053\u306E\u30DA\u30FC\u30B8\u3092\u958B\u3044\u305F\u307E\u307E\u304A\u5F85\u3061\u304F\u3060\u3055\u3044\u3002",
       confirm: "\u78BA\u5B9A"
     }
   };
@@ -736,10 +774,12 @@ var TracePulseDashboard = (() => {
       });
     };
     const controller = new AbortController();
+    let stopSaveProgress;
     element.addEventListener("cancel", (event) => {
       if (busy && !loading) event.preventDefault();
     });
     element.addEventListener("close", () => {
+      stopSaveProgress?.();
       controller.abort();
       clearCredentials(element);
     });
@@ -748,6 +788,17 @@ var TracePulseDashboard = (() => {
       const credentials = defaults ? {} : readCredentials(element);
       setBusy(true);
       failure.textContent = "";
+      const progressContainer = document.createElement("div");
+      failure.before(progressContainer);
+      const stopProgress = showOperationProgress(progressContainer, credentialTitle(), (seconds) => {
+        const japanese3 = document.documentElement.lang === "ja";
+        return japanese3 ? `${devices.length}\u53F0\u306E${defaults ? "\u8A8D\u8A3C\u60C5\u5831\u3092\u5171\u901A\u8A2D\u5B9A\u3078\u623B\u3057\u3066\u3044\u307E\u3059" : "SNMP\u8A8D\u8A3C\u60C5\u5831\u3092\u4FDD\u5B58\u3057\u3066\u3044\u307E\u3059"}...\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `${defaults ? "Restoring global defaults for" : "Saving SNMP credentials for"} ${devices.length} devices... (${seconds}s elapsed)`;
+      });
+      stopSaveProgress = () => {
+        stopProgress();
+        progressContainer.remove();
+      };
+      progressContainer.scrollIntoView({ block: "nearest" });
       try {
         await post("/api/devices/snmp-credentials", { device_ids: devices.map((device) => device.id), credentials, preserve_secrets: !defaults && individual });
         clearCredentials(element);
@@ -756,6 +807,8 @@ var TracePulseDashboard = (() => {
       } catch (reason) {
         failure.textContent = String(reason);
       } finally {
+        stopSaveProgress?.();
+        stopSaveProgress = void 0;
         setBusy(false);
       }
     };
@@ -834,6 +887,7 @@ var TracePulseDashboard = (() => {
             <p>${esc(metadataText(tags ? "appendHint" : "unregisterHint"))}</p>
             ${tags ? `<div id="bulk-tag-chips" class="device-tags"></div>${field("bulk-tag-input", metadataText("tags"), "", "text", "maxlength=64")}
                 <p>${esc(metadataText("tagHint"))}</p><button type="button" id="bulk-tag-add">${esc(metadataText("add"))}</button>` : ""}
+            <div class="bulk-action-progress" hidden><progress aria-label="${esc(metadataText(tags ? "bulkTags" : "unregister"))}"></progress><p role="status" aria-live="polite"></p>${tags ? "" : `<small>${esc(metadataText("unregisterWait"))}</small>`}</div>
             <p role="alert"></p><div class="metadata-actions"><button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
             <button type="submit">${esc(metadataText("confirm"))}</button></div></form>`);
       let busy = false;
@@ -895,6 +949,19 @@ var TracePulseDashboard = (() => {
         controls.forEach((control) => {
           control.disabled = true;
         });
+        const progress = element.querySelector(".bulk-action-progress");
+        let progressTimer;
+        if (progress) {
+          const started = performance.now();
+          const updateProgress = () => {
+            progress.querySelector("[role=status]").textContent = metadataText(tags ? "tagging" : "unregistering").replace("{count}", String(ids.length)).replace("{seconds}", String(Math.floor((performance.now() - started) / 1e3)));
+          };
+          progress.hidden = false;
+          updateProgress();
+          progress.scrollIntoView({ block: "nearest" });
+          progressTimer = window.setInterval(updateProgress, 1e3);
+        }
+        element.setAttribute("aria-busy", "true");
         try {
           await post("/api/devices/bulk-action", { action, device_ids: ids, ...tags ? { tags: additions } : {} });
           element.close();
@@ -902,6 +969,9 @@ var TracePulseDashboard = (() => {
         } catch (failure) {
           error.textContent = String(failure);
         } finally {
+          window.clearInterval(progressTimer);
+          if (progress) progress.hidden = true;
+          element.setAttribute("aria-busy", "false");
           busy = false;
           controls.forEach((control) => {
             control.disabled = false;
@@ -936,6 +1006,22 @@ var TracePulseDashboard = (() => {
     let approved = null;
     let revision = 0;
     let busy = false;
+    let applying = false;
+    let stopRenameProgress = () => {
+    };
+    const showRenameProgress = (previewing) => {
+      const container = document.createElement("div");
+      error.before(container);
+      const stop = showOperationProgress(container, metadataText("rename"), (seconds) => {
+        const japanese2 = document.documentElement.lang === "ja";
+        return japanese2 ? `${ids.length}\u53F0\u306E${previewing ? "\u540D\u79F0\u3092\u30D7\u30EC\u30D3\u30E5\u30FC\u3057\u3066\u3044\u307E\u3059" : "\u6A5F\u5668\u540D\u3092\u5909\u66F4\u3057\u3066\u3044\u307E\u3059"}...\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `${previewing ? "Previewing names for" : "Renaming"} ${ids.length} devices... (${seconds}s elapsed)`;
+      });
+      stopRenameProgress = () => {
+        stop();
+        container.remove();
+      };
+      container.scrollIntoView({ block: "nearest" });
+    };
     const invalidate = () => {
       revision++;
       approved = null;
@@ -944,13 +1030,18 @@ var TracePulseDashboard = (() => {
     };
     form.addEventListener("input", invalidate);
     form.addEventListener("change", invalidate);
-    element.querySelector("[data-cancel]").onclick = () => {
-      revision++;
-      element.close();
+    const cancel = element.querySelector("[data-cancel]");
+    cancel.onclick = () => {
+      if (!applying) {
+        revision++;
+        element.close();
+      }
     };
-    element.addEventListener("cancel", () => {
-      revision++;
+    element.addEventListener("cancel", (event) => {
+      if (applying) event.preventDefault();
+      else revision++;
     });
+    element.addEventListener("close", () => stopRenameProgress());
     previewButton.onclick = async () => {
       if (busy || !form.reportValidity()) return;
       invalidate();
@@ -966,6 +1057,7 @@ var TracePulseDashboard = (() => {
       busy = true;
       previewButton.disabled = true;
       error.textContent = "";
+      showRenameProgress(true);
       try {
         const data = await post("/api/devices/bulk-rename/preview", payload);
         if (version !== revision || !element.open) return;
@@ -979,6 +1071,7 @@ var TracePulseDashboard = (() => {
       } catch (failure) {
         error.textContent = String(failure);
       } finally {
+        stopRenameProgress();
         busy = false;
         previewButton.disabled = false;
       }
@@ -990,6 +1083,9 @@ var TracePulseDashboard = (() => {
       submit.disabled = true;
       previewButton.disabled = true;
       error.textContent = "";
+      applying = true;
+      cancel.disabled = true;
+      showRenameProgress(false);
       const inputs = form.querySelectorAll("input,select");
       inputs.forEach((input) => {
         input.disabled = true;
@@ -1002,6 +1098,9 @@ var TracePulseDashboard = (() => {
         error.textContent = String(failure);
         invalidate();
       } finally {
+        stopRenameProgress();
+        applying = false;
+        cancel.disabled = false;
         busy = false;
         previewButton.disabled = false;
         inputs.forEach((input) => {

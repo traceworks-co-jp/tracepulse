@@ -117,6 +117,67 @@ test("bulk credentials replace selected overrides and can return to global defau
     } finally { for (const ip of ips) await request.delete(`/api/device/${ip}`); }
 });
 
+for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja"]] as const) {
+    test(`SNMP credential save and reset show elapsed progress at ${width} ${theme} ${language}`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 900 });
+        const devices = Array.from({ length: 50 }, (_, index) => ({ id: index + 1, ip: `192.0.2.${index + 1}`, name: `save-progress-${index + 1}`, status: "online" }));
+        await page.route("**/api/devices", route => route.fulfill({ json: devices }));
+        let finish: ((success: boolean) => void) | undefined;
+        const requests: Array<{ credentials: Record<string, string>; device_ids: number[] }> = [];
+        await page.route("**/api/devices/snmp-credentials", async route => {
+            requests.push(route.request().postDataJSON());
+            const success = await new Promise<boolean>(resolve => { finish = resolve; });
+            await route.fulfill(success ? { json: { ok: true, devices: [] } } : { status: 500, json: { error: "Save failed" } });
+        });
+        await page.goto("/");
+        await page.evaluate(() => window.refreshDashboard?.());
+        await expect(page.locator("#dash-tbody tr")).toHaveCount(50);
+        await page.evaluate(lang => window.setLanguage?.(lang), language);
+        await page.locator("#theme-select").selectOption(theme);
+        await page.locator("#select-visible-devices").check();
+        const open = async () => {
+            await page.locator("#bulk-rename").click();
+            await page.locator("#bulk-actions-dialog [data-action=snmp]").click();
+        };
+        await open();
+        const dialog = page.locator("#device-snmp-dialog");
+        const progress = dialog.locator(".operation-progress");
+        await dialog.locator("#device-snmp-community").fill("save-progress-secret");
+        await dialog.locator("[type=submit]").click();
+        await expect(progress).toBeInViewport();
+        await expect(progress.getByRole("status")).toContainText(language === "ja" ? "50台のSNMP認証情報を保存しています" : "Saving SNMP credentials for 50 devices");
+        await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /経過 [1-9]\d*秒/ : /[1-9]\d*s elapsed/);
+        await expect(progress).not.toContainText("save-progress-secret");
+        await expect(dialog.locator("[type=submit]")).toBeDisabled();
+        await expect(dialog.locator("[data-reset]")).toBeDisabled();
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeVisible();
+        await page.evaluate(() => document.querySelector<HTMLFormElement>("#device-snmp-dialog form")!.requestSubmit());
+        expect(requests).toHaveLength(1);
+        expect(requests[0].device_ids).toHaveLength(50);
+        await dialog.screenshot({ path: `test-results/snmp-save-progress-${width}-${theme}.png` });
+        finish!(false);
+        await expect(dialog.getByRole("alert")).toContainText("Save failed");
+        await expect(progress).toHaveCount(0);
+        await expect(dialog.locator("[type=submit]")).toBeEnabled();
+        await dialog.locator("[type=submit]").click();
+        await expect.poll(() => requests.length).toBe(2);
+        finish!(true);
+        await expect(dialog).not.toBeVisible();
+        await expect(progress).toHaveCount(0);
+        await open();
+        page.once("dialog", confirmation => confirmation.accept());
+        await dialog.locator("[data-reset]").click();
+        await expect(progress).toBeVisible();
+        await expect(progress.getByRole("status")).toContainText(language === "ja" ? "50台の認証情報を共通設定へ戻しています" : "Restoring global defaults for 50 devices");
+        await expect.poll(() => requests.length).toBe(3);
+        expect(requests[2].credentials).toEqual({});
+        finish!(true);
+        await expect(dialog).not.toBeVisible();
+        await expect(progress).toHaveCount(0);
+    });
+}
+
 test("individual SNMP editor loads saved settings, retains masked secrets and saves reset", async ({ page, request }) => {
     const ip = "192.0.2.236";
     try {
