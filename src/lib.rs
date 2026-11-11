@@ -171,5 +171,5 @@ pub fn data_dir() -> PathBuf {
     std::env::var_os("TRACEPULSE_DATA_DIR")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(exe_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
 }

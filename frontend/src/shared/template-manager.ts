@@ -118,7 +118,7 @@ function fieldLabel(path: string): string {
 
 async function api<T>(path: string, body?: unknown): Promise<T> {
     const response = await fetch(path, body === undefined ? {} : {
-        method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" },
+        method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() },
         body: JSON.stringify(body),
     });
     const result: { ok?: boolean; error?: string; data?: T } = await response.json();
@@ -261,7 +261,7 @@ export function initializeTemplateManager(): void {
     let modalDirty = false;
     let operation: Key = "loading";
     let operationStarted = 0;
-    let stopOperationProgress = (): void => {};
+    let stopOperationProgress = (): void => { };
     const run = async (action: () => Promise<void>, kind: Key = "loading"): Promise<void> => {
         if (busy) return;
         operation = kind; operationStarted = performance.now();

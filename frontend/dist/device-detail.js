@@ -155,6 +155,16 @@ var TracePulseDeviceDetail = (() => {
         .bulk-action-progress{margin-top:12px;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40)}
         .bulk-action-progress[hidden]{display:none}.bulk-action-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}
         .bulk-action-progress p{margin:8px 0 0}.bulk-action-progress small{color:var(--tp-muted,#94a3b8)}
+        .rename-preview-scroll{max-height:300px;overflow:auto;min-width:0;border:1px solid var(--tp-border,#475569);border-radius:4px}
+        .rename-preview-scroll[hidden]{display:none}
+        .rename-preview-table{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;text-align:left;overflow:visible;border:0;border-radius:0;background:transparent}
+        .rename-preview-table th,.rename-preview-table td{padding:10px 12px;overflow-wrap:anywhere;vertical-align:top;border-bottom:1px solid var(--tp-border,#475569)}
+        .rename-preview-table td{font-size:.85rem;font-weight:400;text-align:left}
+        .rename-preview-table th{position:sticky;top:0;z-index:1;background:var(--tp-surface,#1e293b);font-size:.85rem;text-transform:none;letter-spacing:0;white-space:normal;cursor:default}
+        .rename-preview-table tbody tr:last-child td{border-bottom:0}
+        .rename-preview-table .rename-new-name{font-weight:700;background:color-mix(in srgb,var(--tp-accent,#38c5b2) 12%,transparent)}
+        .rename-preview-table tr.has-error td{background:color-mix(in srgb,#f87171 15%,var(--tp-surface,#1e293b))}
+        @media(max-width:480px){.rename-preview-table th,.rename-preview-table td{padding:10px 6px}}
         .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
@@ -189,6 +199,9 @@ var TracePulseDeviceDetail = (() => {
       apply: "Apply names",
       search: "Search alias, hostname, IP or tags",
       select: "Select device",
+      ipAddress: "IP Address",
+      currentName: "Current Name",
+      newName: "New Name",
       all: "Select visible devices",
       selected: "selected",
       failed: "Request failed",
@@ -228,6 +241,9 @@ var TracePulseDeviceDetail = (() => {
       apply: "\u540D\u79F0\u3092\u9069\u7528",
       search: "\u8868\u793A\u540D\u30FB\u30DB\u30B9\u30C8\u540D\u30FBIP\u30FB\u30BF\u30B0\u3067\u691C\u7D22",
       select: "\u6A5F\u5668\u3092\u9078\u629E",
+      ipAddress: "IP\u30A2\u30C9\u30EC\u30B9",
+      currentName: "\u73FE\u5728\u306E\u540D\u524D",
+      newName: "\u65B0\u3057\u3044\u540D\u524D",
       all: "\u8868\u793A\u4E2D\u306E\u6A5F\u5668\u3092\u3059\u3079\u3066\u9078\u629E",
       selected: "\u4EF6\u9078\u629E",
       failed: "\u51E6\u7406\u306B\u5931\u6557\u3057\u307E\u3057\u305F",
@@ -254,7 +270,7 @@ var TracePulseDeviceDetail = (() => {
   async function post(url, body) {
     const response = await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" },
+      headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() },
       body: JSON.stringify(body)
     });
     const data = await response.json();

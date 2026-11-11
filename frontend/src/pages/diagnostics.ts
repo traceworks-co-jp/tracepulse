@@ -238,7 +238,7 @@ export function startDiagnostics(event: SubmitEvent): boolean {
     });
     fetch(form.action, {
         method: "POST", cache: "no-store",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", ...window.tracepulseRequestHeaders?.() },
         body: body.toString(),
     })
         .then((response) => response.text())

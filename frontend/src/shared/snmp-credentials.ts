@@ -79,7 +79,7 @@ export function initializeGlobalSnmp(): void {
         const error = form.querySelector<HTMLElement>("[role=alert]")!;
         status.textContent = ""; error.textContent = "";
         try {
-            const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) });
+            const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() }, body: JSON.stringify(payload) });
             const result: { ok?: boolean; error?: string } = await response.json();
             if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
             clearCredentials(form);

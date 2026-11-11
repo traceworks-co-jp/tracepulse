@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const baseURL = process.env.TRACEPULSE_TEST_BASE_URL || "http://127.0.0.1:8080";
+const port = new URL(baseURL).port || "8080";
 
 export default defineConfig({
     testDir: "frontend/tests",
@@ -11,9 +12,9 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
     },
     webServer: {
-        command: "cargo run --quiet -- --web",
+        command: `cargo run --offline --locked --quiet -- --web --port ${port}`,
         url: `${baseURL}/`,
-        reuseExistingServer: true,
+        reuseExistingServer: false,
         timeout: 120_000,
     },
 });

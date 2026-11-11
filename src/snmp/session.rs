@@ -3,7 +3,7 @@ use snmp2::{
     Oid, Value,
     v3::{Auth, AuthProtocol, Cipher, Security},
 };
-use std::{net::ToSocketAddrs, time::Duration};
+use std::{net::{IpAddr, SocketAddr}, time::{Duration, Instant}, sync::{Arc, Mutex, OnceLock}};
 
 pub trait ReadName {
     fn read_name<'a>(&self, buffer: &'a mut [u32]) -> Result<&'a [u32], snmp2::Error>;
@@ -41,24 +41,45 @@ pub struct Response<'a> {
     pub varbinds: std::vec::IntoIter<(Name<'a>, Value<'a>)>,
 }
 
-pub struct SyncSession(snmp2::SyncSession);
+pub struct SyncSession(snmp2::SyncSession, Arc<Mutex<Option<Instant>>>);
+
+fn target_gate(target: IpAddr) -> Arc<Mutex<Option<Instant>>> {
+    static GATES: OnceLock<Mutex<std::collections::HashMap<IpAddr, Arc<Mutex<Option<Instant>>>>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entry(target)
+        .or_insert_with(|| Arc::new(Mutex::new(None))).clone()
+}
+
+fn pace(gate: &Mutex<Option<Instant>>) -> std::sync::MutexGuard<'_, Option<Instant>> {
+    let mut previous = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(sent) = *previous {
+        let remaining = Duration::from_millis(251).saturating_sub(sent.elapsed());
+        if !remaining.is_zero() { std::thread::sleep(remaining); }
+    }
+    *previous = Some(Instant::now());
+    previous
+}
 
 impl SyncSession {
     pub fn new(
-        destination: impl ToSocketAddrs,
+        destination: impl std::fmt::Display,
         community: &[u8],
         timeout: Option<Duration>,
         request: i32,
     ) -> std::io::Result<Self> {
-        snmp2::SyncSession::new_v2c(destination, community, timeout, request).map(Self)
+        let destination: SocketAddr = destination.to_string().parse().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "SNMP requires a numeric socket address"))?;
+        let gate = target_gate(destination.ip());
+        snmp2::SyncSession::new_v2c(destination, community, timeout, request).map(|session| Self(session, gate))
     }
 
     pub fn authenticated(
-        destination: impl ToSocketAddrs,
+        destination: impl std::fmt::Display,
         credentials: &SnmpCredentials,
         timeout: Duration,
     ) -> Result<Self, AppError> {
         credentials.validate_resolved()?;
+        let destination: SocketAddr = destination.to_string().parse().map_err(|_| AppError::Validation("SNMP requires a numeric socket address".into()))?;
+        let gate = target_gate(destination.ip());
         let protocol = match credentials.v3_auth_protocol.as_deref() {
             Some("sha1") => AuthProtocol::Sha1,
             Some("sha512") => AuthProtocol::Sha512,
@@ -95,22 +116,32 @@ impl SyncSession {
         .with_auth(auth);
         let mut session = snmp2::SyncSession::new_v3(destination, Some(timeout), 1, security)
             .map_err(|_| AppError::Validation("SNMPv3 session initialization failed".into()))?;
-        session.init().map_err(|_| {
+        let mut guard = pace(&gate);
+        let initialized = session.init();
+        *guard = Some(Instant::now());
+        initialized.map_err(|_| {
             AppError::Validation("SNMPv3 engine discovery or authentication failed".into())
         })?;
-        Ok(Self(session))
+        drop(guard);
+        Ok(Self(session, gate))
     }
 
     pub fn get(&mut self, oid: &[u32]) -> Result<Response<'_>, snmp2::Error> {
         let components: Vec<u64> = oid.iter().map(|value| u64::from(*value)).collect();
         let oid = Oid::from(&components).map_err(|_| snmp2::Error::AsnParse)?;
-        Self::response(self.0.get(&oid)?)
+        let mut guard = pace(&self.1);
+        let response = self.0.get(&oid);
+        *guard = Some(Instant::now());
+        Self::response(response?)
     }
 
     pub fn getnext(&mut self, oid: &[u32]) -> Result<Response<'_>, snmp2::Error> {
         let components: Vec<u64> = oid.iter().map(|value| u64::from(*value)).collect();
         let oid = Oid::from(&components).map_err(|_| snmp2::Error::AsnParse)?;
-        Self::response(self.0.getnext(&oid)?)
+        let mut guard = pace(&self.1);
+        let response = self.0.getnext(&oid);
+        *guard = Some(Instant::now());
+        Self::response(response?)
     }
 
     fn response(response: snmp2::Pdu<'_>) -> Result<Response<'_>, snmp2::Error> {

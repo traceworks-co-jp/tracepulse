@@ -116,7 +116,7 @@ export async function startScan(): Promise<void> {
     setProgress(0, 0, 0);
     el<HTMLElement>("scan-progress").style.display = "block";
     try {
-        const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
+        const response = await fetch("/api/discovery/scan", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", ...window.tracepulseRequestHeaders?.() }, body: `cidr=${encodeURIComponent(cidr)}&community=${encodeURIComponent(community)}&max_hosts=${encodeURIComponent(total || 65534)}` });
         const data = await response.json() as { error?: string; job_id?: string; total?: number };
         if (generation !== scanGeneration) return;
         if (data.error || !data.job_id) { finishScanError(data.error || "Failed to start scan"); return; }
@@ -272,7 +272,7 @@ function registrationError(value: unknown): RegistrationError {
 async function requestRegistration(targets: RegistrationRequest[]): Promise<RegistrationOutcome> {
     const failed = (key: RegistrationError): RegistrationOutcome => ({ registered: [], skipped: [], failures: new Map(targets.map(device => [device.ip, key])) });
     try {
-        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(targets) });
+        const response = await fetch("/api/discovery/register", { method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() }, body: JSON.stringify(targets) });
         if (response.status === 401 || response.status === 403) return failed("registration_denied");
         const data = await response.json() as Partial<RegisterResult> | null;
         if (!response.ok || !data || data.error) return failed(registrationError(data?.error));

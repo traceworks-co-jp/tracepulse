@@ -139,7 +139,7 @@ export function saveSettings(): void {
         health_critical_threshold: parseInt(element<HTMLInputElement>("crit_t").value, 10),
         history_days: parseInt(element<HTMLInputElement>("days").value, 10),
     };
-    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) })
+    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() }, body: JSON.stringify(payload) })
         .then((response) => response.json())
         .then((data: { ok?: boolean; error?: string }) => {
             if (data.ok) {

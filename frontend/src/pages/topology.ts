@@ -207,7 +207,7 @@ export async function startTopologyDiscovery(seedIp: string, community: string):
     const ticker = window.setInterval(renderCollectionProgress, 1000);
     try {
         let response = await fetch("/api/discovery/topology", {
-            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" },
+            method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", ...window.tracepulseRequestHeaders?.() },
             body: `seed_ip=${encodeURIComponent(seedIp)}&community=${encodeURIComponent(community)}`, signal: controller.signal,
         });
         if (response.status === 429) response = await fetch("/api/topology", { cache: "no-store", signal: controller.signal });

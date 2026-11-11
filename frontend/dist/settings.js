@@ -231,7 +231,7 @@ var TracePulseSettings = (() => {
     const request = async (url, signal, body) => {
       const response = await fetch(url, {
         signal,
-        ...body ? { method: "POST", headers: { "Content-Type": body instanceof URLSearchParams ? "application/x-www-form-urlencoded" : "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: body instanceof URLSearchParams ? body.toString() : JSON.stringify(body) } : {}
+        ...body ? { method: "POST", headers: { "Content-Type": body instanceof URLSearchParams ? "application/x-www-form-urlencoded" : "application/json", ...window.tracepulseRequestHeaders?.() }, body: body instanceof URLSearchParams ? body.toString() : JSON.stringify(body) } : {}
       });
       const data = await response.json();
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
@@ -531,7 +531,7 @@ var TracePulseSettings = (() => {
       health_critical_threshold: parseInt(element("crit_t").value, 10),
       history_days: parseInt(element("days").value, 10)
     };
-    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
+    fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() }, body: JSON.stringify(payload) }).then((response) => response.json()).then((data) => {
       if (data.ok) {
         try {
           localStorage.setItem("tracepulse-timezone", timezone);

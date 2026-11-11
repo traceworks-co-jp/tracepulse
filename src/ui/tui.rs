@@ -26,7 +26,7 @@ use crate::db::models::{Device, DeviceMetrics, InterfacePortDelta, RecentAlert, 
 use crate::db::repository::Repository;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
-use crate::monitor::{PollingEngine, calculate_bandwidth_utilization_from_delta};
+use crate::monitor::{PollingEngine, calculate_duplex_bandwidth_utilization_from_deltas};
 use crate::notifications::{NotificationSettingsProvider, NotificationStatus};
 use crate::snmp::client::SnmpClient;
 
@@ -787,13 +787,10 @@ fn start_poll_task(
                                 .ok()
                                 .flatten();
                             if let Some(prev) = previous.as_ref() {
-                                sample.bandwidth_utilization =
-                                    calculate_bandwidth_utilization_from_delta(
-                                        prev.in_octets.saturating_add(prev.out_octets),
-                                        sample.in_octets.saturating_add(sample.out_octets),
-                                        engine.config.polling.interval_seconds,
-                                        1_000_000_000,
-                                    );
+                                sample.bandwidth_utilization = calculate_duplex_bandwidth_utilization_from_deltas(
+                                    prev.in_octets, sample.in_octets, prev.out_octets, sample.out_octets,
+                                    engine.config.polling.interval_seconds, 1_000_000_000,
+                                );
                             }
                             metric_events.extend(engine.config.alert.interface_alerts(
                                 &cfg,

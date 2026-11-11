@@ -13,14 +13,14 @@ async function registrationFixture(page: Page) {
     });
     await page.route("**/api/discovery/scan/registration-*", route => route.fulfill({ json: { status: "done", scanned: scanDevices.length, total: scanDevices.length, elapsed: 1, devices: scanDevices } }));
     await page.route("**/api/discovery/register", async route => {
-        expect(route.request().headers()["x-csrf-token"]).toBe("registration-csrf");
+        expect(route.request().headers()["x-request-extension"]).toBe("registration-extension");
         payloads.push(route.request().postDataJSON());
         const reply = await new Promise<DiscoveryReply>(resolve => { finish = resolve; });
         if (reply.abort) await route.abort("failed");
         else await route.fulfill({ status: reply.status ?? 200, json: reply.json });
     });
     await page.goto("/discovery");
-    await page.evaluate(ip => { window.tracepulseCsrf = "registration-csrf"; window.DISCOVERY_EXISTING = new Set([ip]); }, devices[0].ip);
+    await page.evaluate(ip => { window.tracepulseRequestHeaders = () => ({ "X-Request-Extension": "registration-extension" }); window.DISCOVERY_EXISTING = new Set([ip]); }, devices[0].ip);
     const scan = async (next = devices, community = "scan-only-secret") => {
         scanDevices = next;
         await page.locator("#community").fill(community);
@@ -328,10 +328,12 @@ for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark
                 localStorage.setItem("tracepulse-lang", lang);
             }, language);
             await page.route("**/api/settings", route => route.fulfill({ json: { polling: { interval_seconds: 600 }, display: { timezone: "utc" } } }));
-            await page.route(`**/api/device/${ip}`, route => route.fulfill({ json: {
-                ip, name: "history-test", status: "online", interfaces: [{ if_index: 1, if_name: "Gi0/1", link_status: "up", metrics: { bandwidth_utilization: 77.29 } }],
-                metrics: [{ t: "2020-01-01T00:00:00Z", cpu: 99, memory: 99 }], alerts: [], spikes: [],
-            } }));
+            await page.route(`**/api/device/${ip}`, route => route.fulfill({
+                json: {
+                    ip, name: "history-test", status: "online", interfaces: [{ if_index: 1, if_name: "Gi0/1", link_status: "up", metrics: { bandwidth_utilization: 77.29 } }],
+                    metrics: [{ t: "2020-01-01T00:00:00Z", cpu: 99, memory: 99 }], alerts: [], spikes: [],
+                }
+            }));
             const queries: URLSearchParams[] = [];
             let fail = false, empty = false, delay = false;
             let finishOld: (() => void) | undefined;
@@ -343,11 +345,13 @@ for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark
                 if (fail) { await route.fulfill({ status: 500, json: { error: "History failed" } }); return; }
                 const end = range === "custom" ? params.get("end")! : "2026-01-10T12:00:00Z";
                 const start = range === "custom" ? params.get("start")! : new Date(new Date(end).getTime() - ({ "1h": 3600, "6h": 21600, "24h": 86400, "7d": 604800 }[range] || 86400) * 1000).toISOString();
-                await route.fulfill({ json: {
-                    start, end, max_points_per_series: 600,
-                    if_series: empty ? [] : [{ if_index: 1, points: [{ t: start, bw: 7.72, in_err: 1, in_dis: 2 }, { t: end, bw: 77.29, in_err: 4, in_dis: 3 }] }],
-                    metrics: empty ? [] : [{ t: start, cpu: 0, memory: 20 }, { t: end, cpu: 50, memory: 60 }],
-                } });
+                await route.fulfill({
+                    json: {
+                        start, end, max_points_per_series: 600,
+                        if_series: empty ? [] : [{ if_index: 1, points: [{ t: start, bw: 7.72, in_err: 1, in_dis: 2 }, { t: end, bw: 77.29, in_err: 4, in_dis: 3 }] }],
+                        metrics: empty ? [] : [{ t: start, cpu: 0, memory: 20 }, { t: end, cpu: 50, memory: 60 }],
+                    }
+                });
             });
             await page.goto(`/device/${ip}`);
             await page.locator("#theme-select").selectOption(theme);

@@ -239,7 +239,7 @@ var TracePulseSnmpDefinitions = (() => {
   async function api(path, body) {
     const response = await fetch(path, body === void 0 ? {} : {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" },
+      headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() },
       body: JSON.stringify(body)
     });
     const result = await response.json();
@@ -1146,7 +1146,7 @@ var TracePulseSnmpDefinitions = (() => {
       status.textContent = "";
       error.textContent = "";
       try {
-        const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: JSON.stringify(payload) });
+        const response = await fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() }, body: JSON.stringify(payload) });
         const result = await response.json();
         if (!response.ok || !result.ok) throw new Error(result.error || `HTTP ${response.status}`);
         clearCredentials(form);

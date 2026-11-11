@@ -34,7 +34,7 @@ let customHistoryEnd = "";
 let historyController: AbortController | null = null;
 let historyGeneration = 0;
 let historyLoading = false;
-let stopHistoryProgress = (): void => {};
+let stopHistoryProgress = (): void => { };
 
 const historyCopy = {
     en: { title: "Monitoring graph period", range: "Time range", hour: "Last hour", six: "Last 6 hours", day: "Last 24 hours", week: "Last 7 days", custom: "Custom range", start: "Start (local time)", end: "End (local time)", apply: "Apply", refresh: "Refresh graphs", invalid: "Choose a valid start and end time, with an end after the start and a range of up to 31 days.", loading: "Loading monitoring history", failed: "Could not load monitoring history" },
@@ -1062,7 +1062,7 @@ export function loadDeviceDetail(): void {
         return japanese
             ? `${lastDeviceDetail ? "デバイス情報を更新しています" : "デバイス情報を読み込んでいます"}...（経過 ${seconds}秒）`
             : `${lastDeviceDetail ? "Updating device details" : "Loading device details"}... (${seconds}s elapsed)`;
-    }) : () => {};
+    }) : () => { };
     Promise.all([
         fetch("/api/settings", { cache: "no-store" }).then((response) => response.json() as Promise<SettingsResponse>).catch(() => null),
         fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => {

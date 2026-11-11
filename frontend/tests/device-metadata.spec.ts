@@ -22,14 +22,14 @@ test("Japanese bulk naming previews numeric IP order and persists through reload
         const dialog = page.locator("#bulk-rename-dialog");
         await dialog.getByLabel("Prefix", { exact: true }).fill("大阪支店SW-");
         await dialog.getByRole("button", { name: "Preview", exact: true }).click();
-        await expect(dialog.locator("#rename-preview li")).toHaveText([
-            "192.0.2.202 → 大阪支店SW-01", "192.0.2.210 → 大阪支店SW-02",
-        ]);
+        await expect(dialog.locator("#rename-preview thead th")).toHaveText(["IP Address", "Current Name", "New Name"]);
+        await expect(dialog.locator("#rename-preview tbody tr").first().locator("td")).toHaveText(["192.0.2.202", "sys-192.0.2.202", "大阪支店SW-01"]);
+        await expect(dialog.locator("#rename-preview tbody tr").last().locator("td")).toHaveText(["192.0.2.210", "sys-192.0.2.210", "大阪支店SW-02"]);
         await dialog.getByLabel("Suffix", { exact: true }).fill("-本館");
         await expect(dialog.getByRole("button", { name: "Apply names" })).toBeDisabled();
-        await expect(dialog.locator("#rename-preview li")).toHaveCount(0);
+        await expect(dialog.locator("#rename-preview tbody tr")).toHaveCount(0);
         await dialog.getByRole("button", { name: "Preview", exact: true }).click();
-        await expect(dialog.locator("#rename-preview li").first()).toHaveText("192.0.2.202 → 大阪支店SW-01-本館");
+        await expect(dialog.locator("#rename-preview tbody tr").first().locator(".rename-new-name")).toHaveText("大阪支店SW-01-本館");
         await dialog.getByRole("button", { name: "Apply names" }).click();
         await expect(dialog).not.toBeVisible();
         await expect(page.locator("#dash-tbody")).toContainText("大阪支店SW-01-本館");
@@ -239,7 +239,7 @@ for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark
         await expect.poll(() => requests).toBe(3);
         finish!(true);
         await expect(progress).toHaveCount(0);
-        await expect(rename.locator("#rename-preview li")).toHaveCount(2);
+        await expect(rename.locator("#rename-preview tbody tr")).toHaveCount(2);
         await rename.locator("[type=submit]").click();
         await expect(progress).toBeInViewport();
         await expect(progress.getByRole("status")).toContainText(language === "ja" ? "2台の機器名を変更しています" : "Renaming 2 devices");
@@ -293,9 +293,11 @@ test("dashboard column hover text remains readable in both themes without losing
 });
 
 test("row action buttons have readable contrast in light and dark themes", async ({ page }) => {
-    await page.route("**/api/devices", (route) => route.fulfill({ json: [
-        { id: 1, ip: "192.0.2.10", name: "core", tags: [], status: "online" },
-    ] }));
+    await page.route("**/api/devices", (route) => route.fulfill({
+        json: [
+            { id: 1, ip: "192.0.2.10", name: "core", tags: [], status: "online" },
+        ]
+    }));
     await page.goto("/");
     await page.evaluate(() => window.refreshDashboard?.());
     const button = page.locator(".device-action-button").first();
@@ -516,7 +518,8 @@ test("alias and tag chips edit Japanese safely, retaining edits after API failur
         document.body.insertAdjacentHTML("beforeend", "<div><h1 id='dev-title'></h1></div>");
     });
     await page.addScriptTag({ url: "/static/js/device-detail.js" });
-    await page.addScriptTag({ content: `TracePulseDeviceDetail.renderDetail({
+    await page.addScriptTag({
+        content: `TracePulseDeviceDetail.renderDetail({
         ip:"192.0.2.1",name:"original-sysName",display_name:"東京SW",tags:["Core"]
     });` });
     await expect(page.locator("#dev-title")).toContainText("東京SW");

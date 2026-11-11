@@ -92,7 +92,7 @@ export function initializeOnboarding(auto = false): void {
     const request = async <Result>(url: string, signal: AbortSignal, body?: URLSearchParams | FoundDevice[]): Promise<Result> => {
         const response = await fetch(url, {
             signal,
-            ...(body ? { method: "POST", headers: { "Content-Type": body instanceof URLSearchParams ? "application/x-www-form-urlencoded" : "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" }, body: body instanceof URLSearchParams ? body.toString() : JSON.stringify(body) } : {}),
+            ...(body ? { method: "POST", headers: { "Content-Type": body instanceof URLSearchParams ? "application/x-www-form-urlencoded" : "application/json", ...window.tracepulseRequestHeaders?.() }, body: body instanceof URLSearchParams ? body.toString() : JSON.stringify(body) } : {}),
         });
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);

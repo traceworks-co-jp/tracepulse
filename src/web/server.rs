@@ -4933,7 +4933,7 @@ fn run_polling_loop_with_observer(
     verbose: bool,
 ) {
     use crate::db::models::{AlertEvent, DeviceMetrics, InterfaceSample};
-    use crate::monitor::calculate_bandwidth_utilization_from_delta;
+    use crate::monitor::calculate_duplex_bandwidth_utilization_from_deltas;
     use crate::snmp::SnmpClient;
     use std::time::Duration;
 
@@ -5179,11 +5179,9 @@ fn run_polling_loop_with_observer(
                         .ok()
                         .flatten();
                     if let Some(prev) = previous.as_ref() {
-                        sample.bandwidth_utilization = calculate_bandwidth_utilization_from_delta(
-                            prev.in_octets.saturating_add(prev.out_octets),
-                            sample.in_octets.saturating_add(sample.out_octets),
-                            interval,
-                            1_000_000_000,
+                        sample.bandwidth_utilization = calculate_duplex_bandwidth_utilization_from_deltas(
+                            prev.in_octets, sample.in_octets, prev.out_octets, sample.out_octets,
+                            interval, 1_000_000_000,
                         );
                     }
                     metric_events.extend(alert_config.interface_alerts(

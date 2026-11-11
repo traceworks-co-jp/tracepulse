@@ -2,7 +2,7 @@ export { };
 
 declare global {
     interface Window {
-        tracepulseCsrf?: string;
+        tracepulseRequestHeaders?: () => Record<string, string>;
         DEVICE_IP?: string;
         DEVICES?: DashboardDevice[];
         TRACEPULSE_DISCOVERY_LIMITS?: {

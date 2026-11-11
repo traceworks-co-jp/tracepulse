@@ -18,6 +18,16 @@ if (!document.getElementById("metadata-styles")) {
         .bulk-action-progress{margin-top:12px;padding:12px;border:1px solid var(--tp-border,#475569);border-radius:4px;background:var(--tp-raised,#1a2b40)}
         .bulk-action-progress[hidden]{display:none}.bulk-action-progress progress{display:block;width:100%;height:8px;accent-color:var(--tp-accent,#38c5b2)}
         .bulk-action-progress p{margin:8px 0 0}.bulk-action-progress small{color:var(--tp-muted,#94a3b8)}
+        .rename-preview-scroll{max-height:300px;overflow:auto;min-width:0;border:1px solid var(--tp-border,#475569);border-radius:4px}
+        .rename-preview-scroll[hidden]{display:none}
+        .rename-preview-table{width:100%;min-width:0;table-layout:fixed;border-collapse:separate;border-spacing:0;text-align:left;overflow:visible;border:0;border-radius:0;background:transparent}
+        .rename-preview-table th,.rename-preview-table td{padding:10px 12px;overflow-wrap:anywhere;vertical-align:top;border-bottom:1px solid var(--tp-border,#475569)}
+        .rename-preview-table td{font-size:.85rem;font-weight:400;text-align:left}
+        .rename-preview-table th{position:sticky;top:0;z-index:1;background:var(--tp-surface,#1e293b);font-size:.85rem;text-transform:none;letter-spacing:0;white-space:normal;cursor:default}
+        .rename-preview-table tbody tr:last-child td{border-bottom:0}
+        .rename-preview-table .rename-new-name{font-weight:700;background:color-mix(in srgb,var(--tp-accent,#38c5b2) 12%,transparent)}
+        .rename-preview-table tr.has-error td{background:color-mix(in srgb,#f87171 15%,var(--tp-surface,#1e293b))}
+        @media(max-width:480px){.rename-preview-table th,.rename-preview-table td{padding:10px 6px}}
         .device-tag{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;background:var(--tp-bg,#0f172a);border:1px solid #64748b;border-radius:12px;font-size:.8rem;overflow-wrap:anywhere}
         .device-tags{margin-top:4px}.device-tag button{padding:0 4px}.device-original{font-size:.8rem;color:var(--tp-muted,#94a3b8);overflow-wrap:anywhere}
         .metadata-dialog [role=alert],.device-toolbar [role=alert]{color:#f87171}
@@ -47,6 +57,7 @@ const copy = {
         cancel: "Cancel", save: "Save", rename: "Bulk rename", prefix: "Prefix", start: "Start number",
         padding: "Padding", suffix: "Suffix", order: "Sort order", ip: "IP ascending", selection: "Selection order",
         preview: "Preview", apply: "Apply names", search: "Search alias, hostname, IP or tags", select: "Select device",
+        ipAddress: "IP Address", currentName: "Current Name", newName: "New Name",
         all: "Select visible devices", selected: "selected", failed: "Request failed", missing: "Select at least one device",
         tagHint: "Enter a tag, then press Add tag or Enter.", clear: "Leave the display name empty to use sysName or IP.",
         bulk: "Bulk actions", actions: "Actions", bulkTags: "Add tags", bulkNames: "Set / change device names",
@@ -62,6 +73,7 @@ const copy = {
         cancel: "キャンセル", save: "保存", rename: "一括リネーム（連番付与）", prefix: "接頭辞", start: "開始番号",
         padding: "ゼロ埋め桁数", suffix: "接尾辞", order: "並び順", ip: "IPアドレス昇順", selection: "選択順",
         preview: "プレビュー", apply: "名称を適用", search: "表示名・ホスト名・IP・タグで検索", select: "機器を選択",
+        ipAddress: "IPアドレス", currentName: "現在の名前", newName: "新しい名前",
         all: "表示中の機器をすべて選択", selected: "件選択", failed: "処理に失敗しました", missing: "機器を選択してください",
         tagHint: "タグを入力し、追加ボタンまたはEnterで確定します。", clear: "表示名を空にするとsysNameまたはIPを表示します。",
         bulk: "一括操作", actions: "操作", bulkTags: "タグ付け", bulkNames: "機器名の設定・変更",
@@ -79,7 +91,7 @@ export function metadataText(key: keyof typeof copy.en): string {
 
 async function post<T>(url: string, body: unknown): Promise<T> {
     const response = await fetch(url, {
-        method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": window.tracepulseCsrf || "" },
+        method: "POST", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() },
         body: JSON.stringify(body),
     });
     const data: T & { error?: string; ok?: boolean } = await response.json();
@@ -277,7 +289,7 @@ export function bulkActions(devices: DeviceIdentity[], saved: () => void, indivi
     chooser.querySelector<HTMLButtonElement>("[data-action=names]")!.onclick = () => {
         chooser.close();
         if (individual) editDeviceMetadata(devices[0], saved);
-        else bulkRename(ids, saved);
+        else bulkRename(ids, saved, devices);
     };
     const actionDialog = (action: "add_tags" | "unregister"): void => {
         chooser.close();
@@ -363,7 +375,7 @@ export function bulkActions(devices: DeviceIdentity[], saved: () => void, indivi
     chooser.showModal();
 }
 
-export function bulkRename(ids: number[], saved: () => void): void {
+export function bulkRename(ids: number[], saved: () => void, devices: DeviceIdentity[] = []): void {
     const element = dialog("bulk-rename-dialog", metadataText("rename"));
     element.insertAdjacentHTML("beforeend", `<form>
         ${field("rename-prefix", metadataText("prefix"), "", "text", "maxlength=512")}
@@ -373,7 +385,10 @@ export function bulkRename(ids: number[], saved: () => void): void {
         <label for="rename-sort">${esc(metadataText("order"))}<select id="rename-sort">
         <option value="ip_asc">${esc(metadataText("ip"))}</option>
         <option value="selection_order">${esc(metadataText("selection"))}</option></select></label>
-        <p role="alert"></p><ol id="rename-preview" aria-live="polite"></ol>
+        <p role="alert"></p><div id="rename-preview" class="rename-preview-scroll" role="region" aria-label="${esc(metadataText("preview"))}" aria-live="polite" tabindex="0" hidden>
+        <table class="rename-preview-table" aria-label="${esc(metadataText("rename"))}"><thead><tr>
+        <th scope="col">${esc(metadataText("ipAddress"))}</th><th scope="col">${esc(metadataText("currentName"))}</th><th scope="col">${esc(metadataText("newName"))}</th>
+        </tr></thead><tbody></tbody></table></div>
         <div class="metadata-actions"><button type="button" data-cancel>${esc(metadataText("cancel"))}</button>
         <button type="button" id="rename-preview-button">${esc(metadataText("preview"))}</button>
         <button type="submit" disabled>${esc(metadataText("apply"))}</button></div></form>`);
@@ -381,12 +396,14 @@ export function bulkRename(ids: number[], saved: () => void): void {
     const submit = element.querySelector<HTMLButtonElement>("[type=submit]")!;
     const previewButton = element.querySelector<HTMLButtonElement>("#rename-preview-button")!;
     const error = element.querySelector<HTMLElement>("[role=alert]")!;
-    const preview = element.querySelector<HTMLOListElement>("#rename-preview")!;
+    const preview = element.querySelector<HTMLDivElement>("#rename-preview")!;
+    const previewRows = preview.querySelector<HTMLTableSectionElement>("tbody")!;
+    const currentNames = new Map(devices.map(device => [device.ip, deviceLabel(device)]));
     let approved: { device_ids: number[]; prefix: string; start_number: number; padding: number; suffix: string; sort_by: string } | null = null;
     let revision = 0;
     let busy = false;
     let applying = false;
-    let stopRenameProgress = (): void => {};
+    let stopRenameProgress = (): void => { };
     const showRenameProgress = (previewing: boolean): void => {
         const container = document.createElement("div");
         error.before(container);
@@ -399,7 +416,7 @@ export function bulkRename(ids: number[], saved: () => void): void {
         stopRenameProgress = () => { stop(); container.remove(); };
         container.scrollIntoView({ block: "nearest" });
     };
-    const invalidate = (): void => { revision++; approved = null; submit.disabled = true; preview.replaceChildren(); };
+    const invalidate = (): void => { revision++; approved = null; submit.disabled = true; previewRows.replaceChildren(); preview.hidden = true; preview.scrollTop = 0; };
     form.addEventListener("input", invalidate);
     form.addEventListener("change", invalidate);
     const cancel = element.querySelector<HTMLButtonElement>("[data-cancel]")!;
@@ -423,11 +440,19 @@ export function bulkRename(ids: number[], saved: () => void): void {
         try {
             const data = await post<{ devices: RenameItem[] }>("/api/devices/bulk-rename/preview", payload);
             if (version !== revision || !element.open) return;
+            const rows = document.createDocumentFragment();
             data.devices.forEach((device) => {
-                const row = document.createElement("li");
-                row.textContent = `${device.ip} → ${device.display_name}`;
-                preview.append(row);
+                const row = document.createElement("tr");
+                row.className = "rename-preview-row";
+                [device.ip, currentNames.get(device.ip) || device.ip, device.display_name].forEach((value, index) => {
+                    const cell = document.createElement("td");
+                    cell.textContent = value;
+                    if (index === 2) cell.className = "rename-new-name";
+                    row.append(cell);
+                });
+                rows.append(row);
             });
+            previewRows.append(rows); preview.hidden = data.devices.length === 0;
             approved = payload;
             submit.disabled = false;
         } catch (failure) { error.textContent = String(failure); }

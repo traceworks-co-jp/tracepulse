@@ -6,6 +6,7 @@ pub mod system;
 pub use interface::InterfaceMonitor;
 pub use metrics::{
     calculate_bandwidth_utilization, calculate_bandwidth_utilization_from_delta,
+    calculate_duplex_bandwidth_utilization_from_deltas,
     calculate_error_rate,
 };
 pub use poller::PollingEngine;

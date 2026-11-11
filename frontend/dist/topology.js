@@ -577,7 +577,7 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     try {
       let response = await fetch("/api/discovery/topology", {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", "X-CSRF-Token": window.tracepulseCsrf || "" },
+        headers: { "Content-Type": "application/x-www-form-urlencoded", ...window.tracepulseRequestHeaders?.() },
         body: `seed_ip=${encodeURIComponent(seedIp)}&community=${encodeURIComponent(community)}`,
         signal: controller.signal
       });
