@@ -60,7 +60,7 @@ pub struct ReliableWalkOutcome {
 
 #[derive(Debug)]
 pub(crate) enum WalkStep {
-    VarBind(SnmpVarBind),
+    VarBinds(Vec<SnmpVarBind>),
     EndOfMib,
     Unsupported(String),
     Error(WalkReason),
@@ -180,7 +180,7 @@ where
             );
         }
 
-        match get_next(&current, remaining) {
+        let batch = match get_next(&current, remaining) {
             WalkStep::EndOfMib => {
                 return finish(ReliableWalkStatus::Complete, WalkReason::EndOfMib, varbinds);
             }
@@ -206,34 +206,53 @@ where
                 };
                 return finish(status, reason, varbinds);
             }
-            WalkStep::VarBind(varbind) => {
-                if !varbind.oid.starts_with(prefix) {
-                    return finish(
-                        ReliableWalkStatus::Complete,
-                        WalkReason::OutsidePrefix,
-                        varbinds,
-                    );
-                }
-                if varbind.oid <= current {
-                    return finish(
-                        if varbinds.is_empty() {
-                            ReliableWalkStatus::Failed
-                        } else {
-                            ReliableWalkStatus::Partial
-                        },
-                        WalkReason::NonIncreasingOid,
-                        varbinds,
-                    );
-                }
-                current = varbind.oid.clone();
-                varbinds.push(varbind);
-                if varbinds.len() == options.max_varbinds {
-                    return finish(
-                        ReliableWalkStatus::Partial,
-                        WalkReason::VarBindLimitReached,
-                        varbinds,
-                    );
-                }
+            WalkStep::VarBinds(varbinds) => varbinds,
+        };
+        if batch.is_empty() {
+            return finish(
+                if varbinds.is_empty() {
+                    ReliableWalkStatus::Failed
+                } else {
+                    ReliableWalkStatus::Partial
+                },
+                WalkReason::EmptyResponse,
+                varbinds,
+            );
+        }
+        for varbind in batch {
+            if !varbind.oid.starts_with(prefix) {
+                return finish(
+                    ReliableWalkStatus::Complete,
+                    WalkReason::OutsidePrefix,
+                    varbinds,
+                );
+            }
+            if varbind.oid <= current {
+                return finish(
+                    if varbinds.is_empty() {
+                        ReliableWalkStatus::Failed
+                    } else {
+                        ReliableWalkStatus::Partial
+                    },
+                    WalkReason::NonIncreasingOid,
+                    varbinds,
+                );
+            }
+            current = varbind.oid.clone();
+            varbinds.push(varbind);
+            if varbinds.len() == options.max_varbinds {
+                return finish(
+                    ReliableWalkStatus::Partial,
+                    WalkReason::VarBindLimitReached,
+                    varbinds,
+                );
+            }
+            if cancellation.load(Ordering::Acquire) {
+                return finish(
+                    ReliableWalkStatus::Cancelled,
+                    WalkReason::Cancelled,
+                    varbinds,
+                );
             }
         }
     }
@@ -268,7 +287,7 @@ mod tests {
             &AtomicBool::new(false),
             |current, _| {
                 if current == [1, 3, 6] {
-                    WalkStep::VarBind(varbind(&[1, 3, 6, 1]))
+                    WalkStep::VarBinds(vec![varbind(&[1, 3, 6, 1])])
                 } else {
                     WalkStep::EndOfMib
                 }
@@ -289,7 +308,7 @@ mod tests {
             &AtomicBool::new(false),
             |current, _| {
                 if current == [1] {
-                    WalkStep::VarBind(varbind(&[1, 1]))
+                    WalkStep::VarBinds(vec![varbind(&[1, 1])])
                 } else {
                     WalkStep::Error(WalkReason::RequestTimeout)
                 }
@@ -302,6 +321,41 @@ mod tests {
     }
 
     #[test]
+    fn batched_rows_advance_cursor_and_stop_at_prefix_boundary() {
+        let result = walk_with(
+            &[1, 3, 6],
+            &options(Duration::from_secs(1), 10),
+            &AtomicBool::new(false),
+            |_, _| {
+                WalkStep::VarBinds(vec![
+                    varbind(&[1, 3, 6, 1]),
+                    varbind(&[1, 3, 6, 2]),
+                    varbind(&[1, 3, 5]),
+                ])
+            },
+        );
+
+        assert_eq!(result.status, ReliableWalkStatus::Complete);
+        assert_eq!(result.reason, Some(WalkReason::OutsidePrefix));
+        assert_eq!(result.count, 2);
+        assert_eq!(result.cursor, Some(vec![1, 3, 6, 2]));
+    }
+
+    #[test]
+    fn batched_rows_respect_varbind_limit() {
+        let result = walk_with(
+            &[1],
+            &options(Duration::from_secs(1), 2),
+            &AtomicBool::new(false),
+            |_, _| WalkStep::VarBinds(vec![varbind(&[1, 1]), varbind(&[1, 2]), varbind(&[1, 3])]),
+        );
+
+        assert_eq!(result.status, ReliableWalkStatus::Partial);
+        assert_eq!(result.reason, Some(WalkReason::VarBindLimitReached));
+        assert_eq!(result.count, 2);
+    }
+
+    #[test]
     fn outside_prefix_completes_even_when_oid_does_not_increase() {
         for after_row in [false, true] {
             let result = walk_with(
@@ -310,9 +364,9 @@ mod tests {
                 &AtomicBool::new(false),
                 |current, _| {
                     if after_row && current == [1, 3, 6] {
-                        WalkStep::VarBind(varbind(&[1, 3, 6, 1]))
+                        WalkStep::VarBinds(vec![varbind(&[1, 3, 6, 1])])
                     } else {
-                        WalkStep::VarBind(varbind(&[1, 3, 5]))
+                        WalkStep::VarBinds(vec![varbind(&[1, 3, 5])])
                     }
                 },
             );
@@ -335,9 +389,9 @@ mod tests {
                 |current, _| {
                     calls += 1;
                     if after_row && calls == 1 {
-                        WalkStep::VarBind(varbind(&[1, 3, 6, 1]))
+                        WalkStep::VarBinds(vec![varbind(&[1, 3, 6, 1])])
                     } else {
-                        WalkStep::VarBind(varbind(current))
+                        WalkStep::VarBinds(vec![varbind(current)])
                     }
                 },
             );
@@ -361,7 +415,7 @@ mod tests {
             &[1],
             &options(Duration::from_secs(1), 1),
             &AtomicBool::new(false),
-            |_, _| WalkStep::VarBind(varbind(&[1, 1])),
+            |_, _| WalkStep::VarBinds(vec![varbind(&[1, 1])]),
         );
 
         assert_eq!(result.status, ReliableWalkStatus::Partial);
@@ -380,7 +434,7 @@ mod tests {
             |_, _| {
                 calls += 1;
                 cancellation.store(true, Ordering::Release);
-                WalkStep::VarBind(varbind(&[1, 1]))
+                WalkStep::VarBinds(vec![varbind(&[1, 1])])
             },
         );
 
@@ -394,7 +448,7 @@ mod tests {
         let mut walk_options = options(Duration::from_millis(40), 10);
         walk_options.request_interval = Duration::from_millis(100);
         let result = walk_with(&[1], &walk_options, &AtomicBool::new(false), |_, _| {
-            WalkStep::VarBind(varbind(&[1, 1]))
+            WalkStep::VarBinds(vec![varbind(&[1, 1])])
         });
 
         assert_eq!(result.status, ReliableWalkStatus::Partial);

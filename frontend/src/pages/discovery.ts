@@ -122,12 +122,14 @@ export async function startScan(): Promise<void> {
         if (data.error || !data.job_id) { finishScanError(data.error || "Failed to start scan"); return; }
         currentJobId = data.job_id;
         scanStartedAt = Date.now();
-        if (seedIp && typeof window.startTopologyDiscovery === "function") window.startTopologyDiscovery(seedIp, community);
+        if (!window.TRACEPULSE_DISCOVERY_LIMITS?.savedTopologyPath && seedIp && typeof window.startTopologyDiscovery === "function") window.startTopologyDiscovery(seedIp, community);
         startPolling(data.total || total || 0, generation);
     } catch (error: unknown) { if (generation === scanGeneration) finishScanError(`Failed to start scan: ${String(error)}`); }
 }
 
 export async function runTopologyOnly(): Promise<void> {
+    const savedTopologyPath = window.TRACEPULSE_DISCOVERY_LIMITS?.savedTopologyPath;
+    if (savedTopologyPath) { window.location.assign(savedTopologyPath); return; }
     const seedIp = el<HTMLInputElement>("seed-ip").value.trim();
     const community = el<HTMLInputElement>("community").value.trim() || "public";
     if (!seedIp) { showScanError(t("topology_seed_required")); return; }

@@ -32,9 +32,9 @@ var TracePulseTopology = (() => {
   // frontend/src/shared/topology-map.ts
   var topologyRiskColor = (severity) => ({
     critical: "#ef4444",
-    warning: "#fbbf24",
+    warning: "#f59e0b",
     stale: "#94a3b8",
-    healthy: "#34d399",
+    healthy: "#10b981",
     unknown: "#94a3b8"
   })[severity];
   var styles = `

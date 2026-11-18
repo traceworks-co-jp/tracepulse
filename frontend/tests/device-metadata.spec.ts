@@ -284,11 +284,39 @@ test("dashboard column hover text remains readable in both themes without losing
         const nameHeader = page.locator("#th-display_name");
         await nameHeader.click();
         await expect(nameHeader).toHaveClass("sort-asc");
+        await expect(nameHeader.locator(".sort-icon")).toHaveText("▴");
+        await expect(nameHeader).toHaveAttribute("aria-sort", "ascending");
         await nameHeader.hover();
         await expect(nameHeader).toHaveCSS("color", "rgb(56, 189, 248)");
         await nameHeader.click();
         await expect(nameHeader).toHaveClass("sort-desc");
+        await expect(nameHeader.locator(".sort-icon")).toHaveText("▾");
+        await expect(nameHeader).toHaveAttribute("aria-sort", "descending");
         await expect(nameHeader).toHaveCSS("color", "rgb(56, 189, 248)");
+    }
+});
+
+test("all dashboard sort indicators preserve numeric IP order and pin error spikes", async ({ page }) => {
+    const devices = [
+        { id: 1, ip: "192.0.2.10", name: "ten", status: "online", health_score: 90 },
+        { id: 2, ip: "192.0.2.2", name: "two", status: "warning", health_score: 80 },
+        { id: 3, ip: "192.0.2.100", name: "spike", status: "critical", health_score: 60, error_spike: true },
+    ];
+    await page.route("**/api/devices", route => route.fulfill({ json: devices }));
+    await page.goto("/");
+    await page.evaluate(() => window.refreshDashboard?.());
+    const ips = page.locator("#dash-tbody tr td:nth-child(2) a");
+    await expect(ips).toHaveText(["192.0.2.100", "192.0.2.2", "192.0.2.10"]);
+    await page.locator("#th-ip").click();
+    await expect(ips).toHaveText(["192.0.2.100", "192.0.2.10", "192.0.2.2"]);
+    for (const column of ["ip", "display_name", "name", "tags", "status", "health_score", "last_seen"]) {
+        const header = page.locator(`#th-${column}`);
+        for (let click = 0; click < 2; click++) {
+            await header.click();
+            const ascending = await header.getAttribute("aria-sort") === "ascending";
+            await expect(header.locator(".sort-icon")).toHaveText(ascending ? "▴" : "▾");
+            await expect(ips.first()).toHaveText("192.0.2.100");
+        }
     }
 });
 
@@ -540,4 +568,11 @@ test("alias and tag chips edit Japanese safely, retaining edits after API failur
     fail = false;
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).not.toBeVisible();
+    await expect(page.locator("#dev-title")).toHaveText("大阪支店SW-01 (192.0.2.1)");
+    await page.locator("#edit-device-metadata").click();
+    await dialog.getByLabel("Display name", { exact: true }).fill("");
+    await dialog.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    expect(payload?.display_name).toBeNull();
+    await expect(page.locator("#dev-title")).toHaveText("original-sysName (192.0.2.1)");
 });

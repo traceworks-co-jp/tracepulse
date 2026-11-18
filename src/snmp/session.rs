@@ -144,18 +144,48 @@ impl SyncSession {
         Self::response(response?)
     }
 
+    pub fn getbulk(
+        &mut self,
+        oid: &[u32],
+        max_repetitions: u32,
+    ) -> Result<Response<'_>, snmp2::Error> {
+        let components: Vec<u64> = oid.iter().map(|value| u64::from(*value)).collect();
+        let oid = Oid::from(&components).map_err(|_| snmp2::Error::AsnParse)?;
+        let mut guard = pace(&self.1);
+        let response = self.0.getbulk(&[&oid], 0, max_repetitions);
+        *guard = Some(Instant::now());
+        Self::response_preserving_exceptions(response?)
+    }
+
     fn response(response: snmp2::Pdu<'_>) -> Result<Response<'_>, snmp2::Error> {
+        Self::response_with_exceptions(response, false)
+    }
+
+    fn response_preserving_exceptions(
+        response: snmp2::Pdu<'_>,
+    ) -> Result<Response<'_>, snmp2::Error> {
+        Self::response_with_exceptions(response, true)
+    }
+
+    fn response_with_exceptions(
+        response: snmp2::Pdu<'_>,
+        preserve_exceptions: bool,
+    ) -> Result<Response<'_>, snmp2::Error> {
         Ok(Response {
             error_status: response.error_status,
             error_index: response.error_index,
             varbinds: response
                 .varbinds
                 .map(|(name, value)| {
-                    let value = match value {
-                        Value::EndOfMibView | Value::NoSuchObject | Value::NoSuchInstance => {
-                            Value::Null
+                    let value = if preserve_exceptions {
+                        value
+                    } else {
+                        match value {
+                            Value::EndOfMibView | Value::NoSuchObject | Value::NoSuchInstance => {
+                                Value::Null
+                            }
+                            value => value,
                         }
-                        value => value,
                     };
                     (Name(name), value)
                 })

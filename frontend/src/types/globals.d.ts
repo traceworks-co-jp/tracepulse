@@ -6,6 +6,7 @@ declare global {
         DEVICE_IP?: string;
         DEVICES?: DashboardDevice[];
         TRACEPULSE_DISCOVERY_LIMITS?: {
+            savedTopologyPath?: string;
             maxCidrs?: number | null;
             nodeLimit?: number;
         };

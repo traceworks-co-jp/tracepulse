@@ -88,7 +88,32 @@ var TracePulseSnmpDefinitions = (() => {
       saving: "Saving and applying monitoring definitions",
       importing: "Importing TOML",
       exporting: "Exporting TOML",
-      previewing: "Previewing profile selection"
+      previewing: "Previewing profile selection",
+      profileGuide: "Create monitoring rules that apply automatically to a specific vendor or model. The profile with the longest matching sysObjectID prefix is selected.",
+      profileName: "Profile name",
+      profileNameExample: "Cisco Catalyst 9200 / Yamaha RTX1220",
+      registeredDevice: "Select a registered device",
+      chooseDevice: "Select a device to use its sysObjectID",
+      unknownOid: "sysObjectID not collected yet",
+      probeIp: "Device IP address",
+      community: "Community (optional; blank uses device or system credentials)",
+      probe: "Fetch",
+      probing: "Fetching sysObjectID\u2026",
+      vendorScope: "Apply to the entire vendor",
+      modelScope: "Apply to this model (full OID)",
+      scopePreview: "Automatically applies to devices whose sysObjectID starts with",
+      longestHint: "A more specific matching profile takes priority.",
+      baseTemplate: "Initial settings (base template)",
+      emptyTemplate: "Start empty",
+      duplicateProfile: "A profile with this prefix already exists. Select it from the profile list.",
+      deviceProfiles: "Device profiles (automatic sysObjectID selection)",
+      commonProfiles: "Shared settings for all devices",
+      condition: "Applies when sysObjectID starts with",
+      fallbackCondition: "Fallback when no device-specific profile matches",
+      matchingDevices: "Matching registered devices",
+      commonCondition: "All registered devices (additional OID candidates)",
+      scalarHint: "Single-value (scalar) OIDs must end in .0.",
+      scaleHint: "Use 0.1 to convert integers in tenths (for example, 455 = 45.5\xB0C)."
     },
     ja: {
       title: "OID\u8FFD\u52A0\u30FBSNMP\u76E3\u8996\u5B9A\u7FA9",
@@ -147,11 +172,64 @@ var TracePulseSnmpDefinitions = (() => {
       saving: "\u76E3\u8996\u5B9A\u7FA9\u3092\u4FDD\u5B58\u30FB\u9069\u7528\u3057\u3066\u3044\u307E\u3059",
       importing: "TOML\u3092\u30A4\u30F3\u30DD\u30FC\u30C8\u3057\u3066\u3044\u307E\u3059",
       exporting: "TOML\u3092\u30A8\u30AF\u30B9\u30DD\u30FC\u30C8\u3057\u3066\u3044\u307E\u3059",
-      previewing: "\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u9078\u629E\u3092\u30D7\u30EC\u30D3\u30E5\u30FC\u3057\u3066\u3044\u307E\u3059"
+      previewing: "\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u9078\u629E\u3092\u30D7\u30EC\u30D3\u30E5\u30FC\u3057\u3066\u3044\u307E\u3059",
+      profileGuide: "\u7279\u5B9A\u306E\u30D9\u30F3\u30C0\u30FC\u3084\u6A5F\u7A2E\u306B\u81EA\u52D5\u9069\u7528\u3059\u308B\u76E3\u8996\u30EB\u30FC\u30EB\u3092\u4F5C\u6210\u3057\u307E\u3059\u3002\u6A5F\u5668\u306E sysObjectID \u306E\u5148\u982D\u4E00\u81F4\uFF08\u6700\u9577\u4E00\u81F4\uFF09\u3067\u81EA\u52D5\u7684\u306B\u9078\u3070\u308C\u307E\u3059\u3002",
+      profileName: "\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u540D",
+      profileNameExample: "Cisco Catalyst 9200 / Yamaha RTX1220",
+      registeredDevice: "\u767B\u9332\u6E08\u307F\u30C7\u30D0\u30A4\u30B9\u304B\u3089\u9078\u629E",
+      chooseDevice: "sysObjectID\u3092\u53D6\u5F97\u3059\u308B\u30C7\u30D0\u30A4\u30B9\u3092\u9078\u629E",
+      unknownOid: "sysObjectID\u672A\u53D6\u5F97",
+      probeIp: "\u6A5F\u5668\u306EIP\u30A2\u30C9\u30EC\u30B9",
+      community: "\u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\uFF08\u4EFB\u610F\u30FB\u7A7A\u6B04\u306F\u500B\u5225\uFF0F\u30B7\u30B9\u30C6\u30E0\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528\uFF09",
+      probe: "\u53D6\u5F97",
+      probing: "sysObjectID\u3092\u53D6\u5F97\u3057\u3066\u3044\u307E\u3059\u2026",
+      vendorScope: "\u30D9\u30F3\u30C0\u30FC\u5168\u4F53\u306B\u9069\u7528",
+      modelScope: "\u3053\u306E\u6A5F\u7A2E\u5C02\u7528\u306B\u9069\u7528\uFF08\u30D5\u30EBOID\uFF09",
+      scopePreview: "\u3067\u59CB\u307E\u308B\u3059\u3079\u3066\u306E\u6A5F\u5668\u306B\u81EA\u52D5\u9069\u7528\u3055\u308C\u307E\u3059",
+      longestHint: "\u3088\u308A\u5177\u4F53\u7684\u306A\u6761\u4EF6\u306E\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u304C\u3042\u308B\u5834\u5408\u306F\u3001\u305D\u3061\u3089\u304C\u512A\u5148\u3055\u308C\u307E\u3059\u3002",
+      baseTemplate: "\u521D\u671F\u8A2D\u5B9A\uFF08\u30D9\u30FC\u30B9\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8\uFF09",
+      emptyTemplate: "\u7A7A\u304B\u3089\u4F5C\u6210",
+      duplicateProfile: "\u3053\u306E\u30D7\u30EC\u30D5\u30A3\u30C3\u30AF\u30B9\u306E\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u306F\u65E2\u306B\u3042\u308A\u307E\u3059\u3002\u4E00\u89A7\u304B\u3089\u9078\u629E\u3057\u3066\u304F\u3060\u3055\u3044\u3002",
+      deviceProfiles: "\u6A5F\u5668\u5225\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\uFF08sysObjectID \u81EA\u52D5\u9078\u629E\uFF09",
+      commonProfiles: "\u5168\u30C7\u30D0\u30A4\u30B9\u5171\u901A\u8A2D\u5B9A",
+      condition: "\u9069\u7528\u6761\u4EF6\uFF08sysObjectID\u30D7\u30EC\u30D5\u30A3\u30C3\u30AF\u30B9\uFF09",
+      fallbackCondition: "\u6A5F\u5668\u5225\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u306B\u4E00\u81F4\u3057\u306A\u3044\u6A5F\u5668\u306B\u9069\u7528",
+      matchingDevices: "\u4E00\u81F4\u3059\u308B\u767B\u9332\u6A5F\u5668",
+      commonCondition: "\u3059\u3079\u3066\u306E\u767B\u9332\u6A5F\u5668\uFF08\u8FFD\u52A0OID\u5019\u88DC\uFF09",
+      scalarHint: "\u203B\u5358\u4E00\u5024\uFF08\u30B9\u30AB\u30E9\u30FC\uFF09\u306EOID\u306F\u672B\u5C3E\u306B .0 \u3092\u4ED8\u3051\u3066\u304F\u3060\u3055\u3044",
+      scaleHint: "\u203B0.1\u5358\u4F4D\u306E\u6574\u6570\uFF08\u4F8B: 455 = 45.5\u2103\uFF09\u3092\u63DB\u7B97\u3059\u308B\u5834\u5408\u306F 0.1 \u3092\u6307\u5B9A"
     }
   };
   var text = (key) => messages[localStorage.getItem("tracepulse-lang") === "ja" ? "ja" : "en"][key];
   var clone = (value) => JSON.parse(JSON.stringify(value));
+  function validOid(value) {
+    const parts = value.replace(/^\./, "").split(".");
+    return parts.length >= 2 && parts.length <= 128 && parts.every((part) => /^\d+$/.test(part) && Number(part) <= 4294967295) && Number(parts[0]) <= 2 && (Number(parts[0]) === 2 || Number(parts[1]) <= 39);
+  }
+  function selector(doc) {
+    return typeof doc.sysObjectID_prefix === "string" ? doc.sysObjectID_prefix.replace(/^\.+|\.+$/g, "") : Number(doc.enterprise_id) ? `1.3.6.1.4.1.${doc.enterprise_id}` : "";
+  }
+  function selectedProfile(oid, profiles) {
+    let selected = "generic", segments = 0;
+    if (!oid || !validOid(oid)) return selected;
+    oid = oid.replace(/^\.+/, "");
+    for (const profile of profiles.values()) {
+      const prefix = selector(profile.document), length = prefix.split(".").length;
+      if (prefix && (oid === prefix || oid.startsWith(`${prefix}.`)) && length >= segments) {
+        selected = profile.id;
+        segments = length;
+      }
+    }
+    return selected;
+  }
+  async function registeredDevices() {
+    const response = await fetch("/api/devices");
+    const result = await response.json();
+    if (!response.ok || !Array.isArray(result)) {
+      throw new Error(!Array.isArray(result) && result.error || `HTTP ${response.status}`);
+    }
+    return result;
+  }
   var fieldLabels = {
     profile: ["Monitoring profile", "\u76E3\u8996\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB"],
     common: ["Common additional OIDs", "\u5171\u901A\u8FFD\u52A0OID"],
@@ -366,12 +444,16 @@ var TracePulseSnmpDefinitions = (() => {
         .template-dialog .template-advanced{border-top:1px solid var(--tp-border,#475569);padding:10px 0;margin-top:12px}
         .template-dialog summary,#snmp-definitions summary{cursor:pointer;padding:8px 0}
         .template-dialog [role=alert]{color:#f87171}
+        .template-dialog .template-hint{font-size:.85rem;font-weight:normal;color:var(--tp-muted,#94a3b8)}
+        .template-dialog .template-scope-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+        .template-dialog button:disabled{opacity:.5;cursor:default}
         html[data-theme=light] .template-dialog,html[data-theme=light] .template-dialog .template-dialog-actions,html[data-theme=light] #snmp-definitions .template-toolbar{background:#fff;color:#0f172a}
         html[data-theme=light] .template-dialog input,html[data-theme=light] .template-dialog select,html[data-theme=light] .template-dialog button{background:#f1f5f9;color:#0f172a}
         html[data-theme=light] .template-dialog [role=alert]{color:#b91c1c}
     `;
     document.head.append(style);
     let view;
+    let devices = [];
     let definitions;
     let selected = "generic";
     let dirty = false;
@@ -412,7 +494,9 @@ var TracePulseSnmpDefinitions = (() => {
       if (status) status.textContent = text("dirty");
     };
     const load = async () => {
-      view = await api("/api/snmp/definitions");
+      const [loadedView, loadedDevices] = await Promise.all([api("/api/snmp/definitions"), registeredDevices()]);
+      view = loadedView;
+      devices = loadedDevices;
       definitions = clone(view.definitions);
       dirty = false;
       message = "";
@@ -433,6 +517,16 @@ var TracePulseSnmpDefinitions = (() => {
           notify();
         });
         label.append(input);
+        const field = path.split(".").pop();
+        const oidField = field !== "sysObjectID_prefix" && (/(^oid$|_oid$|_prefix$)/.test(field || "") || /^profile\.tables\.interfaces\.(index|name|in_octets|out_octets)$/.test(path) || /^profile\.cpu\.candidates\.\d+$/.test(path) || /^common\.hardware_oids\.\d+$/.test(path));
+        if (field === "scale" || oidField) {
+          const hint = element("small", text(field === "scale" ? "scaleHint" : "scalarHint"));
+          hint.className = "template-hint";
+          hint.id = `template-hint-${path.replace(/\./g, "-")}`;
+          input.setAttribute("aria-label", fieldLabel(path));
+          input.setAttribute("aria-describedby", hint.id);
+          label.append(hint);
+        }
         row.append(label);
         if (remove) row.append(button(text("remove"), () => {
           remove();
@@ -749,8 +843,12 @@ var TracePulseSnmpDefinitions = (() => {
       toolbar.className = "template-toolbar";
       const label = element("label", text("profile")), select = element("select");
       select.id = "template-profile";
-      select.append(new Option(text("common"), "@common"));
-      for (const item of choices.values()) select.append(new Option(`${item.document.name} (${item.id})`, item.id));
+      const deviceGroup = element("optgroup"), commonGroup = element("optgroup");
+      deviceGroup.label = text("deviceProfiles");
+      commonGroup.label = text("commonProfiles");
+      commonGroup.append(new Option(text("common"), "@common"));
+      for (const item of choices.values()) (selector(item.document) ? deviceGroup : commonGroup).append(new Option(`${item.document.name} (${item.id})`, item.id));
+      select.append(deviceGroup, commonGroup);
       select.value = selected;
       select.onchange = () => {
         selected = select.value;
@@ -817,37 +915,146 @@ var TracePulseSnmpDefinitions = (() => {
       toolbar.append(file, button(text("import"), () => file.click()), reload);
       toolbar.append(button(text("newProfileTitle"), () => {
         const node = dialog(text("newProfileTitle")), form = element("form");
+        form.append(element("p", text("profileGuide")));
+        const nameLabel = element("label", text("profileName")), name = element("input");
+        name.id = "template-new-name";
+        name.required = true;
+        name.placeholder = text("profileNameExample");
+        nameLabel.append(name);
+        const deviceLabel = element("label", text("registeredDevice")), deviceSelect = element("select");
+        deviceSelect.id = "template-new-device";
+        deviceSelect.append(new Option(text("chooseDevice"), ""));
+        for (const device of devices) {
+          deviceSelect.append(new Option(`${device.name || device.ip} (${device.ip}) - ${device.sys_object_id || text("unknownOid")}`, device.ip));
+        }
+        deviceLabel.append(deviceSelect);
+        const ipLabel = element("label", text("probeIp")), ip = element("input");
+        ip.id = "template-probe-ip";
+        ip.placeholder = "192.0.2.10";
+        ipLabel.append(ip);
+        const communityLabel = element("label", text("community")), community = element("input");
+        community.type = "password";
+        community.autocomplete = "off";
+        communityLabel.append(community);
         const newLabel = element("label", text("newProfile")), prefix = element("input");
         prefix.id = "template-new-prefix";
         prefix.placeholder = "1.3.6.1.4.1.12345";
         prefix.required = true;
-        prefix.oninput = () => {
-          modalDirty = true;
-        };
         newLabel.append(prefix);
         const failure = element("p");
         failure.setAttribute("role", "alert");
+        let fullOid = "";
+        const scope = element("p"), probeStatus = element("p");
+        probeStatus.setAttribute("role", "status");
+        scope.setAttribute("aria-live", "polite");
+        scope.id = "template-scope-preview";
+        prefix.setAttribute("aria-describedby", scope.id);
+        const vendorPrefix = () => /^1\.3\.6\.1\.4\.1\.\d+(?=\.|$)/.exec(fullOid)?.[0] || "";
+        const updateScope = () => {
+          scope.textContent = validOid(prefix.value) ? `${localStorage.getItem("tracepulse-lang") === "ja" ? `"${prefix.value}" ${text("scopePreview")}` : `${text("scopePreview")} "${prefix.value}".`} ${text("longestHint")}` : text("noSelector");
+          vendor.disabled = !validOid(fullOid) || !vendorPrefix();
+          model.disabled = !validOid(fullOid);
+        };
+        const useOid = (oid) => {
+          prefix.value = oid.replace(/^\./, "");
+          fullOid = prefix.value;
+          modalDirty = true;
+          updateScope();
+        };
+        const vendor = button(text("vendorScope"), () => {
+          prefix.value = vendorPrefix();
+          modalDirty = true;
+          updateScope();
+        });
+        const model = button(text("modelScope"), () => {
+          prefix.value = fullOid;
+          modalDirty = true;
+          updateScope();
+        });
+        const scopeActions = element("div");
+        scopeActions.className = "template-scope-actions";
+        scopeActions.append(vendor, model);
+        prefix.oninput = () => {
+          fullOid = prefix.value.replace(/^\./, "");
+          modalDirty = true;
+          updateScope();
+        };
+        deviceSelect.onchange = () => {
+          const device = devices.find((device2) => device2.ip === deviceSelect.value);
+          if (!device) return;
+          ip.value = device.ip;
+          modalDirty = true;
+          useOid(device.sys_object_id || "");
+        };
+        let probing = false;
+        const probe = button(text("probe"), () => {
+          if (probing) return;
+          probing = true;
+          probe.disabled = true;
+          create.disabled = true;
+          failure.textContent = "";
+          probeStatus.textContent = text("probing");
+          const targetIp = ip.value.trim();
+          void api("/api/snmp/probe-sysobjectid", { ip: targetIp, community: community.value }).then((result) => {
+            if (!node.open) return;
+            useOid(result.sys_object_id);
+            const device = devices.find((device2) => device2.ip === targetIp);
+            if (device) device.sys_object_id = result.sys_object_id;
+            probeStatus.textContent = [result.sys_name, result.sys_object_id].filter(Boolean).join(" \u2014 ");
+          }).catch((reason) => {
+            if (node.open) failure.textContent = String(reason);
+          }).finally(() => {
+            probing = false;
+            probe.disabled = false;
+            create.disabled = false;
+            if (node.open && failure.textContent) probeStatus.textContent = "";
+          });
+        });
+        const baseLabel = element("label", text("baseTemplate")), base = element("select");
+        base.id = "template-new-base";
+        for (const item of choices.values()) base.append(new Option(String(item.document.name), item.id));
+        base.append(new Option(text("emptyTemplate"), "@empty"));
+        base.value = "generic";
+        baseLabel.append(base);
         const create = button(text("create"), () => {
         });
         create.type = "submit";
-        form.append(newLabel, failure, button(text("cancel"), () => node.close()), create);
+        const actions = element("div");
+        actions.className = "template-dialog-actions";
+        actions.append(button(text("cancel"), () => node.close()), create);
+        form.append(nameLabel, deviceLabel, ipLabel, communityLabel, probe, probeStatus, newLabel, scope, scopeActions, baseLabel, failure, actions);
         node.append(form);
+        form.addEventListener("input", () => {
+          modalDirty = true;
+        });
         form.onsubmit = (event) => {
           event.preventDefault();
-          if (!/^\d+(\.\d+)+$/.test(prefix.value)) {
+          if (probing) return;
+          const id = prefix.value.trim().replace(/^\./, "");
+          if (!validOid(id)) {
             failure.textContent = text("noSelector");
             return;
           }
-          const id = prefix.value;
-          if (!choices.has(id)) {
-            draft.profiles[id] = { name: `Custom ${id}`, description: "", sysObjectID_prefix: id, enterprise_id: 0, cpu: { candidates: [] }, memory: {}, sensors: {}, metrics: [], tables: {} };
-            dirty = true;
-            message = "";
+          if (!name.value.trim()) {
+            name.focus();
+            return;
           }
+          if (choices.has(id)) {
+            failure.textContent = text("duplicateProfile");
+            return;
+          }
+          const document2 = base.value === "@empty" ? { description: "", cpu: { candidates: [] }, memory: {}, sensors: {}, metrics: [], tables: {} } : clone(choices.get(base.value).document);
+          const enterprise = /^1\.3\.6\.1\.4\.1\.(\d+)(?=\.|$)/.exec(id);
+          draft.profiles[id] = { ...document2, name: name.value.trim(), sysObjectID_prefix: id, enterprise_id: enterprise ? Number(enterprise[1]) : 0 };
+          dirty = true;
+          message = "";
+          capture = () => {
+          };
           selected = id;
           node.close();
           render();
         };
+        updateScope();
         node.showModal();
       }));
       root.append(toolbar);
@@ -856,13 +1063,21 @@ var TracePulseSnmpDefinitions = (() => {
       status.setAttribute("role", "status");
       root.append(status);
       root.append(element("p", `${text("version")}: ${view.generation} / ${view.applied_generation}`));
-      if (profile) {
-        const source = draft.profiles[selected] ? "database" : profile.source;
-        const sources = { database: ["User definition (SQLite)", "\u30E6\u30FC\u30B6\u30FC\u5B9A\u7FA9\uFF08SQLite\uFF09"], bundled: ["Bundled template", "\u540C\u68B1\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8"], byo: ["External TOML template", "\u5916\u90E8TOML\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8"], file: ["Original template", "\u5143\u306E\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8"] };
+      {
+        const matches = common ? devices : devices.filter((device) => selectedProfile(device.sys_object_id, choices) === selected);
+        const count = element("dd", String(matches.length));
+        count.dataset.templateMatches = "";
+        count.title = matches.map((device) => `${device.name || device.ip} (${device.ip})`).join("\n");
+        const condition = common ? text("commonCondition") : selector(doc) || text("fallbackCondition");
         const sourceInfo = element("dl");
         sourceInfo.className = "template-source";
-        sourceInfo.dataset.templateSource = source;
-        sourceInfo.append(element("dt", text("source")), element("dd", sources[source]?.[localStorage.getItem("tracepulse-lang") === "ja" ? 1 : 0] || source));
+        sourceInfo.append(element("dt", text("condition")), element("dd", condition), element("dt", text("matchingDevices")), count);
+        if (profile) {
+          const source = draft.profiles[selected] ? "database" : profile.source;
+          const sources = { database: ["User definition (SQLite)", "\u30E6\u30FC\u30B6\u30FC\u5B9A\u7FA9\uFF08SQLite\uFF09"], bundled: ["Bundled template", "\u540C\u68B1\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8"], byo: ["External TOML template", "\u5916\u90E8TOML\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8"], file: ["Original template", "\u5143\u306E\u30C6\u30F3\u30D7\u30EC\u30FC\u30C8"] };
+          sourceInfo.dataset.templateSource = source;
+          sourceInfo.prepend(element("dt", text("source")), element("dd", sources[source]?.[localStorage.getItem("tracepulse-lang") === "ja" ? 1 : 0] || source));
+        }
         root.append(sourceInfo);
       }
       const categories = common ? [["system", "systemTab"], ["hardware", "hardwareTab"]] : [["system", "systemTab"], ["interfaces", "interfacesTab"], ["hardware", "hardwareTab"], ["profile", "profileTab"]];

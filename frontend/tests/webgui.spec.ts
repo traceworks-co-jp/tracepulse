@@ -182,6 +182,10 @@ test.describe("interface error breakdown overlay", () => {
                     await expect(popup).toBeVisible();
                     await expect(popup.locator(".err-pop-row")).toHaveCount(9);
                     const bounds = (await popup.boundingBox())!;
+                    if (row === 3 && height === 900) {
+                        await expect(trigger).toHaveClass(/flip/);
+                        expect(bounds.y + bounds.height).toBeLessThan((await trigger.boundingBox())!.y);
+                    }
                     expect(bounds.x).toBeGreaterThanOrEqual(7);
                     expect(bounds.y).toBeGreaterThanOrEqual(7);
                     expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 7);
@@ -1041,6 +1045,13 @@ test("Community settings do not expose notification destinations", async ({ page
     expect((await request.get("/api/notifications")).status()).toBe(404);
 });
 
+test("dashboard alert table scrolls within the mobile viewport", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/");
+    await expect(page.locator(".dashboard-alert-scroll")).toHaveCSS("overflow-x", "auto");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
 test("threshold validation shows field errors and a fixed toast at the focused input", async ({ page }) => {
     await page.addInitScript(() => {
         localStorage.setItem("tracepulse-onboarding-v1", "done");
@@ -1075,7 +1086,7 @@ test("threshold validation shows field errors and a fixed toast at the focused i
             await expect(warning).toBeFocused();
             await expect(warning).toBeInViewport();
             await expect(page.locator("#cpu_warning-error")).toBeInViewport();
-            await expect(toast).toHaveText("入力値に誤りがあります。赤枠の項目をご確認ください。");
+            await expect(toast).toHaveText("0 < Warning < Critical <= 100 を満たす%値を入力してください。");
             await expect(toast).toBeInViewport();
             await expect(page.locator(".settings-toasts")).toHaveCSS("position", "fixed");
             const top = (await toast.boundingBox())!.y;

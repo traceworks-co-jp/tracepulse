@@ -1,6 +1,6 @@
 export type TopologySeverity = "critical" | "warning" | "stale" | "healthy" | "unknown";
 export const topologyRiskColor = (severity: TopologySeverity): string => ({
-    critical: "#ef4444", warning: "#fbbf24", stale: "#94a3b8", healthy: "#34d399", unknown: "#94a3b8",
+    critical: "#ef4444", warning: "#f59e0b", stale: "#94a3b8", healthy: "#10b981", unknown: "#94a3b8",
 })[severity];
 
 export interface TopologyMapNode {

@@ -6,9 +6,12 @@ use argon2::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chacha20poly1305::{
     ChaCha20Poly1305, KeyInit, Nonce,
-    aead::{Aead, Payload},
+    aead::{Aead, AeadCore, Payload},
 };
-use rand::{RngCore, rngs::OsRng};
+use rand::{
+    SeedableRng,
+    rngs::{OsRng, StdRng},
+};
 use std::{fs, io::Write, path::Path};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -34,13 +37,15 @@ fn crypto_error(message: &str) -> AppError {
     AppError::Config(format!("credential protection: {message}"))
 }
 
+fn secure_rng() -> Result<StdRng, AppError> {
+    StdRng::from_rng(OsRng).map_err(|_| crypto_error("secure random generation failed"))
+}
+
 impl MasterKey {
     pub fn generate() -> Result<Self, AppError> {
-        let mut key = Self([0; 32]);
-        OsRng
-            .try_fill_bytes(&mut key.0)
-            .map_err(|_| crypto_error("secure random generation failed"))?;
-        Ok(key)
+        Ok(Self(
+            ChaCha20Poly1305::generate_key(&mut secure_rng()?).into(),
+        ))
     }
 
     pub fn parse(encoded: &str) -> Result<Self, AppError> {
@@ -141,15 +146,12 @@ impl MasterKey {
         #[cfg(test)]
         CRYPTO_OPERATIONS.with(|count| count.set(count.get() + 1));
         let data_key = Self::generate()?;
-        let mut wrap_nonce = [0; 12];
-        let mut value_nonce = [0; 12];
-        OsRng
-            .try_fill_bytes(&mut wrap_nonce)
-            .and_then(|()| OsRng.try_fill_bytes(&mut value_nonce))
-            .map_err(|_| crypto_error("secure random generation failed"))?;
+        let mut rng = secure_rng()?;
+        let wrap_nonce = ChaCha20Poly1305::generate_nonce(&mut rng);
+        let value_nonce = ChaCha20Poly1305::generate_nonce(&mut rng);
         let wrapped = ChaCha20Poly1305::new((&self.0).into())
             .encrypt(
-                Nonce::from_slice(&wrap_nonce),
+                &wrap_nonce,
                 Payload {
                     msg: &data_key.0,
                     aad: WRAP_CONTEXT,
@@ -158,7 +160,7 @@ impl MasterKey {
             .map_err(|_| crypto_error("data-key wrapping failed"))?;
         let ciphertext = ChaCha20Poly1305::new((&data_key.0).into())
             .encrypt(
-                Nonce::from_slice(&value_nonce),
+                &value_nonce,
                 Payload {
                     msg: plaintext,
                     aad: context,
@@ -219,11 +221,7 @@ impl MasterKey {
 }
 
 pub fn hash_password(password: &str) -> Result<String, AppError> {
-    let mut random = [0; 16];
-    OsRng
-        .try_fill_bytes(&mut random)
-        .map_err(|_| crypto_error("secure random generation failed"))?;
-    let salt = SaltString::encode_b64(&random).map_err(|_| crypto_error("salt encoding failed"))?;
+    let salt = SaltString::generate(&mut secure_rng()?);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
@@ -345,6 +343,12 @@ mod tests {
             let bytes = STANDARD
                 .decode(first.strip_prefix(PREFIX).unwrap())
                 .unwrap();
+            let second_bytes = STANDARD
+                .decode(second.strip_prefix(PREFIX).unwrap())
+                .unwrap();
+            assert_ne!(&bytes[..12], &second_bytes[..12]);
+            assert_ne!(&bytes[12..60], &second_bytes[12..60]);
+            assert_ne!(&bytes[60..72], &second_bytes[60..72]);
             for offset in [0, 12, 59, 60, 71, bytes.len() - 1] {
                 let mut corrupted = bytes.clone();
                 corrupted[offset] ^= 1;
@@ -370,20 +374,20 @@ mod tests {
 
     #[test]
     fn password_hashes_are_argon2id_salted_and_verifiable() {
-        let first = hash_password("日本語-password").unwrap();
-        let second = hash_password("日本語-password").unwrap();
+        let password = STANDARD.encode(MasterKey::generate().unwrap().0);
+        let wrong_password = STANDARD.encode(MasterKey::generate().unwrap().0);
+        let first = hash_password(&password).unwrap();
+        let second = hash_password(&password).unwrap();
         assert!(first.starts_with("$argon2id$v=19$"));
         assert_ne!(first, second);
-        assert!(verify_password("日本語-password", &first).unwrap());
-        assert!(!verify_password("wrong", &first).unwrap());
-        assert!(verify_password("anything", "not-a-hash").is_err());
-        assert!(
-            verify_password(
-                "anything",
-                "$argon2i$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$dGVzdA"
-            )
-            .is_err()
+        assert_ne!(
+            PasswordHash::new(&first).unwrap().salt,
+            PasswordHash::new(&second).unwrap().salt
         );
+        assert!(verify_password(&password, &first).unwrap());
+        assert!(!verify_password(&wrong_password, &first).unwrap());
+        assert!(verify_password(&password, "not-a-hash").is_err());
+        assert!(verify_password(&password, &first.replacen("$argon2id$", "$argon2i$", 1)).is_err());
     }
 
     #[test]

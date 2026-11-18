@@ -355,6 +355,7 @@ impl SnmpClient {
         Ok(SnmpDeviceInfo {
             sys_name,
             sys_descr,
+            sys_object_id,
             cpu_usage,
             memory_usage,
             memory_used_bytes,
@@ -376,6 +377,24 @@ impl SnmpClient {
     pub fn query_sys_object_id(&self, device: &DeviceConfig) -> Result<String, AppError> {
         let mut session = self.open_session(device)?;
         query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])
+    }
+
+    pub fn probe_identity(&self, device: &DeviceConfig) -> Result<(String, Option<String>), AppError> {
+        let mut session = self.open_session(device)?;
+        let oid = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])?;
+        if !crate::snmp::template::is_valid_oid(&oid) {
+            return Err(AppError::Validation(
+                "device returned an invalid sysObjectID".into(),
+            ));
+        }
+        let name = match query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 5, 0]) {
+            Ok(name) => Some(name),
+            Err(error) => {
+                tracing::warn!(device = %device.ip, %error, "Optional sysName query failed");
+                None
+            }
+        };
+        Ok((oid, name))
     }
 
     pub fn query_numeric_oid(&self, device: &DeviceConfig, oid: &str) -> Result<i64, AppError> {
@@ -946,7 +965,7 @@ impl SnmpClient {
         Ok(varbinds)
     }
 
-    /// A bounded GETNEXT walk that reports completion quality instead of silently
+    /// A bounded GETBULK walk that reports completion quality instead of silently
     /// treating transport and agent errors as the end of a table.
     pub fn walk_oid_reliable(
         &self,
@@ -961,30 +980,42 @@ impl SnmpClient {
             ));
         }
 
+        let mut use_getnext = false;
         walk_with(prefix, options, cancellation, |current, remaining| {
             let request_timeout = remaining.min(Duration::from_secs(2));
             let mut session = match self.open_session_with_timeout(device, request_timeout) {
                 Ok(session) => session,
                 Err(error) => return WalkStep::Error(WalkReason::Transport(error.to_string())),
             };
-            let mut response = match session.getnext(current) {
-                Ok(response) => response,
-                Err(error) => {
-                    let error_text = format!("{error:?}");
-                    let reason = if error_text.contains("ReceiveError") {
-                        WalkReason::RequestTimeout
-                    } else {
-                        WalkReason::Transport(error_text)
-                    };
-                    return WalkStep::Error(reason);
+            if use_getnext {
+                return reliable_getnext(&mut session, current);
+            }
+            let mut repetitions = 20_u32;
+            let response = loop {
+                let response = match session.getbulk(current, repetitions) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let error_text = format!("{error:?}");
+                        let reason = if error_text.contains("ReceiveError") {
+                            WalkReason::RequestTimeout
+                        } else {
+                            WalkReason::Transport(error_text)
+                        };
+                        return WalkStep::Error(reason);
+                    }
+                };
+                if response.error_status == 1 && repetitions > 1 {
+                    drop(response);
+                    repetitions = (repetitions / 2).max(1);
+                    continue;
                 }
+                break response;
             };
 
             if response.error_status == 2 {
-                return WalkStep::Unsupported(format!(
-                    "SNMP noSuchName at varbind {}",
-                    response.error_index
-                ));
+                drop(response);
+                use_getnext = true;
+                return reliable_getnext(&mut session, current);
             }
             if response.error_status != 0 {
                 return WalkStep::Error(WalkReason::AgentError {
@@ -993,24 +1024,30 @@ impl SnmpClient {
                 });
             }
 
-            let Some((name, value)) = response.varbinds.next() else {
-                return WalkStep::Error(WalkReason::EmptyResponse);
-            };
-            let mut oid_buf = [0u32; 128];
-            let oid = match name.read_name(&mut oid_buf) {
-                Ok(oid) => oid.to_vec(),
-                Err(_) => return WalkStep::Error(WalkReason::InvalidOid),
-            };
-
-            match value {
-                Value::Constructed(0x82, _) => WalkStep::EndOfMib,
-                Value::Constructed(0x80 | 0x81, _) => {
-                    WalkStep::Unsupported(format!("SNMP exception value for OID {oid:?}"))
+            let mut varbinds = Vec::new();
+            for (name, value) in response.varbinds {
+                let mut oid_buf = [0u32; 128];
+                let oid = match name.read_name(&mut oid_buf) {
+                    Ok(oid) => oid.to_vec(),
+                    Err(_) => return WalkStep::Error(WalkReason::InvalidOid),
+                };
+                match value {
+                    Value::EndOfMibView => break,
+                    Value::NoSuchObject | Value::NoSuchInstance => {
+                        return WalkStep::Unsupported(format!(
+                            "SNMP exception value for OID {oid:?}"
+                        ));
+                    }
+                    value => varbinds.push(SnmpVarBind {
+                        oid,
+                        value: SnmpValue::from_raw(&value),
+                    }),
                 }
-                value => WalkStep::VarBind(SnmpVarBind {
-                    oid,
-                    value: SnmpValue::from_raw(&value),
-                }),
+            }
+            if varbinds.is_empty() {
+                WalkStep::EndOfMib
+            } else {
+                WalkStep::VarBinds(varbinds)
             }
         })
     }
@@ -1064,6 +1101,45 @@ impl SnmpClient {
         .await
         .map_err(|err| AppError::Validation(format!("SNMP walk task failed: {}", err)))?
     }
+}
+
+fn reliable_getnext(session: &mut SyncSession, current: &[u32]) -> WalkStep {
+    let mut response = match session.getnext(current) {
+        Ok(response) => response,
+        Err(error) => {
+            let error_text = format!("{error:?}");
+            let reason = if error_text.contains("ReceiveError") {
+                WalkReason::RequestTimeout
+            } else {
+                WalkReason::Transport(error_text)
+            };
+            return WalkStep::Error(reason);
+        }
+    };
+    if response.error_status == 2 {
+        return WalkStep::Unsupported(format!(
+            "SNMP noSuchName at varbind {}",
+            response.error_index
+        ));
+    }
+    if response.error_status != 0 {
+        return WalkStep::Error(WalkReason::AgentError {
+            status: response.error_status,
+            index: response.error_index,
+        });
+    }
+    let Some((name, value)) = response.varbinds.next() else {
+        return WalkStep::Error(WalkReason::EmptyResponse);
+    };
+    let mut oid_buf = [0u32; 128];
+    let oid = match name.read_name(&mut oid_buf) {
+        Ok(oid) => oid.to_vec(),
+        Err(_) => return WalkStep::Error(WalkReason::InvalidOid),
+    };
+    WalkStep::VarBinds(vec![SnmpVarBind {
+        oid,
+        value: SnmpValue::from_raw(&value),
+    }])
 }
 
 fn failed_walk(reason: WalkReason) -> ReliableWalkOutcome {
@@ -2250,6 +2326,7 @@ fn format_envmon_status(state: i64) -> String {
 pub struct SnmpDeviceInfo {
     pub sys_name: String,
     pub sys_descr: String,
+    pub sys_object_id: Option<String>,
     pub cpu_usage: Option<u32>,
     pub memory_usage: Option<u32>,
     pub memory_used_bytes: Option<u64>,
@@ -2321,6 +2398,7 @@ mod template_collection_tests {
     use std::sync::atomic::Ordering;
 
     struct TemplateAgent {
+        port: u16,
         session: SyncSession,
         requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<u32>>>>,
         stop: std::sync::Arc<AtomicBool>,
@@ -2329,6 +2407,10 @@ mod template_collection_tests {
 
     impl TemplateAgent {
         fn new(rows: Vec<(&str, Vec<u8>)>) -> Self {
+            Self::with_bulk_error(rows, 0)
+        }
+
+        fn with_bulk_error(rows: Vec<(&str, Vec<u8>)>, bulk_error_status: u8) -> Self {
             let rows: std::collections::BTreeMap<_, _> = rows
                 .into_iter()
                 .map(|(oid, value)| (parse_oid_string(oid).unwrap(), value))
@@ -2378,32 +2460,67 @@ mod template_collection_tests {
                         }
                     }
                     server_requests.lock().unwrap().push(requested.clone());
-                    let (returned, value) = if request[0] == 0xa0 {
-                        (
-                            requested.clone(),
-                            rows.get(&requested)
+                    let mut response_bindings = Vec::new();
+                    let rejected_bulk = request[0] == 0xa5 && bulk_error_status != 0;
+                    if !rejected_bulk {
+                        if request[0] == 0xa0 {
+                            let value = rows
+                                .get(&requested)
                                 .cloned()
-                                .unwrap_or_else(|| tlv(0x80, &[])),
-                        )
+                                .unwrap_or_else(|| tlv(0x80, &[]));
+                            let returned = encoded_oid(&oid_to_string(&requested));
+                            response_bindings.extend(tlv(0x30, &[returned, value].concat()));
+                        } else if request[0] == 0xa1 {
+                            let (returned, value) = rows
+                                .range((
+                                    std::ops::Bound::Excluded(requested.clone()),
+                                    std::ops::Bound::Unbounded,
+                                ))
+                                .next()
+                                .map(|(oid, value)| (oid.clone(), value.clone()))
+                                .unwrap_or_else(|| (requested.clone(), tlv(0x82, &[])));
+                            let returned = encoded_oid(&oid_to_string(&returned));
+                            response_bindings.extend(tlv(0x30, &[returned, value].concat()));
+                        } else {
+                            assert_eq!(request[0], 0xa5);
+                            let batch = rows
+                                .range((
+                                    std::ops::Bound::Excluded(requested.clone()),
+                                    std::ops::Bound::Unbounded,
+                                ))
+                                .take(20)
+                                .map(|(oid, value)| (oid.clone(), value.clone()))
+                                .collect::<Vec<_>>();
+                            if batch.is_empty() {
+                                let returned = encoded_oid(&oid_to_string(&requested));
+                                response_bindings
+                                    .extend(tlv(0x30, &[returned, tlv(0x82, &[])].concat()));
+                            } else {
+                                for (returned, value) in batch {
+                                    let returned = encoded_oid(&oid_to_string(&returned));
+                                    response_bindings
+                                        .extend(tlv(0x30, &[returned, value].concat()));
+                                }
+                            }
+                        }
+                    }
+                    let bindings = tlv(0x30, &response_bindings);
+                    let response_status = if rejected_bulk {
+                        bulk_error_status
                     } else {
-                        assert_eq!(request[0], 0xa1);
-                        rows.range((
-                            std::ops::Bound::Excluded(requested.clone()),
-                            std::ops::Bound::Unbounded,
-                        ))
-                        .next()
-                        .map(|(oid, value)| (oid.clone(), value.clone()))
-                        .unwrap_or_else(|| (requested.clone(), tlv(0x82, &[])))
+                        0
                     };
-                    let returned = encoded_oid(&oid_to_string(&returned));
-                    let bindings = tlv(0x30, &tlv(0x30, &[returned, value].concat()));
-                    let pdu = tlv(0xa2, &[request_id, &[2, 1, 0, 2, 1, 0], &bindings].concat());
+                    let pdu = tlv(
+                        0xa2,
+                        &[request_id, &[2, 1, response_status, 2, 1, 0], &bindings].concat(),
+                    );
                     socket
                         .send_to(&tlv(0x30, &[version, community, &pdu].concat()), peer)
                         .unwrap();
                 }
             });
             Self {
+                port: address.port(),
                 session: SyncSession::new(
                     &address.to_string(),
                     b"public",
@@ -2436,6 +2553,87 @@ mod template_collection_tests {
             )),
             destination_port: DEFAULT_SNMP_PORT,
         }
+    }
+
+    #[test]
+    fn identity_probe_requires_sysobjectid_but_sysname_is_optional() {
+        let oid = "1.3.6.1.4.1.9.1.2800";
+        for name in [Some("switch01"), None] {
+            let mut rows = vec![("1.3.6.1.2.1.1.2.0", encoded_oid(oid))];
+            if let Some(name) = name {
+                rows.push(("1.3.6.1.2.1.1.5.0", tlv(0x04, name.as_bytes())));
+            }
+            let agent = TemplateAgent::new(rows);
+            let client = bundled_client().with_destination_port(agent.port);
+            let result = client
+                .probe_identity(&DeviceConfig::new("127.0.0.1", "public"))
+                .unwrap();
+            assert_eq!(result, (oid.into(), name.map(str::to_string)));
+            assert_eq!(agent.requests.lock().unwrap().len(), 2);
+        }
+        for rows in [
+            vec![],
+            vec![("1.3.6.1.2.1.1.2.0", tlv(0x04, b"not-an-oid"))],
+        ] {
+            let agent = TemplateAgent::new(rows);
+            let client = bundled_client().with_destination_port(agent.port);
+            assert!(
+                client
+                    .probe_identity(&DeviceConfig::new("127.0.0.1", "public"))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn reliable_walk_uses_getbulk_to_collect_multiple_rows_per_request() {
+        let agent = TemplateAgent::new(vec![
+            ("1.3.6.1.2.1.1.5.0", tlv(0x04, b"first")),
+            ("1.3.6.1.2.1.1.5.1", tlv(0x04, b"second")),
+            ("1.3.6.1.2.1.1.6.0", tlv(0x04, b"outside")),
+        ]);
+        let client = bundled_client().with_destination_port(agent.port);
+        let result = client.walk_oid_reliable(
+            &DeviceConfig::new("127.0.0.1", "public"),
+            &[1, 3, 6, 1, 2, 1, 1, 5],
+            &WalkOptions {
+                timeout: Duration::from_secs(2),
+                max_varbinds: 10,
+                request_interval: Duration::from_millis(20),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert_eq!(result.status, crate::snmp::ReliableWalkStatus::Complete);
+        assert_eq!(result.count, 2);
+        assert_eq!(agent.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reliable_walk_falls_back_to_getnext_when_getbulk_is_unsupported() {
+        let agent = TemplateAgent::with_bulk_error(
+            vec![
+                ("1.3.6.1.2.1.1.5.0", tlv(0x04, b"first")),
+                ("1.3.6.1.2.1.1.5.1", tlv(0x04, b"second")),
+                ("1.3.6.1.2.1.1.6.0", tlv(0x04, b"outside")),
+            ],
+            2,
+        );
+        let client = bundled_client().with_destination_port(agent.port);
+        let result = client.walk_oid_reliable(
+            &DeviceConfig::new("127.0.0.1", "public"),
+            &[1, 3, 6, 1, 2, 1, 1, 5],
+            &WalkOptions {
+                timeout: Duration::from_secs(4),
+                max_varbinds: 10,
+                request_interval: Duration::from_millis(20),
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert_eq!(result.status, crate::snmp::ReliableWalkStatus::Complete);
+        assert_eq!(result.count, 2);
+        assert_eq!(agent.requests.lock().unwrap().len(), 4);
     }
 
     #[test]

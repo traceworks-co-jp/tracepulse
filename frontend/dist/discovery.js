@@ -292,13 +292,18 @@ var TracePulseDiscovery = (() => {
       }
       currentJobId = data.job_id;
       scanStartedAt = Date.now();
-      if (seedIp && typeof window.startTopologyDiscovery === "function") window.startTopologyDiscovery(seedIp, community);
+      if (!window.TRACEPULSE_DISCOVERY_LIMITS?.savedTopologyPath && seedIp && typeof window.startTopologyDiscovery === "function") window.startTopologyDiscovery(seedIp, community);
       startPolling(data.total || total || 0, generation);
     } catch (error) {
       if (generation === scanGeneration) finishScanError(`Failed to start scan: ${String(error)}`);
     }
   }
   async function runTopologyOnly() {
+    const savedTopologyPath = window.TRACEPULSE_DISCOVERY_LIMITS?.savedTopologyPath;
+    if (savedTopologyPath) {
+      window.location.assign(savedTopologyPath);
+      return;
+    }
     const seedIp = el("seed-ip").value.trim();
     const community = el("community").value.trim() || "public";
     if (!seedIp) {

@@ -15,6 +15,7 @@ pub struct Repository {
 
 #[derive(Debug, Default)]
 pub struct DashboardDeviceData {
+    pub sys_object_id: Option<String>,
     pub metrics: Option<DeviceMetrics>,
     pub interfaces: HashMap<i32, Vec<InterfaceSample>>,
     pub error_spike: bool,
@@ -29,6 +30,19 @@ fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
 }
 
 impl Repository {
+    pub fn save_device_sys_object_id(&self, ip: &str, oid: &str) -> Result<(), AppError> {
+        if !crate::snmp::template::is_valid_oid(oid) {
+            return Err(AppError::Validation("invalid numeric sysObjectID".into()));
+        }
+        self.connection.execute(
+            "INSERT INTO device_snmp_identity(device_id,sys_object_id)
+             SELECT id,?2 FROM devices WHERE ip=?1
+             ON CONFLICT(device_id) DO UPDATE SET sys_object_id=excluded.sys_object_id",
+            params![ip, oid],
+        )?;
+        Ok(())
+    }
+
     pub fn save_snmp_definitions(
         &self,
         request: crate::snmp::management::SaveDefinitions,
@@ -320,6 +334,20 @@ impl Repository {
             if let Some(data) = data.get_mut(&device_id) {
                 data.community_configured |= credentials.community.is_some();
                 data.snmp_individual_configured |= credentials != Default::default();
+            }
+        }
+        drop(statement);
+
+        let mut statement = self
+            .connection
+            .prepare("SELECT device_id,sys_object_id FROM device_snmp_identity")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, oid) = row?;
+            if let Some(data) = data.get_mut(&id) {
+                data.sys_object_id = Some(oid);
             }
         }
         drop(statement);

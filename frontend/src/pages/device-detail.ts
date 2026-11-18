@@ -509,6 +509,7 @@ function closeErrorPopover(): void {
     popup.classList.remove("is-open");
     popup.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
+    trigger.classList.remove("flip");
     if (trigger.isConnected) trigger.append(popup); else popup.remove();
     activeErrorPopover = undefined;
 }
@@ -527,7 +528,12 @@ function positionErrorPopover(): void {
     const naturalHeight = popup.getBoundingClientRect().height;
     const below = window.innerHeight - bounds.bottom - gap - margin;
     const above = bounds.top - gap - margin;
-    const openBelow = naturalHeight <= below || below >= above;
+    const row = trigger.closest("tr");
+    const lastRows = row?.closest("tbody")?.rows;
+    const preferAbove = row && lastRows && row.sectionRowIndex >= lastRows.length - 2
+        && above >= Math.min(naturalHeight, 120);
+    const openBelow = !preferAbove && (naturalHeight <= below || below >= above);
+    trigger.classList.toggle("flip", !openBelow);
     popup.style.maxHeight = `${Math.max(1, openBelow ? below : above)}px`;
     const size = popup.getBoundingClientRect();
     const top = openBelow ? bounds.bottom + gap : bounds.top - size.height - gap;
@@ -1004,7 +1010,15 @@ function renderHeader(device: DeviceDetail): void {
             <div class="device-tags">${(device.tags || []).map((tag) => `<span class="device-tag">${escapeHtml(tag)}</span>`).join("")}</div>
             <button type="button" id="edit-device-metadata">${escapeHtml(metadataText("edit"))}</button>`;
         metadata.querySelector<HTMLButtonElement>("button")!.onclick = () => {
-            if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, loadDeviceDetail);
+            if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, updated => {
+                if (updated && lastDeviceDetail) {
+                    lastDeviceDetail = { ...lastDeviceDetail, ...updated };
+                    window.LAST_DEVICE_DETAIL = lastDeviceDetail;
+                    renderHeader(lastDeviceDetail);
+                } else {
+                    loadDeviceDetail();
+                }
+            });
         };
     }
     const status = document.getElementById("dev-status");

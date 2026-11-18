@@ -708,9 +708,7 @@ fn start_poll_task(
     database_path: &std::path::Path,
     metric_tracker: Arc<Mutex<crate::alert::rules::MetricAlertTracker>>,
 ) -> Result<PollTask, AppError> {
-    let repository = Repository::new(
-        rusqlite::Connection::open(database_path).map_err(|e| AppError::Database(e.to_string()))?,
-    )?;
+    let repository = Repository::new(crate::db::sqlite::open_database(database_path)?)?;
     let db_devices = repository.list_devices()?;
     let total = db_devices.len();
 
@@ -894,27 +892,20 @@ impl TuiRenderer {
         terminal: &mut Terminal<B>,
     ) -> Result<(), AppError> {
         if self.runner.flow_repository().is_none() {
-            let repository = Repository::new(
-                rusqlite::Connection::open(self.runner.database_path())
-                    .map_err(|e| AppError::Database(e.to_string()))?,
-            )?;
+            let repository = Repository::new(crate::db::sqlite::open_database(self.runner.database_path())?)?;
             let repository = Arc::new(Mutex::new(repository));
             crate::flow::FlowCollector::start(
                 Arc::clone(&repository),
                 crate::flow::FlowCollectorConfig::from_app_config(&self.runner.config),
             );
         }
-        let repository = Repository::new(
-            rusqlite::Connection::open(self.runner.database_path())
-                .map_err(|e| AppError::Database(e.to_string()))?,
-        )?;
+        let repository = Repository::new(crate::db::sqlite::open_database(self.runner.database_path())?)?;
 
         // TUI モードでも定期監視とアラート配信を行う（Web モードと同じポーリングループ）。
         {
             let polling_config = Arc::new(Mutex::new(self.runner.config.clone()));
             let polling_repository = Arc::new(Mutex::new(Repository::new(
-                rusqlite::Connection::open(self.runner.database_path())
-                    .map_err(|e| AppError::Database(e.to_string()))?,
+                crate::db::sqlite::open_database(self.runner.database_path())?,
             )?));
             let polling_alerts = self.runner.alert_broadcaster();
             std::thread::spawn(move || {

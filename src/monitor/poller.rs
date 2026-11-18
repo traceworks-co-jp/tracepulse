@@ -58,6 +58,11 @@ impl PollingEngine {
         )?;
         let client = SnmpClient::with_snmp_config(config.default_community.clone(), config);
         let info = client.query_device(device)?;
+        if let Some(oid) = &info.sys_object_id
+            && let Err(error) = self.repository.save_device_sys_object_id(&device.ip, oid)
+        {
+            tracing::warn!(device = %device.ip, %error, "SNMP identity could not be saved");
+        }
         let system = SystemMonitor::from_snmp_device_info(&info);
 
         let interface_indexes = client.discover_interface_indexes(device)?;

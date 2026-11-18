@@ -115,7 +115,7 @@ function field(id: string, label: string, value: string, type = "text", limits =
     return `<label for="${id}">${esc(label)}<input id="${id}" type="${type}" value="${esc(value)}" ${limits}></label>`;
 }
 
-export function editDeviceMetadata(device: DeviceIdentity, saved: () => void): void {
+export function editDeviceMetadata(device: DeviceIdentity, saved: (updated?: DeviceIdentity) => void): void {
     if (!device.ip) return;
     const element = dialog("device-metadata-dialog", metadataText("edit"));
     let tags = [...(device.tags || [])];
@@ -169,11 +169,12 @@ export function editDeviceMetadata(device: DeviceIdentity, saved: () => void): v
         submit.disabled = true;
         error.textContent = "";
         try {
+            const displayName = element.querySelector<HTMLInputElement>("#device-alias")!.value.trim() || null;
             await post(`/api/device/${encodeURIComponent(device.ip!)}/metadata`, {
-                display_name: element.querySelector<HTMLInputElement>("#device-alias")!.value || null, tags,
+                display_name: displayName, tags,
             });
             element.close();
-            saved();
+            saved({ ...device, display_name: displayName, tags });
         } catch (failure) {
             error.textContent = String(failure);
         } finally { submit.disabled = false; }

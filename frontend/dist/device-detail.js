@@ -351,12 +351,13 @@ var TracePulseDeviceDetail = (() => {
       submit.disabled = true;
       error.textContent = "";
       try {
+        const displayName = element.querySelector("#device-alias").value.trim() || null;
         await post(`/api/device/${encodeURIComponent(device.ip)}/metadata`, {
-          display_name: element.querySelector("#device-alias").value || null,
+          display_name: displayName,
           tags
         });
         element.close();
-        saved();
+        saved({ ...device, display_name: displayName, tags });
       } catch (failure) {
         error.textContent = String(failure);
       } finally {
@@ -864,6 +865,7 @@ var TracePulseDeviceDetail = (() => {
     popup.classList.remove("is-open");
     popup.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
+    trigger.classList.remove("flip");
     if (trigger.isConnected) trigger.append(popup);
     else popup.remove();
     activeErrorPopover = void 0;
@@ -882,7 +884,11 @@ var TracePulseDeviceDetail = (() => {
     const naturalHeight = popup.getBoundingClientRect().height;
     const below = window.innerHeight - bounds.bottom - gap - margin;
     const above = bounds.top - gap - margin;
-    const openBelow = naturalHeight <= below || below >= above;
+    const row = trigger.closest("tr");
+    const lastRows = row?.closest("tbody")?.rows;
+    const preferAbove = row && lastRows && row.sectionRowIndex >= lastRows.length - 2 && above >= Math.min(naturalHeight, 120);
+    const openBelow = !preferAbove && (naturalHeight <= below || below >= above);
+    trigger.classList.toggle("flip", !openBelow);
     popup.style.maxHeight = `${Math.max(1, openBelow ? below : above)}px`;
     const size = popup.getBoundingClientRect();
     const top = openBelow ? bounds.bottom + gap : bounds.top - size.height - gap;
@@ -1242,7 +1248,15 @@ var TracePulseDeviceDetail = (() => {
             <div class="device-tags">${(device.tags || []).map((tag) => `<span class="device-tag">${esc(tag)}</span>`).join("")}</div>
             <button type="button" id="edit-device-metadata">${esc(metadataText("edit"))}</button>`;
       metadata.querySelector("button").onclick = () => {
-        if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, loadDeviceDetail);
+        if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, (updated) => {
+          if (updated && lastDeviceDetail) {
+            lastDeviceDetail = { ...lastDeviceDetail, ...updated };
+            window.LAST_DEVICE_DETAIL = lastDeviceDetail;
+            renderHeader(lastDeviceDetail);
+          } else {
+            loadDeviceDetail();
+          }
+        });
       };
     }
     const status = document.getElementById("dev-status");

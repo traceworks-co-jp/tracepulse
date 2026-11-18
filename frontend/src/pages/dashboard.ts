@@ -154,9 +154,11 @@ export function updateSortIndicators(): void {
         if (!header) return;
         if (column === sortColumn) {
             header.className = sortAscending ? "sort-asc" : "sort-desc";
+            header.setAttribute("aria-sort", sortAscending ? "ascending" : "descending");
             if (icon) icon.textContent = sortAscending ? "▴" : "▾";
         } else {
             header.className = "";
+            header.removeAttribute("aria-sort");
             if (icon) icon.textContent = "";
         }
     });

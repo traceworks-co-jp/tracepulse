@@ -125,7 +125,7 @@ export function saveSettings(): void {
         thresholds[metric] = { warning, critical };
     }
     if (firstInvalid) {
-        showToast(false, t("settings_invalid_input"));
+        showToast(false, t("metric_threshold_invalid"));
         firstInvalid.scrollIntoView({ block: "center" });
         firstInvalid.focus({ preventScroll: true });
         return;

@@ -68,6 +68,7 @@ mod tests {
         let info = SnmpDeviceInfo {
             sys_name: "core-sw-01".to_string(),
             sys_descr: "Cisco IOS".to_string(),
+            sys_object_id: None,
             cpu_usage: Some(62),
             memory_usage: Some(48),
             memory_used_bytes: Some(512 * 1024 * 1024),

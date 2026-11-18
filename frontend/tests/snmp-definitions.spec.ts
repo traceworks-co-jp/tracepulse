@@ -26,6 +26,7 @@ async function editField(page: Page, row: string, path: string, value: string) {
 async function createProfile(page: Page, prefix: string) {
     await page.locator(".template-toolbar").getByRole("button", { name: "Create profile", exact: true }).click();
     const dialog = page.getByRole("dialog");
+    await dialog.locator("#template-new-name").fill(`Custom ${prefix}`);
     await dialog.locator("#template-new-prefix").fill(prefix);
     await dialog.getByRole("button", { name: "Create profile", exact: true }).click();
 }
@@ -37,6 +38,124 @@ async function addItem(page: Page, category: string, label: string) {
     await page.getByRole("dialog").getByRole("button", { name: "Add", exact: true }).click();
     return page.getByRole("dialog");
 }
+
+test("profile assistants restore the full OID, copy the selected base and retain explicit errors", async ({ page, request }) => {
+    const view = (await (await request.get("/api/snmp/definitions")).json()).data;
+    await page.route("**/api/devices", route => route.fulfill({ json: [
+        { name: "switch01", ip: "192.0.2.10", sys_object_id: "1.3.6.1.4.1.65010.7" },
+        { name: "unknown", ip: "192.0.2.11", sys_object_id: null },
+    ] }));
+    let probeCount = 0;
+    await page.route("**/api/snmp/probe-sysobjectid", async route => {
+        expect(route.request().postDataJSON()).toEqual({ ip: "192.0.2.11", community: "" });
+        probeCount++;
+        await route.fulfill(probeCount === 1 ? { status: 400, json: { ok: false, error: "SNMP GET failed" } }
+            : { json: { ok: true, data: { sys_object_id: "1.3.6.1.4.1.65010.8", sys_name: "switch02" } } });
+    });
+    let saved: typeof view.definitions | undefined;
+    await page.route("**/api/snmp/definitions", async route => {
+        if (route.request().method() === "POST") {
+            saved = route.request().postDataJSON().definitions;
+            await route.fulfill({ json: { ok: true, data: { ...view, definitions: saved } } });
+        } else await route.fulfill({ json: { ok: true, data: view } });
+    });
+    await page.goto("/settings/snmp");
+    await page.locator("#template-profile").selectOption("1.3.6.1.4.1.9");
+    await page.locator(".template-toolbar").getByRole("button", { name: "Create profile", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("longest matching sysObjectID prefix");
+    await expect(dialog.locator("#template-new-base")).toHaveValue("generic");
+    await dialog.locator("#template-new-name").fill("My model");
+    await dialog.locator("#template-new-device").selectOption("192.0.2.10");
+    await expect(dialog.locator("#template-new-prefix")).toHaveValue("1.3.6.1.4.1.65010.7");
+    await dialog.getByRole("button", { name: "Apply to the entire vendor", exact: true }).click();
+    await expect(dialog.locator("#template-new-prefix")).toHaveValue("1.3.6.1.4.1.65010");
+    await expect(dialog.locator("#template-scope-preview")).toContainText('"1.3.6.1.4.1.65010"');
+    await dialog.getByRole("button", { name: "Apply to this model (full OID)", exact: true }).click();
+    await expect(dialog.locator("#template-new-prefix")).toHaveValue("1.3.6.1.4.1.65010.7");
+    await dialog.locator("#template-new-device").selectOption("192.0.2.11");
+    await expect(dialog.locator("#template-new-prefix")).toHaveValue("");
+    await dialog.getByRole("button", { name: "Fetch", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("SNMP GET failed");
+    await expect(dialog.locator("#template-new-name")).toHaveValue("My model");
+    await dialog.getByRole("button", { name: "Fetch", exact: true }).click();
+    await expect(dialog.locator("#template-new-prefix")).toHaveValue("1.3.6.1.4.1.65010.8");
+    for (const width of [1280, 375]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const theme of ["dark", "light"]) {
+            await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
+            expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+        }
+    }
+    await dialog.getByRole("button", { name: "Create profile", exact: true }).click();
+    await page.locator(".template-save").click();
+    await expect(page.locator("[data-template-status]")).toHaveText("Saved and applied");
+    const created = saved!.profiles["1.3.6.1.4.1.65010.8"];
+    const generic = view.profiles.find((profile: { id: string }) => profile.id === "generic").document;
+    expect(created).toEqual({ ...generic, name: "My model", sysObjectID_prefix: "1.3.6.1.4.1.65010.8", enterprise_id: 65010 });
+    expect(saved!.profiles["1.3.6.1.4.1.9"]).toBeUndefined();
+    const cpu = await openRow(page, "profile.cpu.candidates.0");
+    await expect(cpu).toContainText("Single-value (scalar) OIDs must end in .0.");
+    await cpu.getByRole("button", { name: "Cancel", exact: true }).click();
+    const metric = await addItem(page, "interfaces", "Optical power metric");
+    await metric.getByText("Advanced settings", { exact: true }).click();
+    await expect(metric).toContainText("455 = 45.5°C");
+    await metric.getByRole("button", { name: "Cancel", exact: true }).click();
+    await page.locator("#lang-select").selectOption("ja");
+    await page.locator(".template-toolbar").getByRole("button", { name: "プロファイル作成", exact: true }).click();
+    await page.setViewportSize({ width: 375, height: 900 });
+    await expect(page.getByRole("dialog")).toContainText("特定のベンダーや機種に自動適用する監視ルールを作成します。");
+    expect(await page.getByRole("dialog").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+});
+
+test("draft matching uses longest arc prefixes and the generic fallback exactly like the backend", async ({ page, request }) => {
+    const devices = [
+        { name: "specific", ip: "192.0.2.1", sys_object_id: "1.3.6.1.4.1.65010.7.1" },
+        { name: "sibling", ip: "192.0.2.2", sys_object_id: ".1.3.6.1.4.1.65010.70" },
+        { name: "vendor", ip: "192.0.2.3", sys_object_id: "1.3.6.1.4.1.65010" },
+        { name: "boundary", ip: "192.0.2.4", sys_object_id: "1.3.6.1.4.1.650100.7" },
+        { name: "unknown", ip: "192.0.2.5", sys_object_id: null },
+        { name: "invalid", ip: "192.0.2.6", sys_object_id: "3.40.1" },
+        { name: "overflow", ip: "192.0.2.7", sys_object_id: "1.3.6.1.4.1.4294967296" },
+    ];
+    await page.route("**/api/devices", route => route.fulfill({ json: devices }));
+    await page.goto("/settings/snmp");
+    await expect(page.locator("#template-profile optgroup")).toHaveCount(2);
+    await createProfile(page, "1.3.6.1.4.1.65010");
+    await expect(page.locator("[data-template-matches]")).toHaveText("3");
+    await createProfile(page, "1.3.6.1.4.1.65010.7");
+    await expect(page.locator("[data-template-matches]")).toHaveText("1");
+    await expect(page.locator("[data-template-matches]")).toHaveAttribute("title", "specific (192.0.2.1)");
+    await page.locator("#template-profile").selectOption("1.3.6.1.4.1.65010");
+    await expect(page.locator("[data-template-matches]")).toHaveText("2");
+    await page.locator("#template-profile").selectOption("generic");
+    await expect(page.locator("[data-template-matches]")).toHaveText("4");
+    await page.locator("#template-profile").selectOption("@common");
+    await expect(page.locator("[data-template-matches]")).toHaveText("7");
+    const view = (await (await request.get("/api/snmp/definitions")).json()).data;
+    for (const prefix of ["1.3.6.1.4.1.65010", "1.3.6.1.4.1.65010.7"]) {
+        view.definitions.profiles[prefix] = { name: `Custom ${prefix}`, sysObjectID_prefix: prefix, enterprise_id: 65010 };
+    }
+    for (const [index, expected] of [[0, "1.3.6.1.4.1.65010.7"], [1, "1.3.6.1.4.1.65010"], [2, "1.3.6.1.4.1.65010"], [3, "generic"]] as const) {
+        const preview = await (await request.post("/api/snmp/definitions/preview", {
+            data: { definitions: view.definitions, sys_object_id: devices[index].sys_object_id },
+        })).json();
+        expect(preview.data.id).toBe(expected);
+    }
+    await page.locator(".template-toolbar").getByRole("button", { name: "Create profile", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.locator("#template-new-name").fill("Duplicate");
+    await dialog.locator("#template-new-prefix").fill("1.3.6.1.4.1.65010");
+    await dialog.getByRole("button", { name: "Create profile", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("already exists");
+    await dialog.locator("#template-new-prefix").fill("1.3.6.1.2.1.99");
+    await expect(dialog.getByRole("button", { name: "Apply to the entire vendor", exact: true })).toBeDisabled();
+    await dialog.locator("#template-new-base").selectOption("@empty");
+    await dialog.getByRole("button", { name: "Create profile", exact: true }).click();
+    await expect(page.locator('[data-template-row="profile.cpu.candidates.0"]')).toHaveCount(0);
+    await page.locator("#template-profile").selectOption("generic");
+    await expect(page.locator('[data-template-row="profile.cpu.candidates.0"]')).toBeVisible();
+});
 
 for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark"]] as const) {
     test(`remaining definition loading save and import progress at ${width} ${language}`, async ({ page, request }) => {
@@ -228,24 +347,24 @@ test("definition source is a readable localized metadata row across profiles and
             await page.locator("#theme-select").selectOption(theme);
             if (theme === "light") {
                 await expect(sourceInfo).toHaveCSS("background-color", "rgb(241, 245, 249)");
-                await expect(sourceInfo.locator("dd")).toHaveCSS("color", "rgb(15, 23, 42)");
+                await expect(sourceInfo.locator("dd").first()).toHaveCSS("color", "rgb(15, 23, 42)");
             }
             for (const [id, source, label] of sources) {
                 await page.locator("#template-profile").selectOption(id);
                 await expect(sourceInfo).toHaveAttribute("data-template-source", source);
-                await expect(sourceInfo.locator("dt")).toHaveText("定義元");
-                await expect(sourceInfo.locator("dd")).toHaveText(label);
-                await expect(sourceInfo.locator("dd")).toHaveCSS("font-weight", "600");
+                await expect(sourceInfo.locator("dt").first()).toHaveText("定義元");
+                await expect(sourceInfo.locator("dd").first()).toHaveText(label);
+                await expect(sourceInfo.locator("dd").first()).toHaveCSS("font-weight", "600");
                 expect(await sourceInfo.evaluate(element => element.scrollWidth <= element.clientWidth)).toBeTruthy();
                 if (id === "generic") await sourceInfo.screenshot({ path: `test-results/template-source-${width}-${theme}.png` });
             }
         }
     }
     await page.locator("#lang-select").selectOption("en");
-    await expect(sourceInfo.locator("dt")).toHaveText("Definition source");
-    await expect(sourceInfo.locator("dd")).toHaveText("User definition (SQLite)");
+    await expect(sourceInfo.locator("dt").first()).toHaveText("Definition source");
+    await expect(sourceInfo.locator("dd").first()).toHaveText("User definition (SQLite)");
     await page.locator("#template-profile").selectOption("@common");
-    await expect(sourceInfo).toHaveCount(0);
+    await expect(sourceInfo).toContainText("All registered devices");
 });
 
 test("diagnostics stays separate and settings opens the localized definition editor", async ({ page }) => {

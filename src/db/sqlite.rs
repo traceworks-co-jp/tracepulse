@@ -2,12 +2,25 @@ use crate::error::AppError;
 use rusqlite::Connection;
 use std::path::Path;
 
-pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
+pub fn open_database(path: &Path) -> Result<Connection, AppError> {
     let connection = Connection::open(path)?;
-
     connection.execute_batch(
-        "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+        "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
+         PRAGMA temp_store=MEMORY; PRAGMA cache_size=-20000; PRAGMA foreign_keys=ON;",
     )?;
+    Ok(connection)
+}
+
+pub fn configure_read_connection(connection: &Connection) -> Result<(), AppError> {
+    connection.execute_batch(
+        "PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;
+         PRAGMA temp_store=MEMORY; PRAGMA cache_size=-20000; PRAGMA foreign_keys=ON;",
+    )?;
+    Ok(())
+}
+
+pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
+    let connection = open_database(path)?;
 
     connection.execute_batch(
         r#"
@@ -35,6 +48,11 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
         CREATE TABLE IF NOT EXISTS device_snmp_credentials (
             device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
             envelope TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS device_snmp_identity (
+            device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+            sys_object_id TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS interface_samples (
@@ -367,4 +385,32 @@ fn ensure_device_metrics_columns(connection: &Connection) -> Result<(), AppError
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn new_and_reopened_connections_use_the_same_sqlite_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("data.db");
+        let first = initialize_database(&path).unwrap();
+        let reopened = open_database(&path).unwrap();
+        let reader = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        configure_read_connection(&reader).unwrap();
+        for connection in [&first, &reopened, &reader] {
+            let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap();
+            assert_eq!(mode, "wal");
+            for (pragma, expected) in [
+                ("PRAGMA synchronous", 1),
+                ("PRAGMA temp_store", 2),
+                ("PRAGMA cache_size", -20000),
+                ("PRAGMA busy_timeout", 5000),
+            ] {
+                let value: i64 = connection.query_row(pragma, [], |row| row.get(0)).unwrap();
+                assert_eq!(value, expected, "{pragma}");
+            }
+        }
+    }
 }

@@ -749,12 +749,13 @@ var TracePulseDashboard = (() => {
       submit.disabled = true;
       error.textContent = "";
       try {
+        const displayName = element.querySelector("#device-alias").value.trim() || null;
         await post(`/api/device/${encodeURIComponent(device.ip)}/metadata`, {
-          display_name: element.querySelector("#device-alias").value || null,
+          display_name: displayName,
           tags
         });
         element.close();
-        saved();
+        saved({ ...device, display_name: displayName, tags });
       } catch (failure) {
         error.textContent = String(failure);
       } finally {
@@ -1448,9 +1449,11 @@ var TracePulseDashboard = (() => {
       if (!header) return;
       if (column === sortColumn) {
         header.className = sortAscending ? "sort-asc" : "sort-desc";
+        header.setAttribute("aria-sort", sortAscending ? "ascending" : "descending");
         if (icon) icon.textContent = sortAscending ? "\u25B4" : "\u25BE";
       } else {
         header.className = "";
+        header.removeAttribute("aria-sort");
         if (icon) icon.textContent = "";
       }
     });
