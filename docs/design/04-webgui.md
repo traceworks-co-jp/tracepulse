@@ -1,5 +1,9 @@
 # 04. WebGUI 詳細設計
 
+## 共通通知・重要ポートUI
+
+`/settings` は共通通知チャネル設定と全体/機器別静観を提供する。重要ポート指定はデバイス詳細のインターフェース表で日英のON/OFF操作を提供し、`PUT /api/devices/{id}/interfaces/{if_index}/alert` に保存する。保存失敗は画面に明示し、成功したように表示を変更しない。手動または自動指定されたadmin=up / oper=downだけを赤く強調し、管理shutdownや通常の未使用downとは区別する。Enterpriseの非Adminではトグルを無効化し、サーバー側も権限を再検証する。
+
 ## 目的
 
 WebGUI の画面構成、役割分担、主要操作を定義する。

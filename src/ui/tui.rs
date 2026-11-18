@@ -758,6 +758,14 @@ fn start_poll_task(
 
                 if let Ok((system, interfaces)) = engine.poll_device(&cfg) {
                     let _ = engine.repository.update_device_status(&cfg.ip, "online");
+                    if dev.status.eq_ignore_ascii_case("offline") {
+                        engine.publish_alert(AlertEvent::new(
+                            crate::alert::AlertKind::Custom("RESOLVED_DEVICE_OFFLINE".into()),
+                            crate::alert::AlertSeverity::Info,
+                            &cfg,
+                            "[RESOLVED] SNMP polling succeeded",
+                        ));
+                    }
                     if let Some(device_id) = dev.id {
                         let mut metric_events = engine.config.alert.system_alerts(
                             &cfg,

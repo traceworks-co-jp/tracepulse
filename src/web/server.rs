@@ -4,6 +4,7 @@ use crate::db::models::InterfacePortDelta;
 use crate::db::repository::{Repository, counter32_delta};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
+use crate::notifications::{NotificationRuntime, NotificationSettingsProvider};
 use crate::snmp::SnmpClient;
 use crate::snmp::topology::{self, NormalizedNeighbor, NormalizedTopologyProtocol};
 use std::collections::{BTreeMap, HashMap};
@@ -213,6 +214,13 @@ pub trait WebExtensionProvider: Send + Sync {
         _alerts: &AlertBroadcaster,
     ) {
     }
+
+    fn automatic_alert_ports(
+        &self,
+        _repository: &Repository,
+    ) -> Result<Option<Vec<(i64, i32)>>, String> {
+        Ok(None)
+    }
 }
 
 pub struct WebServer {
@@ -317,6 +325,29 @@ impl WebServer {
             .set_nonblocking(true)
             .map_err(|err| AppError::Io(err.to_string()))?;
 
+        let community_notifications = if self.web_extension.is_none() {
+            let database_path = self
+                .repository
+                .lock()
+                .map_err(|error| AppError::Validation(error.to_string()))?
+                .database_path()
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| {
+                    AppError::Validation("notifications require a persistent database".into())
+                })?;
+            Some(Arc::new(CommunityNotificationContext {
+                runtime: NotificationRuntime::start(
+                    self.config_path.clone(),
+                    database_path,
+                    self.alerts.clone(),
+                    shutdown.clone(),
+                )?,
+                authority: addr.clone(),
+            }))
+        } else {
+            None
+        };
+
         println!("Web dashboard started on http://{}/", addr);
         open_browser(&format!("http://{}/", addr));
 
@@ -360,6 +391,7 @@ impl WebServer {
                     let cfg_path = self.config_path.clone();
                     let limits = self.limits;
                     let web_extension = self.web_extension.clone();
+                    let community_notifications = community_notifications.clone();
                     std::thread::spawn(move || {
                         let _ = handle_connection(
                             stream,
@@ -369,6 +401,7 @@ impl WebServer {
                             cfg_path,
                             limits,
                             web_extension,
+                            community_notifications,
                         );
                     });
                 }
@@ -595,6 +628,150 @@ fn respond_extension_reply(
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
+struct CommunityNotificationContext {
+    runtime: Arc<NotificationRuntime>,
+    authority: String,
+}
+
+impl CommunityNotificationContext {
+    fn authorized(&self, method: &str, headers: &HashMap<String, String>) -> bool {
+        let Some(host) = headers.get("host") else {
+            return false;
+        };
+        let localhost = self
+            .authority
+            .strip_prefix("127.0.0.1:")
+            .map(|port| format!("localhost:{port}"));
+        if host != &self.authority && localhost.as_ref() != Some(host) {
+            return false;
+        }
+        matches!(method, "GET" | "HEAD")
+            || headers
+                .get("origin")
+                .is_some_and(|origin| origin == &format!("http://{host}"))
+    }
+}
+
+fn is_common_alert_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/notifications" | "/api/notifications/test" | "/api/maintenance"
+    ) || (path.starts_with("/api/devices/") && path.ends_with("/alert"))
+}
+
+fn common_notification_response(
+    runtime: &NotificationRuntime,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> Option<(&'static str, String)> {
+    let reply = |status, value: serde_json::Value| Some((status, value.to_string()));
+    let now = chrono::Utc::now().timestamp();
+    let result = match (method, path) {
+        ("GET", "/api/notifications") => {
+            let document = runtime.settings.load_json();
+            match serde_json::from_str::<serde_json::Value>(&document) {
+                Ok(value) if value.get("error").is_some() => Err(value["error"]
+                    .as_str()
+                    .unwrap_or("notification settings unavailable")
+                    .to_string()),
+                Ok(_) => Ok(document),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+        ("POST", "/api/notifications") => match runtime.settings.save_json(body) {
+            Ok(()) => Ok(serde_json::json!({"ok":true}).to_string()),
+            Err(error) => {
+                tracing::error!(%error, "Notification settings could not be saved");
+                return reply("400 Bad Request", serde_json::json!({"error":error}));
+            }
+        },
+        ("POST", "/api/notifications/test") => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestChannel {
+                channel: String,
+            }
+            let request = match serde_json::from_str::<TestChannel>(body) {
+                Ok(request) => request,
+                Err(error) => {
+                    return reply(
+                        "400 Bad Request",
+                        serde_json::json!({"error":error.to_string()}),
+                    );
+                }
+            };
+            runtime
+                .settings
+                .send_test(&request.channel)
+                .map(|message| serde_json::json!({"ok":true,"message":message}).to_string())
+        }
+        ("GET", "/api/maintenance") => runtime
+            .maintenance
+            .maintenance_status(now)
+            .and_then(|status| serde_json::to_string(&status).map_err(|error| error.to_string())),
+        ("POST", "/api/maintenance") => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Change {
+                device_id: Option<i64>,
+                enabled: bool,
+                duration: Option<i64>,
+                #[serde(default)]
+                reason: String,
+            }
+            let change = match serde_json::from_str::<Change>(body) {
+                Ok(change) => change,
+                Err(error) => {
+                    return reply(
+                        "400 Bad Request",
+                        serde_json::json!({"error":error.to_string()}),
+                    );
+                }
+            };
+            match runtime.maintenance.set_maintenance(
+                change.device_id,
+                change.enabled,
+                change.duration,
+                &change.reason,
+                "local",
+                now,
+            ) {
+                Ok(_) => runtime
+                    .maintenance
+                    .maintenance_status(now)
+                    .and_then(|status| {
+                        serde_json::to_string(&status).map_err(|error| error.to_string())
+                    }),
+                Err(error) if error == "device not found" => {
+                    return reply("404 Not Found", serde_json::json!({"error":error}));
+                }
+                Err(error) if error.starts_with("invalid maintenance") => {
+                    return reply("400 Bad Request", serde_json::json!({"error":error}));
+                }
+                Err(error) => Err(error),
+            }
+        }
+        (_, "/api/notifications" | "/api/notifications/test" | "/api/maintenance") => {
+            return reply(
+                "405 Method Not Allowed",
+                serde_json::json!({"error":"method not allowed"}),
+            );
+        }
+        _ => return None,
+    };
+    Some(match result {
+        Ok(body) => ("200 OK", body),
+        Err(error) => {
+            tracing::error!(path, %error, "Common notification request failed");
+            (
+                "503 Service Unavailable",
+                serde_json::json!({"error":error}).to_string(),
+            )
+        }
+    })
+}
+
 fn handle_connection(
     stream: TcpStream,
     repo: Arc<Mutex<Repository>>,
@@ -603,6 +780,7 @@ fn handle_connection(
     cfg_path: std::path::PathBuf,
     limits: WebLimits,
     web_extension: Option<Arc<dyn WebExtensionProvider>>,
+    community_notifications: Option<Arc<CommunityNotificationContext>>,
 ) -> Result<(), AppError> {
     let req = parse_request(&stream)?;
     let clean_path = req.path.split('?').next().unwrap_or(&req.path);
@@ -623,6 +801,29 @@ fn handle_connection(
             extension.authorize_request(&req.method, clean_path, &req.headers, &req.body)
     {
         return respond_extension(stream, response);
+    }
+
+    if web_extension.is_none() && is_common_alert_path(clean_path) {
+        let Some(context) = community_notifications.as_deref() else {
+            return respond_json(
+                stream,
+                "503 Service Unavailable",
+                serde_json::json!({"error":"notification service unavailable"}).to_string(),
+            );
+        };
+        if !context.authorized(&req.method, &req.headers) {
+            return respond_json(
+                stream,
+                "403 Forbidden",
+                serde_json::json!({"error":"invalid notification request origin or host"})
+                    .to_string(),
+            );
+        }
+        if let Some((status, body)) =
+            common_notification_response(&context.runtime, &req.method, clean_path, &req.body)
+        {
+            return respond_json(stream, status, body);
+        }
     }
 
     if req.method == "GET"
@@ -693,6 +894,12 @@ fn handle_connection(
     }
     if req.method == "GET" && clean_path == "/static/js/settings.js" {
         return respond_js(stream, SETTINGS_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/notifications.js" {
+        return respond_js(stream, NOTIFICATIONS_BUNDLE_JS);
+    }
+    if req.method == "GET" && clean_path == "/static/js/maintenance.js" {
+        return respond_js(stream, MAINTENANCE_BUNDLE_JS);
     }
     if req.method == "GET" && clean_path == "/static/js/diagnostics.js" {
         return respond_js(stream, DIAGNOSTICS_BUNDLE_JS);
@@ -790,6 +997,14 @@ fn handle_connection(
         )
     {
         let (status, body) = api_bulk_rename(&req.body, &repo, clean_path.ends_with("/preview"));
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+
+    if req.method == "PUT"
+        && clean_path.starts_with("/api/devices/")
+        && clean_path.ends_with("/alert")
+    {
+        let (status, body) = api_interface_alert(clean_path, &req.body, &repo);
         return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
     }
 
@@ -1564,6 +1779,63 @@ fn api_device_history(
     }
 }
 
+fn api_interface_alert(
+    path: &str,
+    body: &str,
+    repo: &Arc<Mutex<Repository>>,
+) -> (&'static str, String) {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Selection {
+        link_down_alert_enabled: bool,
+    }
+    let segments: Vec<_> = path.split('/').collect();
+    let identity = match segments.as_slice() {
+        ["", "api", "devices", device, "interfaces", index, "alert"] => {
+            device.parse::<i64>().ok().zip(index.parse::<i32>().ok())
+        }
+        _ => None,
+    };
+    let Some((device, index)) = identity.filter(|(device, index)| *device > 0 && *index > 0) else {
+        return (
+            "400 Bad Request",
+            serde_json::json!({"error":"invalid interface identity"}).to_string(),
+        );
+    };
+    let selection: Selection = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error":error.to_string()}).to_string(),
+            );
+        }
+    };
+    let result = repo
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|repo| {
+            repo.set_interface_alert(device, index, selection.link_down_alert_enabled)
+                .map_err(|error| error.to_string())?;
+            repo.interface_alert(device, index)
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(state) => ("200 OK", serde_json::json!(state).to_string()),
+        Err(error) if error.starts_with("validation error:") => (
+            "400 Bad Request",
+            serde_json::json!({"error":error}).to_string(),
+        ),
+        Err(error) => {
+            tracing::error!(%error,device_id=device,if_index=index,"Interface alert configuration failed");
+            (
+                "503 Service Unavailable",
+                serde_json::json!({"error":"interface alert storage unavailable"}).to_string(),
+            )
+        }
+    }
+}
+
 fn api_device_detail(
     ip: &str,
     repo: &Arc<Mutex<Repository>>,
@@ -1626,7 +1898,15 @@ fn api_device_detail(
 
     // 最新インターフェーススナップショット
     let latest_ifaces = r.get_latest_interfaces(device_id).unwrap_or_default();
-    let ifaces_json: Vec<String> = latest_ifaces.iter().map(|s| {
+    let port_alerts = match latest_ifaces
+        .iter()
+        .map(|s| r.interface_alert(device_id, s.if_index))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(states) => states,
+        Err(error) => return serde_json::json!({"error":error.to_string()}).to_string(),
+    };
+    let ifaces_json: Vec<String> = latest_ifaces.iter().zip(port_alerts).map(|(s,port_alert)| {
         let recent = r.get_recent_interface_samples(device_id, s.if_index, 3).unwrap_or_default();
         let prev = recent.get(1);
         let in_errors_delta = prev.map(|p| counter32_delta(p.in_errors, s.in_errors)).unwrap_or(0);
@@ -1649,7 +1929,7 @@ fn api_device_detail(
             late_collisions_delta,
         );
         format!(
-            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}","rx_power_dbm":{},"tx_power_dbm":{}}}"#,
+            r#"{{"if_index":{},"if_name":"{}","link_status":"{}","health_status":"{}","metrics":{{"in_errors":{},"in_errors_delta":{},"out_errors":{},"out_errors_delta":{},"in_discards":{},"in_discards_delta":{},"out_discards":{},"out_discards_delta":{},"late_collisions":{},"late_collisions_delta":{},"bandwidth_utilization":{:.2}}},"error_breakdown":{{"fcs_errors":{},"fcs_errors_delta":{},"alignment_errors":{},"alignment_errors_delta":{},"frame_too_longs":{},"frame_too_longs_delta":{},"internal_mac_receive_errors":{},"internal_mac_receive_errors_delta":{}}},"sampled_at":"{}","rx_power_dbm":{},"tx_power_dbm":{},"port_alert":{}}}"#,
             s.if_index, escape_json(&s.if_name), escape_json(&link_status), health_status,
             s.in_errors, in_errors_delta,
             s.out_errors, out_errors_delta,
@@ -1664,6 +1944,7 @@ fn api_device_detail(
             escape_json(&s.sampled_at),
             serde_json::json!(s.rx_optical_power_dbm),
             serde_json::json!(s.tx_power_dbm),
+            serde_json::json!(port_alert),
         )
     }).collect();
 
@@ -2125,7 +2406,9 @@ fn probe_snmp_config(
         repo.resolved_snmp_config(
             &ip,
             global,
-            device.as_ref().map_or("", |device| device.community.as_str()),
+            device
+                .as_ref()
+                .map_or("", |device| device.community.as_str()),
         )?
     } else {
         let mut credentials = crate::snmp::credentials::SnmpCredentials {
@@ -3501,6 +3784,9 @@ fn page_settings(
         if !show_core_settings {
             html.push_str(&extension.operator_settings_html());
         }
+    } else {
+        html.push_str(notification_settings_html());
+        html.push_str("<section class='settings-section' id='core-maintenance'></section>");
     }
     if show_core_settings {
         html.push_str(SETTINGS_ACTIONS_HTML);
@@ -3534,6 +3820,8 @@ fn page_settings(
     }
     if let Some(extension) = extension {
         html.push_str(&extension.settings_scripts());
+    } else {
+        html.push_str("<script src='/static/js/notifications.js'></script><script src='/static/js/maintenance.js'></script>");
     }
     html.push_str("</body></html>");
     html
@@ -3603,8 +3891,8 @@ fn page_device_detail(
         <th data-i18n='in_discards'>In Discards</th><th data-i18n='out_discards'>Out Discards</th>\
         <th data-i18n='late_collisions'>Late Collisions</th>\
         <th><span data-i18n='bandwidth_line1'>Bandwidth</span><br><span data-i18n='bandwidth_line2'>Utilization (%)</span></th>\
-        <th>Tx Power</th><th>Rx Power</th><th data-i18n='time'>Sampled At</th>\
-        </tr></thead><tbody id='if-tbody'><tr><td colspan=13>Loading...</td></tr></tbody></table></div>");
+        <th>Tx Power</th><th>Rx Power</th><th data-i18n='time'>Sampled At</th><th data-port-alert-heading>Important port alerts</th>\
+        </tr></thead><tbody id='if-tbody'><tr><td colspan=14>Loading...</td></tr></tbody></table></div><p id='port-alert-error' role='alert'></p>");
     html.push_str("</section>");
 
     // セクション: 破損パケット内訳（EtherLike-MIB Error Breakdown）
@@ -4619,7 +4907,12 @@ const DEVICE_DETAIL_CSS: &str = "<style>
 
 const DEVICE_DETAIL_BUNDLE_JS: &str = include_str!("../../frontend/dist/device-detail.js");
 const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js");
+pub const fn notification_settings_html() -> &'static str {
+    include_str!("../../frontend/fragments/notifications.html")
+}
 const SETTINGS_BUNDLE_JS: &str = include_str!("../../frontend/dist/settings.js");
+const NOTIFICATIONS_BUNDLE_JS: &str = include_str!("../../frontend/dist/notifications.js");
+const MAINTENANCE_BUNDLE_JS: &str = include_str!("../../frontend/dist/maintenance.js");
 const DIAGNOSTICS_BUNDLE_JS: &str = include_str!("../../frontend/dist/diagnostics.js");
 const SNMP_DEFINITIONS_BUNDLE_JS: &str = include_str!("../../frontend/dist/snmp-definitions.js");
 const DISCOVERY_BUNDLE_JS: &str = include_str!("../../frontend/dist/discovery.js");
@@ -5054,7 +5347,14 @@ fn run_polling_loop_with_observer(
         std::thread::sleep(Duration::from_secs(interval));
 
         let devices = match repo.lock() {
-            Ok(r) => match r.list_devices() {
+            Ok(r) => match (|| {
+                if let Some(observer) = observer.as_deref() {
+                    if let Some(ports) = observer.automatic_alert_ports(&r).map_err(AppError::Validation)? {
+                        r.sync_topology_alert_ports(&ports)?;
+                    }
+                }
+                r.list_devices()
+            })() {
                 Ok(devices) => devices.into_iter().filter_map(|device| {
                     match r.resolved_snmp_config(&device.ip, &snmp_overrides, &device.community) {
                         Ok(config) => Some((device, config)),
@@ -5139,6 +5439,7 @@ fn run_polling_loop_with_observer(
                         sys_object_id: None,
                         template_metrics: vec![],
                         samples: vec![],
+                        port_states: vec![],
                     };
 
                     if is_online {
@@ -5173,6 +5474,7 @@ fn run_polling_loop_with_observer(
                         for if_index in indexes.iter() {
                             match client.query_interface(&dev_config, *if_index, None) {
                                 Ok(iface) => {
+                                    result.port_states.push((iface.if_index,iface.if_name.clone(),iface.if_admin_status,iface.if_oper_status));
                                     result.samples.push(InterfaceSample {
                                         id: None,
                                         device_id,
@@ -5264,6 +5566,32 @@ fn run_polling_loop_with_observer(
                         "SNMP probe failed",
                     ));
                 }
+                if result.previous_status == "offline" && result.status == "online" {
+                    alerts.publish(crate::alert::AlertEvent::new(
+                        crate::alert::AlertKind::Custom("RESOLVED_DEVICE_OFFLINE".into()),
+                        crate::alert::AlertSeverity::Info,
+                        &dev_config,
+                        "[RESOLVED] SNMP polling succeeded",
+                    ));
+                }
+                for (index, name, admin, oper) in &result.port_states {
+                    match r.observe_port_link(
+                        &dev_config,
+                        *index,
+                        name,
+                        *admin,
+                        *oper,
+                        chrono::Utc::now().timestamp(),
+                    ) {
+                        Ok(Some(event)) => {
+                            alerts.publish(event);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::error!(device_id=result.device_id,if_index=index,%error,"Port link state could not be persisted")
+                        }
+                    }
+                }
 
                 let mut metric_events = Vec::new();
                 if let Some(oid) = &result.sys_object_id
@@ -5287,10 +5615,15 @@ fn run_polling_loop_with_observer(
                         .ok()
                         .flatten();
                     if let Some(prev) = previous.as_ref() {
-                        sample.bandwidth_utilization = calculate_duplex_bandwidth_utilization_from_deltas(
-                            prev.in_octets, sample.in_octets, prev.out_octets, sample.out_octets,
-                            interval, 1_000_000_000,
-                        );
+                        sample.bandwidth_utilization =
+                            calculate_duplex_bandwidth_utilization_from_deltas(
+                                prev.in_octets,
+                                sample.in_octets,
+                                prev.out_octets,
+                                sample.out_octets,
+                                interval,
+                                1_000_000_000,
+                            );
                     }
                     metric_events.extend(alert_config.interface_alerts(
                         &dev_config,
@@ -5399,6 +5732,7 @@ struct PollResult {
     metrics: Option<crate::db::models::DeviceMetrics>,
     template_metrics: Vec<crate::snmp::client::TemplateMetricReading>,
     samples: Vec<crate::db::models::InterfaceSample>,
+    port_states: Vec<(i32, String, Option<u32>, Option<u32>)>,
 }
 
 impl PollResult {
@@ -5415,6 +5749,7 @@ impl PollResult {
             metrics: None,
             template_metrics: vec![],
             samples: vec![],
+            port_states: vec![],
         }
     }
 }
@@ -5422,32 +5757,114 @@ impl PollResult {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn interface_alert_api_validates_identity_and_persists_selection() {
+        use super::*;
+        let directory = tempfile::tempdir().unwrap();
+        let repository =
+            Repository::new(initialize_database(&directory.path().join("data.db")).unwrap())
+                .unwrap();
+        let device = DeviceConfig::new("192.0.2.88", "fixture");
+        let id = repository.save_device_config(&device).unwrap();
+        repository
+            .observe_port_link(
+                &DeviceConfig {
+                    id: Some(id),
+                    ..device
+                },
+                7,
+                "Gi7",
+                Some(1),
+                Some(1),
+                100,
+            )
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repository));
+        let path = format!("/api/devices/{id}/interfaces/7/alert");
+        let (status, body) =
+            api_interface_alert(&path, r#"{"link_down_alert_enabled":true}"#, &repo);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body).unwrap()["link_down_alert_enabled"],
+            true
+        );
+        for (invalid, body) in [
+            (path.clone(), r#"{"link_down_alert_enabled":"true"}"#),
+            (
+                path.clone(),
+                r#"{"link_down_alert_enabled":true,"topology_link":true}"#,
+            ),
+            (
+                format!("/api/devices/{id}/interfaces/0/alert"),
+                r#"{"link_down_alert_enabled":true}"#,
+            ),
+            (
+                format!("/api/devices/{id}/interfaces/9999/alert"),
+                r#"{"link_down_alert_enabled":true}"#,
+            ),
+        ] {
+            assert_eq!(
+                api_interface_alert(&invalid, body, &repo).0,
+                "400 Bad Request"
+            );
+        }
+        assert!(
+            repo.lock()
+                .unwrap()
+                .interface_alert(id, 7)
+                .unwrap()
+                .link_down_alert_enabled
+        );
+    }
+
+    #[test]
     fn identity_probe_resolves_encrypted_credentials_defaults_and_explicit_community() {
         use super::*;
-        let repository = Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap()).unwrap();
-        let id = repository.save_device_config(&DeviceConfig::new("192.0.2.61", "legacy-secret")).unwrap();
-        repository.save_device_config(&DeviceConfig::new("192.0.2.62", "")).unwrap();
+        let repository =
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+                .unwrap();
+        let id = repository
+            .save_device_config(&DeviceConfig::new("192.0.2.61", "legacy-secret"))
+            .unwrap();
+        repository
+            .save_device_config(&DeviceConfig::new("192.0.2.62", ""))
+            .unwrap();
         let mut global = crate::config::SnmpConfig::default();
         global.default_community = "global-secret".into();
         let resolve = |body: &str| probe_snmp_config(body, &repository, &global).unwrap().1;
-        assert_eq!(resolve(r#"{"ip":"192.0.2.61"}"#).default_community, "legacy-secret");
+        assert_eq!(
+            resolve(r#"{"ip":"192.0.2.61"}"#).default_community,
+            "legacy-secret"
+        );
         for ip in ["192.0.2.62", "192.0.2.63"] {
-            assert_eq!(resolve(&format!(r#"{{"ip":"{ip}","community":""}}"#)).default_community, "global-secret");
+            assert_eq!(
+                resolve(&format!(r#"{{"ip":"{ip}","community":""}}"#)).default_community,
+                "global-secret"
+            );
         }
-        repository.set_device_snmp_credentials(&[id], crate::snmp::credentials::SnmpCredentials {
-            version: Some("3".into()),
-            v3_username: Some("monitor".into()),
-            v3_auth_password: Some("auth-secret".into()),
-            v3_priv_password: Some("privacy-secret".into()),
-            ..Default::default()
-        }).unwrap();
+        repository
+            .set_device_snmp_credentials(
+                &[id],
+                crate::snmp::credentials::SnmpCredentials {
+                    version: Some("3".into()),
+                    v3_username: Some("monitor".into()),
+                    v3_auth_password: Some("auth-secret".into()),
+                    v3_priv_password: Some("privacy-secret".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
         let resolved = resolve(r#"{"ip":"192.0.2.61"}"#);
         assert_eq!(resolved.credentials.version.as_deref(), Some("3"));
-        assert_eq!(resolved.credentials.v3_auth_password.as_deref(), Some("auth-secret"));
+        assert_eq!(
+            resolved.credentials.v3_auth_password.as_deref(),
+            Some("auth-secret")
+        );
         let explicit = resolve(r#"{"ip":"192.0.2.61","community":"probe-secret"}"#);
         assert_eq!(explicit.credentials.version.as_deref(), Some("2c"));
         assert_eq!(explicit.default_community, "probe-secret");
-        repository.save_device_sys_object_id("192.0.2.61", "1.3.6.1.4.1.9.1.2800").unwrap();
+        repository
+            .save_device_sys_object_id("192.0.2.61", "1.3.6.1.4.1.9.1.2800")
+            .unwrap();
         let repo = Arc::new(Mutex::new(repository));
         let cfg = Arc::new(Mutex::new(AppConfig::default()));
         let devices: serde_json::Value = serde_json::from_str(&api_devices(&repo, &cfg)).unwrap();
@@ -5876,6 +6293,7 @@ mod tests {
                 server.config_path.clone(),
                 server.limits,
                 Some(Arc::new(Deny)),
+                None,
             )
             .unwrap();
         });
@@ -6034,15 +6452,101 @@ mod tests {
     }
 
     #[test]
-    fn community_settings_exclude_notification_destinations() {
+    fn community_settings_include_shared_notifications_and_maintenance() {
         let config = Arc::new(Mutex::new(AppConfig::default()));
         let html = super::page_settings(&config, None, true);
-        assert!(!html.contains("destination-grid"));
-        assert!(!html.contains("notifications.js"));
+        assert!(html.contains("destination-grid"));
+        assert!(html.contains("notifications.js"));
+        assert!(html.contains("id='core-maintenance'"));
         assert!(html.contains("href='/settings/snmp'"));
         assert!(super::page_snmp_definitions(None).contains(
             "TraceWorks assumes no liability for unauthorized access to proprietary vendor metrics."
         ));
+    }
+
+    #[test]
+    fn shared_notification_api_persists_settings_and_requires_same_origin_mutations() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("core.db");
+        let connection = initialize_database(&database).unwrap();
+        connection
+            .execute(
+                "INSERT INTO devices(id,name,ip,community,device_type,status)
+            VALUES(1,'fixture','192.0.2.1','fixture','switch','online')",
+                [],
+            )
+            .unwrap();
+        let runtime = Arc::new(
+            crate::notifications::NotificationRuntime::open(
+                directory.path().join("config.toml"),
+                database,
+            )
+            .unwrap(),
+        );
+        let context = super::CommunityNotificationContext {
+            runtime: runtime.clone(),
+            authority: "127.0.0.1:18080".into(),
+        };
+        let mut headers = std::collections::HashMap::from([("host".into(), "127.0.0.1:18080".into())]);
+        assert!(context.authorized("GET", &headers));
+        assert!(!context.authorized("POST", &headers));
+        headers.insert("origin".into(), "http://untrusted.invalid".into());
+        assert!(!context.authorized("PUT", &headers));
+        headers.insert("origin".into(), "http://127.0.0.1:18080".into());
+        assert!(context.authorized("PUT", &headers));
+        headers.insert("host".into(), "untrusted.invalid".into());
+        assert!(!context.authorized("GET", &headers));
+        let call = |method: &str, path: &str, body: &str| {
+            super::common_notification_response(&runtime, method, path, body).unwrap()
+        };
+        assert_eq!(call("POST", "/api/notifications", "{}").0, "200 OK");
+        let (_, document) = call("GET", "/api/notifications", "");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&document).unwrap()["webhook"].is_object()
+        );
+        assert_eq!(call("POST", "/api/notifications", "{").0, "400 Bad Request");
+        for id in ["null", "1"] {
+            let request_body = format!(
+                r#"{{"device_id":{id},"enabled":true,"duration":3600,"reason":"fixture"}}"#
+            );
+            let (status, body) = call(
+                "POST",
+                "/api/maintenance",
+                &request_body,
+            );
+            assert_eq!(status, "200 OK", "{body}");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                if id == "null" {
+                    &value["global"]["enabled"]
+                } else {
+                    &value["devices"][id]["enabled"]
+                },
+                true
+            );
+        }
+        assert_eq!(
+            call(
+                "POST",
+                "/api/maintenance",
+                r#"{"enabled":true,"duration":60}"#
+            )
+            .0,
+            "400 Bad Request"
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/api/maintenance",
+                r#"{"device_id":999,"enabled":true}"#
+            )
+            .0,
+            "404 Not Found"
+        );
+        assert_eq!(
+            call("DELETE", "/api/maintenance", "").0,
+            "405 Method Not Allowed"
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY templates ./templates
 COPY frontend/assets ./frontend/assets
+COPY frontend/fragments ./frontend/fragments
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 RUN cargo build --release --locked && strip target/release/tracepulse
 

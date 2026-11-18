@@ -90,9 +90,21 @@ impl AppRunner {
     }
 
     pub fn run_cli(mut self) -> Result<(), AppError> {
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if self.notifications.is_none() {
+            let runtime = crate::notifications::NotificationRuntime::start(
+                crate::config_path(),
+                self.database_path.clone(),
+                self.alerts.clone(),
+                shutdown.clone(),
+            )?;
+            self.notifications = Some(runtime.settings.clone());
+        }
         let extension = self.tui_extension.take();
         let renderer = TuiRenderer::new(self).with_extension(extension);
-        renderer.run()
+        let result = renderer.run();
+        shutdown.store(true, std::sync::atomic::Ordering::Release);
+        result
     }
 
     pub fn run_web(self) -> Result<(), AppError> {

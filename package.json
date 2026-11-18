@@ -2,7 +2,9 @@
     "scripts": {
         "build": "npm run build:web",
         "build:icons": "node frontend/scripts/build-icons.mjs",
-        "build:web": "npm run build:web:device && npm run build:web:dashboard && npm run build:web:settings && npm run build:web:diagnostics && npm run build:web:snmp-definitions && npm run build:web:discovery && npm run build:web:topology && npm run build:web:theme && npm run build:web:i18n",
+        "build:web": "npm run build:web:device && npm run build:web:dashboard && npm run build:web:settings && npm run build:web:notifications && npm run build:web:maintenance && npm run build:web:diagnostics && npm run build:web:snmp-definitions && npm run build:web:discovery && npm run build:web:topology && npm run build:web:theme && npm run build:web:i18n",
+        "build:web:notifications": "esbuild frontend/src/pages/notifications.ts --bundle --format=iife --target=es2020 --outfile=frontend/dist/notifications.js",
+        "build:web:maintenance": "esbuild frontend/src/pages/maintenance.ts --bundle --format=iife --target=es2020 --outfile=frontend/dist/maintenance.js",
         "build:web:device": "esbuild frontend/src/pages/device-detail.ts --bundle --format=iife --global-name=TracePulseDeviceDetail --target=es2020 --outfile=frontend/dist/device-detail.js",
         "build:web:dashboard": "esbuild frontend/src/pages/dashboard.ts --bundle --format=iife --global-name=TracePulseDashboard --target=es2020 --outfile=frontend/dist/dashboard.js",
         "build:web:settings": "esbuild frontend/src/pages/settings.ts --bundle --format=iife --global-name=TracePulseSettings --target=es2020 --outfile=frontend/dist/settings.js",

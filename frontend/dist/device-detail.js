@@ -687,6 +687,24 @@ var TracePulseDeviceDetail = (() => {
     } catch {
     }
   }
+  var portAlertCopy = {
+    en: {
+      heading: "Important port alerts",
+      toggle: "Link-down notifications",
+      on: "ON",
+      off: "OFF",
+      auto: "Topology",
+      failed: "Could not save port alert settings"
+    },
+    ja: {
+      heading: "\u91CD\u8981\u30DD\u30FC\u30C8\u76E3\u8996",
+      toggle: "\u30EA\u30F3\u30AF\u30C0\u30A6\u30F3\u901A\u77E5",
+      on: "\u6709\u52B9",
+      off: "\u7121\u52B9",
+      auto: "\u5E79\u7DDA\u30EA\u30F3\u30AF",
+      failed: "\u91CD\u8981\u30DD\u30FC\u30C8\u76E3\u8996\u8A2D\u5B9A\u3092\u4FDD\u5B58\u3067\u304D\u307E\u305B\u3093\u3067\u3057\u305F"
+    }
+  };
   function t(key) {
     return typeof window.t === "function" ? window.t(key) : key;
   }
@@ -979,22 +997,53 @@ var TracePulseDeviceDetail = (() => {
     if (!tbody) return;
     closeErrorPopover();
     if (ifaces.length === 0) {
-      tbody.innerHTML = `<tr><td colspan=13 class=no-data>${t("no_interface_data")}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan=14 class=no-data>${t("no_interface_data")}</td></tr>`;
       return;
     }
     const spikeThreshold = window.TRACEPULSE_SPIKE_THRESHOLD || 10;
+    const copy2 = portAlertCopy[document.documentElement.lang === "ja" ? "ja" : "en"];
+    const heading = document.querySelector("[data-port-alert-heading]");
+    if (heading) heading.textContent = copy2.heading;
     tbody.innerHTML = ifaces.map((iface) => {
       const metrics = iface.metrics || {};
-      const linkClass = interfaceStatusClass(iface.link_status);
+      const port = iface.port_alert;
+      const importantDown = (port?.link_down_alert_enabled || port?.topology_link) && port.if_admin_status === 1 && port.if_oper_status === 2;
+      const linkClass = importantDown ? "status-critical" : interfaceStatusClass(iface.link_status);
       const errorDelta = Math.max(metrics.in_errors_delta || 0, metrics.out_errors_delta || 0);
       const discardDelta = Math.max(metrics.in_discards_delta || 0, metrics.out_discards_delta || 0);
-      const rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? " row-crit" : errorDelta > 0 || discardDelta > 0 ? " row-warn" : "";
+      const rowClass = importantDown || errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? " row-crit" : errorDelta > 0 || discardDelta > 0 ? " row-warn" : "";
       const predictiveStatus = iface.predictive_status;
       const predictiveBadge = predictiveStatus && (predictiveStatus.dom_warning || predictiveStatus.trend_warning) ? "<span class='pred-badge'>[PRED]</span>" : "";
-      return `<tr class='${rowClass.trim()}'><td>${iface.if_index}</td><td>${esc(iface.if_name)}${predictiveBadge}</td><td><span class=${linkClass}>${esc(iface.link_status)}</span></td><td>${diagnosticBadge(iface.health_status)}</td><td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics)}</td><td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics)}</td><td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td><td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td><td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td><td>${Number(metrics.bandwidth_utilization || 0).toFixed(1)}%</td><td>${opticalPowerHtml(iface.tx_power_dbm)}</td><td>${opticalPowerHtml(iface.rx_power_dbm === void 0 ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td><td>${fmtTime(iface.sampled_at)}</td></tr>`;
+      return `<tr class='${rowClass.trim()}'><td>${iface.if_index}</td><td>${esc(iface.if_name)}${predictiveBadge}</td><td><span class=${linkClass}>${esc(iface.link_status)}</span></td><td>${diagnosticBadge(iface.health_status)}</td><td>${formatCounterWithBreakdown(metrics.in_errors, metrics.in_errors_delta, iface.error_breakdown, metrics)}</td><td>${formatCounterWithBreakdown(metrics.out_errors, metrics.out_errors_delta, iface.error_breakdown, metrics)}</td><td>${formatCounter(metrics.in_discards, metrics.in_discards_delta)}</td><td>${formatCounter(metrics.out_discards, metrics.out_discards_delta)}</td><td>${formatLateCollisions(metrics.late_collisions, metrics.late_collisions_delta)}</td><td>${Number(metrics.bandwidth_utilization || 0).toFixed(1)}%</td><td>${opticalPowerHtml(iface.tx_power_dbm)}</td><td>${opticalPowerHtml(iface.rx_power_dbm === void 0 ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td><td>${fmtTime(iface.sampled_at)}</td><td><button type='button' class='btn port-alert-toggle' data-if-index='${iface.if_index}' aria-label='${esc(copy2.toggle + " " + (iface.if_name || iface.if_index))}' aria-pressed='${port?.link_down_alert_enabled === true}' ${document.body.dataset.role && document.body.dataset.role !== "admin" ? "disabled" : ""}>${port?.link_down_alert_enabled ? copy2.on : copy2.off}</button>${port?.topology_link ? `<span class='port-alert-auto'> ${copy2.auto}</span>` : ""}</td></tr>`;
     }).join("");
     bindErrorPopovers(tbody);
+    tbody.querySelectorAll(".port-alert-toggle").forEach((button) => {
+      button.onclick = async () => {
+        const iface = ifaces.find((item) => item.if_index === Number(button.dataset.ifIndex));
+        const deviceId = lastDeviceDetail?.id;
+        if (!iface || !deviceId) return;
+        button.disabled = true;
+        const error = document.getElementById("port-alert-error");
+        if (error) error.textContent = "";
+        try {
+          const response = await fetch(`/api/devices/${deviceId}/interfaces/${iface.if_index}/alert`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() },
+            body: JSON.stringify({ link_down_alert_enabled: !iface.port_alert?.link_down_alert_enabled })
+          });
+          const data = await response.json();
+          if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+          iface.port_alert = data;
+          renderInterfaces(ifaces);
+        } catch (reason) {
+          if (error) error.textContent = `${copy2.failed}: ${String(reason)}`;
+          button.disabled = false;
+        }
+      };
+    });
   }
+  window.addEventListener("tracepulse-role-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
+  window.addEventListener("tracepulse-language-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
   function opticalPowerHtml(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
     return `<span class="${value <= -20 ? "status-warning" : ""}">${value.toFixed(1)} dBm</span>`;

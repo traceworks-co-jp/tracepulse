@@ -379,7 +379,10 @@ impl SnmpClient {
         query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])
     }
 
-    pub fn probe_identity(&self, device: &DeviceConfig) -> Result<(String, Option<String>), AppError> {
+    pub fn probe_identity(
+        &self,
+        device: &DeviceConfig,
+    ) -> Result<(String, Option<String>), AppError> {
         let mut session = self.open_session(device)?;
         let oid = query_string(&mut session, &[1, 3, 6, 1, 2, 1, 1, 2, 0])?;
         if !crate::snmp::template::is_valid_oid(&oid) {
@@ -745,6 +748,14 @@ impl SnmpClient {
     ) -> Result<InterfaceMonitor, AppError> {
         let table = self.interface_table(&mut session)?;
         let oid_prefix = [1, 3, 6, 1, 2, 1, 2, 2, 1];
+        let admin_status = match query_u32(&mut session, &[1, 3, 6, 1, 2, 1, 2, 2, 1, 7, if_index])
+        {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(if_index,%error,"ifAdminStatus unavailable; port-down detection is unevaluated");
+                None
+            }
+        };
         let link_status = query_u32(
             &mut session,
             &oid_prefix
@@ -753,7 +764,10 @@ impl SnmpClient {
                 .chain([8, if_index])
                 .collect::<Vec<_>>(),
         )
-        .unwrap_or(1);
+        .unwrap_or_else(|error| {
+            tracing::warn!(if_index,%error,"ifOperStatus unavailable; port state is unknown");
+            0
+        });
         let in_errors = query_u64(
             &mut session,
             &oid_prefix
@@ -845,7 +859,7 @@ impl SnmpClient {
                 query_string(&mut session, &name_oid).unwrap_or_else(|_| format!("if-{}", if_index))
             }
         };
-        Ok(InterfaceMonitor::from_snmp_snapshot(
+        let mut interface = InterfaceMonitor::from_snmp_snapshot(
             if_index as i32,
             &resolved_name,
             link_status,
@@ -863,7 +877,9 @@ impl SnmpClient {
             None,
             in_octets,
             out_octets,
-        ))
+        );
+        interface.if_admin_status = admin_status;
+        Ok(interface)
     }
 
     pub(super) fn open_session(&self, device: &DeviceConfig) -> Result<SyncSession, AppError> {
@@ -2505,11 +2521,7 @@ mod template_collection_tests {
                         }
                     }
                     let bindings = tlv(0x30, &response_bindings);
-                    let response_status = if rejected_bulk {
-                        bulk_error_status
-                    } else {
-                        0
-                    };
+                    let response_status = if rejected_bulk { bulk_error_status } else { 0 };
                     let pdu = tlv(
                         0xa2,
                         &[request_id, &[2, 1, response_status, 2, 1, 0], &bindings].concat(),
@@ -3161,6 +3173,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
             };
             let (session, server) = mock_session(vec![
                 ("1.3.6.1.2.1.1.2.0", encoded_oid(sys_object_id)),
+                ("1.3.6.1.2.1.2.2.1.7.7", tlv(0x02, &[1])),
                 ("1.3.6.1.2.1.2.2.1.8.7", tlv(0x02, &[status])),
                 ("1.3.6.1.2.1.2.2.1.14.7", tlv(0x41, &[0])),
                 ("1.3.6.1.2.1.2.2.1.20.7", tlv(0x41, &[0])),
@@ -3182,6 +3195,8 @@ oid = "1.3.6.1.4.1.65000.4.0"
                 .unwrap();
             server.join().unwrap();
             assert_eq!(interface.if_name, "Ethernet7");
+            assert_eq!(interface.if_admin_status, Some(1));
+            assert_eq!(interface.if_oper_status, Some(u32::from(status)));
             assert_eq!(interface.link_status, expected_status);
             assert_eq!(interface.in_octets, 100);
             assert_eq!(interface.out_octets, 200);

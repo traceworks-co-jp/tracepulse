@@ -37,6 +37,20 @@ SQLite 上の永続化対象を定義し、画面表示と監視ロジックで�
 
 - CPU / memory 等の集約指標
 
+### interface_alert_settings
+
+- 既存テーブルを作り直さず追加するポート監視設定・最新状態。PKは `(device_id, if_index)`、機器削除でCASCADE。
+- `link_down_alert_enabled` / `topology_link` / `active` はNOT NULL、既定0のboolean整数。
+- `if_name` はNOT NULL、既定空文字。`if_admin_status` / `if_oper_status` / `observed_at` / `last_notified_at` はNULL許容。時刻はUnix秒。
+- 最新SNMP状態、異常状態、24時間抑制時刻と `alert_events` 保存を同じトランザクションで更新し、古い観測は無視する。既存の `interface_samples` の構造は変えない。
+
+### 通知・静観の永続状態
+
+- `data.db` の `notification_intake` は元イベントIDで重複排除し、`notification_outbox` はチャネル別の成功・失敗・retryを記録する。成功済みチャネルは再送しない。配信scanは1秒、leaseは2分、既定3回、backoffは300ms〜5秒。
+- `notification_port_journal` は検知状態・履歴と同じtransactionで追加する。起動時/5秒周期でOutboxへ取り込み、取り込み成功後だけ削除する。
+- `maintenance_state` / `maintenance_periods` / `maintenance_changes` は現在の静観・期間・変更履歴。`basic_maintenance_reconciled` は解除後の新鮮な観測に基づくリスクまとめの重複を防ぐ。
+- 完了/失敗確定Outboxとintakeは7日、未完了行は期限なし。解除まとめreceiptは1日。外部受付後・成功commit前の障害に限り外部で重複し得る。
+
 ### alert_events
 
 - アラート履歴

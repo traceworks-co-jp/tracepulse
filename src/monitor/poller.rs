@@ -70,7 +70,21 @@ impl PollingEngine {
 
         for if_index in interface_indexes {
             match client.query_interface(device, if_index, None) {
-                Ok(interface) => interfaces.push(interface.into_sample(0)),
+                Ok(interface) => {
+                    if device.id.is_some()
+                        && let Some(event) = self.repository.observe_port_link(
+                            device,
+                            interface.if_index,
+                            &interface.if_name,
+                            interface.if_admin_status,
+                            interface.if_oper_status,
+                            chrono::Utc::now().timestamp(),
+                        )?
+                    {
+                        self.alerts.publish(event);
+                    }
+                    interfaces.push(interface.into_sample(0));
+                }
                 Err(_) => continue,
             }
         }
@@ -78,7 +92,21 @@ impl PollingEngine {
         if interfaces.is_empty() {
             for if_index in 1..=3 {
                 match client.query_interface(device, if_index, None) {
-                    Ok(interface) => interfaces.push(interface.into_sample(0)),
+                    Ok(interface) => {
+                        if device.id.is_some()
+                            && let Some(event) = self.repository.observe_port_link(
+                                device,
+                                interface.if_index,
+                                &interface.if_name,
+                                interface.if_admin_status,
+                                interface.if_oper_status,
+                                chrono::Utc::now().timestamp(),
+                            )?
+                        {
+                            self.alerts.publish(event);
+                        }
+                        interfaces.push(interface.into_sample(0));
+                    }
                     Err(_) => continue,
                 }
             }

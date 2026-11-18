@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct Repository {
-    connection: rusqlite::Connection,
+    pub(super) connection: rusqlite::Connection,
     key: crate::crypto::MasterKey,
 }
 
@@ -30,6 +30,12 @@ fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
 }
 
 impl Repository {
+    pub fn database_path(&self) -> Option<&str> {
+        self.connection
+            .path()
+            .filter(|path| !path.is_empty() && *path != ":memory:")
+    }
+
     pub fn save_device_sys_object_id(&self, ip: &str, oid: &str) -> Result<(), AppError> {
         if !crate::snmp::template::is_valid_oid(oid) {
             return Err(AppError::Validation("invalid numeric sysObjectID".into()));

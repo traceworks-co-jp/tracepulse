@@ -195,6 +195,7 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
     ensure_device_metrics_nullable(&connection)?;
     ensure_device_metrics_columns(&connection)?;
     ensure_flow_record_columns(&connection)?;
+    super::port_alerts::migrate(&connection)?;
 
     Ok(connection)
 }

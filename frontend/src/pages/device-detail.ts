@@ -149,6 +149,7 @@ interface ErrorBreakdown {
 }
 
 interface DeviceInterface {
+    port_alert?: PortAlertState;
     rx_power_dbm?: number | null;
     tx_power_dbm?: number | null;
     if_index: number;
@@ -160,6 +161,21 @@ interface DeviceInterface {
     predictive_status?: PredictiveStatus;
     sampled_at?: string;
 }
+
+interface PortAlertState {
+    link_down_alert_enabled: boolean;
+    topology_link: boolean;
+    if_admin_status: number | null;
+    if_oper_status: number | null;
+    active: boolean;
+}
+
+const portAlertCopy = {
+    en: { heading: "Important port alerts", toggle: "Link-down notifications", on: "ON", off: "OFF",
+        auto: "Topology", failed: "Could not save port alert settings" },
+    ja: { heading: "重要ポート監視", toggle: "リンクダウン通知", on: "有効", off: "無効",
+        auto: "幹線リンク", failed: "重要ポート監視設定を保存できませんでした" },
+};
 
 interface DeviceDetail {
     id?: number | null;
@@ -641,17 +657,23 @@ export function renderInterfaces(ifaces: DeviceInterface[] = []): void {
     if (!tbody) return;
     closeErrorPopover();
     if (ifaces.length === 0) {
-        tbody.innerHTML = `<tr><td colspan=13 class=no-data>${t("no_interface_data")}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan=14 class=no-data>${t("no_interface_data")}</td></tr>`;
         return;
     }
     const spikeThreshold = window.TRACEPULSE_SPIKE_THRESHOLD || 10;
+    const copy = portAlertCopy[document.documentElement.lang === "ja" ? "ja" : "en"];
+    const heading = document.querySelector<HTMLElement>("[data-port-alert-heading]");
+    if (heading) heading.textContent = copy.heading;
     tbody.innerHTML = ifaces
         .map(iface => {
             const metrics = iface.metrics || {};
-            const linkClass = interfaceStatusClass(iface.link_status);
+            const port = iface.port_alert;
+            const importantDown = (port?.link_down_alert_enabled || port?.topology_link) &&
+                port.if_admin_status === 1 && port.if_oper_status === 2;
+            const linkClass = importantDown ? "status-critical" : interfaceStatusClass(iface.link_status);
             const errorDelta = Math.max(metrics.in_errors_delta || 0, metrics.out_errors_delta || 0);
             const discardDelta = Math.max(metrics.in_discards_delta || 0, metrics.out_discards_delta || 0);
-            const rowClass = errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? " row-crit" : errorDelta > 0 || discardDelta > 0 ? " row-warn" : "";
+            const rowClass = importantDown || errorDelta >= spikeThreshold || discardDelta >= spikeThreshold ? " row-crit" : errorDelta > 0 || discardDelta > 0 ? " row-warn" : "";
             const predictiveStatus = iface.predictive_status;
             const predictiveBadge = predictiveStatus && (predictiveStatus.dom_warning || predictiveStatus.trend_warning) ? "<span class='pred-badge'>[PRED]</span>" : "";
             return `<tr class='${rowClass.trim()}'>` +
@@ -668,11 +690,38 @@ export function renderInterfaces(ifaces: DeviceInterface[] = []): void {
                 `<td>${opticalPowerHtml(iface.tx_power_dbm)}</td>` +
                 `<td>${opticalPowerHtml(iface.rx_power_dbm === undefined ? predictiveStatus?.rx_optical_power_dbm : iface.rx_power_dbm)}</td>` +
                 `<td>${fmtTime(iface.sampled_at)}</td>` +
+                `<td><button type='button' class='btn port-alert-toggle' data-if-index='${iface.if_index}' aria-label='${escapeHtml(copy.toggle + " " + (iface.if_name || iface.if_index))}' aria-pressed='${port?.link_down_alert_enabled === true}' ${document.body.dataset.role && document.body.dataset.role !== "admin" ? "disabled" : ""}>${port?.link_down_alert_enabled ? copy.on : copy.off}</button>${port?.topology_link ? `<span class='port-alert-auto'> ${copy.auto}</span>` : ""}</td>` +
                 "</tr>";
         })
         .join("");
     bindErrorPopovers(tbody);
+    tbody.querySelectorAll<HTMLButtonElement>(".port-alert-toggle").forEach(button => {
+        button.onclick = async () => {
+            const iface = ifaces.find(item => item.if_index === Number(button.dataset.ifIndex));
+            const deviceId = lastDeviceDetail?.id;
+            if (!iface || !deviceId) return;
+            button.disabled = true;
+            const error = document.getElementById("port-alert-error");
+            if (error) error.textContent = "";
+            try {
+                const response = await fetch(`/api/devices/${deviceId}/interfaces/${iface.if_index}/alert`, {
+                    method: "PUT", headers: { "Content-Type": "application/json", ...window.tracepulseRequestHeaders?.() },
+                    body: JSON.stringify({ link_down_alert_enabled: !iface.port_alert?.link_down_alert_enabled }),
+                });
+                const data = await response.json() as PortAlertState & { error?: string };
+                if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+                iface.port_alert = data;
+                renderInterfaces(ifaces);
+            } catch (reason) {
+                if (error) error.textContent = `${copy.failed}: ${String(reason)}`;
+                button.disabled = false;
+            }
+        };
+    });
 }
+
+window.addEventListener("tracepulse-role-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
+window.addEventListener("tracepulse-language-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
 
 function opticalPowerHtml(value?: number | null): string {
     if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
