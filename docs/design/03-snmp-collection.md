@@ -321,6 +321,11 @@ model/firmware validation is still required.
 上限到達や途中の通信失敗は完全結果ではなくpartialとして返る。明示的な未対応応答のみunsupportedとする。
 要求範囲外の OID は正常終了として判定し、範囲内の同一・逆行 OID は取得失敗（既取得行があれば partial）とする。
 
+SNMPテンプレートの単体テストでは、`127.0.0.1:0` に先にbindしてからモックを起動し、
+テスト終了時に受信スレッドをjoinする。単体テストビルドではループバックの非標準ポートを
+実機向けのIP単位の送信間隔制限から除外し、別々のモックが互いの待ち時間に影響しないようにする。
+通常ビルドの送信間隔制限はポートにかかわらず適用する。
+
 共有 `snmp::topology` 正規化器はLLDPのリモート行を `[timeMark, localPortNum, remIndex]` で結合し、
 管理アドレスを同じ先頭3要素で結合する。LLDPのlocalPortNumはIF-MIBのifIndexと同一視せず、
 LLDP local port ID/subtype/descriptionとIF-MIBの名前・説明・必要時MACの一意な一致で解決する。

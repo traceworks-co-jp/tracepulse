@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-const DEFAULT_SNMP_PORT: u16 = 161;
+pub(super) const DEFAULT_SNMP_PORT: u16 = 161;
 
 /// `walk_oid` の既定取得上限。
 pub const DEFAULT_WALK_MAX_VARBINDS: usize = 1024;
@@ -2413,12 +2413,35 @@ mod template_collection_tests {
     use std::net::UdpSocket;
     use std::sync::atomic::Ordering;
 
+    const MOCK_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+    struct MockWorker(Option<std::thread::JoinHandle<()>>);
+
+    impl MockWorker {
+        fn join(mut self) -> std::thread::Result<()> {
+            self.0.take().unwrap().join()
+        }
+    }
+
+    impl Drop for MockWorker {
+        fn drop(&mut self) {
+            if let Some(worker) = self.0.take() {
+                let result = worker.join();
+                if let Err(panic) = result
+                    && !std::thread::panicking()
+                {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
+    }
+
     struct TemplateAgent {
         port: u16,
         session: SyncSession,
         requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<u32>>>>,
         stop: std::sync::Arc<AtomicBool>,
-        server: Option<std::thread::JoinHandle<()>>,
+        _server: MockWorker,
     }
 
     impl TemplateAgent {
@@ -2436,6 +2459,8 @@ mod template_collection_tests {
                 .set_read_timeout(Some(Duration::from_millis(25)))
                 .unwrap();
             let address = socket.local_addr().unwrap();
+            let session =
+                SyncSession::new(address, b"public", Some(MOCK_REQUEST_TIMEOUT), 1).unwrap();
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let server_stop = stop.clone();
@@ -2533,16 +2558,10 @@ mod template_collection_tests {
             });
             Self {
                 port: address.port(),
-                session: SyncSession::new(
-                    &address.to_string(),
-                    b"public",
-                    Some(Duration::from_secs(1)),
-                    1,
-                )
-                .unwrap(),
+                session,
                 requests,
                 stop,
-                server: Some(server),
+                _server: MockWorker(Some(server)),
             }
         }
     }
@@ -2550,7 +2569,6 @@ mod template_collection_tests {
     impl Drop for TemplateAgent {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
-            self.server.take().unwrap().join().unwrap();
         }
     }
 
@@ -2616,7 +2634,11 @@ mod template_collection_tests {
             &AtomicBool::new(false),
         );
 
-        assert_eq!(result.status, crate::snmp::ReliableWalkStatus::Complete);
+        assert_eq!(
+            result.status,
+            crate::snmp::ReliableWalkStatus::Complete,
+            "{result:?}"
+        );
         assert_eq!(result.count, 2);
         assert_eq!(agent.requests.lock().unwrap().len(), 1);
     }
@@ -2643,7 +2665,11 @@ mod template_collection_tests {
             &AtomicBool::new(false),
         );
 
-        assert_eq!(result.status, crate::snmp::ReliableWalkStatus::Complete);
+        assert_eq!(
+            result.status,
+            crate::snmp::ReliableWalkStatus::Complete,
+            "{result:?}"
+        );
         assert_eq!(result.count, 2);
         assert_eq!(agent.requests.lock().unwrap().len(), 4);
     }
@@ -2850,16 +2876,14 @@ oid = "1.3.6.1.4.1.65000.4.0"
         tlv(0x06, &result)
     }
 
-    fn mock_session(
-        replies: Vec<(&'static str, Vec<u8>)>,
-    ) -> (SyncSession, std::thread::JoinHandle<()>) {
+    fn mock_session(replies: Vec<(&'static str, Vec<u8>)>) -> (SyncSession, MockWorker) {
         mock_session_with_status(replies, 0)
     }
 
     fn mock_session_with_status(
         replies: Vec<(&'static str, Vec<u8>)>,
         error_status: u8,
-    ) -> (SyncSession, std::thread::JoinHandle<()>) {
+    ) -> (SyncSession, MockWorker) {
         mock_session_with_returned_oid(replies, error_status, None)
     }
 
@@ -2867,16 +2891,19 @@ oid = "1.3.6.1.4.1.65000.4.0"
         replies: Vec<(&'static str, Vec<u8>)>,
         error_status: u8,
         returned_oid: Option<&'static str>,
-    ) -> (SyncSession, std::thread::JoinHandle<()>) {
+    ) -> (SyncSession, MockWorker) {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
-            .set_read_timeout(Some(Duration::from_secs(3)))
+            .set_read_timeout(Some(MOCK_REQUEST_TIMEOUT))
             .unwrap();
         let address = socket.local_addr().unwrap();
+        let session = SyncSession::new(address, b"public", Some(MOCK_REQUEST_TIMEOUT), 1).unwrap();
         let server = std::thread::spawn(move || {
             for (expected_oid, value) in replies {
                 let mut buffer = [0u8; 1024];
-                let (size, peer) = socket.recv_from(&mut buffer).unwrap();
+                let (size, peer) = socket
+                    .recv_from(&mut buffer)
+                    .unwrap_or_else(|error| panic!("mock receive waiting for {expected_oid}: {error}"));
                 let (message, _) = take_tlv(&buffer[..size]);
                 let (version, rest) = take_tlv(&message[2..]);
                 let (community, rest) = take_tlv(rest);
@@ -2910,14 +2937,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
                 socket.send_to(&response, peer).unwrap();
             }
         });
-        let session = SyncSession::new(
-            address.to_string().as_str(),
-            b"public",
-            Some(Duration::from_secs(2)),
-            1,
-        )
-        .unwrap();
-        (session, server)
+        (session, MockWorker(Some(server)))
     }
 
     #[test]
@@ -3378,18 +3398,18 @@ oid = "1.3.6.1.4.1.65000.4.0"
                 ("1.3.6.1.4.1.9.9.48.1.1.1.5.1", unsigned(0x46, used)),
                 ("1.3.6.1.4.1.9.9.48.1.1.1.6.1", unsigned(0x46, free)),
             ]);
+            let (percent, probes) = client
+                .diagnose_memory_candidates(&mut agent.session, sys_oid)
+                .unwrap();
             assert_eq!(
-                client
-                    .query_memory_usage(&mut agent.session, sys_oid)
-                    .unwrap(),
-                Some(if used > 100 { 50 } else { used as u32 })
+                percent,
+                Some(if used > 100 { 50 } else { used as u32 }),
+                "used={used}: {probes:?}"
             );
-            assert_eq!(
-                client
-                    .query_memory_used_bytes(&mut agent.session, sys_oid)
-                    .unwrap(),
-                Some(used)
-            );
+            let (bytes, probes) = client
+                .diagnose_memory_bytes_candidates(&mut agent.session, sys_oid, None)
+                .unwrap();
+            assert_eq!(bytes, Some(used), "{probes:?}");
         }
     }
 

@@ -41,20 +41,48 @@ pub struct Response<'a> {
     pub varbinds: std::vec::IntoIter<(Name<'a>, Value<'a>)>,
 }
 
-pub struct SyncSession(snmp2::SyncSession, Arc<Mutex<Option<Instant>>>);
-
-fn target_gate(target: IpAddr) -> Arc<Mutex<Option<Instant>>> {
-    static GATES: OnceLock<Mutex<std::collections::HashMap<IpAddr, Arc<Mutex<Option<Instant>>>>>> = OnceLock::new();
-    GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-        .lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entry(target)
-        .or_insert_with(|| Arc::new(Mutex::new(None))).clone()
+struct RequestGate {
+    interval: Duration,
+    last_request: Mutex<Option<Instant>>,
 }
 
-fn pace(gate: &Mutex<Option<Instant>>) -> std::sync::MutexGuard<'_, Option<Instant>> {
-    let mut previous = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+impl RequestGate {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_request: Mutex::new(None),
+        }
+    }
+}
+
+pub struct SyncSession(snmp2::SyncSession, Arc<RequestGate>);
+
+fn target_gate(target: SocketAddr) -> Arc<RequestGate> {
+    // Unit-test agents on ephemeral loopback ports are independent simulated devices.
+    #[cfg(test)]
+    if target.ip().is_loopback() && target.port() != super::client::DEFAULT_SNMP_PORT {
+        return Arc::new(RequestGate::new(Duration::ZERO));
+    }
+
+    static GATES: OnceLock<Mutex<std::collections::HashMap<IpAddr, Arc<RequestGate>>>> = OnceLock::new();
+    GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(target.ip())
+        .or_insert_with(|| Arc::new(RequestGate::new(Duration::from_millis(251))))
+        .clone()
+}
+
+fn pace(gate: &RequestGate) -> std::sync::MutexGuard<'_, Option<Instant>> {
+    let mut previous = gate
+        .last_request
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(sent) = *previous {
-        let remaining = Duration::from_millis(251).saturating_sub(sent.elapsed());
-        if !remaining.is_zero() { std::thread::sleep(remaining); }
+        let remaining = gate.interval.saturating_sub(sent.elapsed());
+        if !remaining.is_zero() {
+            std::thread::sleep(remaining);
+        }
     }
     *previous = Some(Instant::now());
     previous
@@ -68,7 +96,7 @@ impl SyncSession {
         request: i32,
     ) -> std::io::Result<Self> {
         let destination: SocketAddr = destination.to_string().parse().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "SNMP requires a numeric socket address"))?;
-        let gate = target_gate(destination.ip());
+        let gate = target_gate(destination);
         snmp2::SyncSession::new_v2c(destination, community, timeout, request).map(|session| Self(session, gate))
     }
 
@@ -79,7 +107,7 @@ impl SyncSession {
     ) -> Result<Self, AppError> {
         credentials.validate_resolved()?;
         let destination: SocketAddr = destination.to_string().parse().map_err(|_| AppError::Validation("SNMP requires a numeric socket address".into()))?;
-        let gate = target_gate(destination.ip());
+        let gate = target_gate(destination);
         let protocol = match credentials.v3_auth_protocol.as_deref() {
             Some("sha1") => AuthProtocol::Sha1,
             Some("sha512") => AuthProtocol::Sha512,
