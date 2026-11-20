@@ -289,7 +289,12 @@ fn is_basic(kind: &AlertKind) -> bool {
     match kind {
         AlertKind::Custom(name) => matches!(
             name.trim_start_matches("RESOLVED_"),
-            "DEVICE_OFFLINE" | "PORT_LINK_DOWN" | "CPU_HIGH" | "MEMORY_HIGH" | "BANDWIDTH_HIGH" | "ERROR_RATE_HIGH"
+            "DEVICE_OFFLINE"
+                | "PORT_LINK_DOWN"
+                | "CPU_HIGH"
+                | "MEMORY_HIGH"
+                | "BANDWIDTH_HIGH"
+                | "ERROR_RATE_HIGH"
         ),
         _ => true,
     }
@@ -304,9 +309,13 @@ mod tests {
 
     #[test]
     fn basic_dispatch_includes_online_recovery_but_not_enterprise_findings() {
-        assert!(is_basic(&AlertKind::Custom("RESOLVED_DEVICE_OFFLINE".into())));
+        assert!(is_basic(&AlertKind::Custom(
+            "RESOLVED_DEVICE_OFFLINE".into()
+        )));
         assert!(!is_basic(&AlertKind::Custom("IF_ERROR_RATE_SPIKE".into())));
-        assert!(!is_basic(&AlertKind::Custom("RESOLVED_IF_ERROR_RATE_SPIKE".into())));
+        assert!(!is_basic(&AlertKind::Custom(
+            "RESOLVED_IF_ERROR_RATE_SPIKE".into()
+        )));
     }
 
     #[test]

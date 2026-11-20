@@ -793,10 +793,15 @@ fn start_poll_task(
                                 .ok()
                                 .flatten();
                             if let Some(prev) = previous.as_ref() {
-                                sample.bandwidth_utilization = calculate_duplex_bandwidth_utilization_from_deltas(
-                                    prev.in_octets, sample.in_octets, prev.out_octets, sample.out_octets,
-                                    engine.config.polling.interval_seconds, 1_000_000_000,
-                                );
+                                sample.bandwidth_utilization =
+                                    calculate_duplex_bandwidth_utilization_from_deltas(
+                                        prev.in_octets,
+                                        sample.in_octets,
+                                        prev.out_octets,
+                                        sample.out_octets,
+                                        engine.config.polling.interval_seconds,
+                                        1_000_000_000,
+                                    );
                             }
                             metric_events.extend(engine.config.alert.interface_alerts(
                                 &cfg,
@@ -900,14 +905,18 @@ impl TuiRenderer {
         terminal: &mut Terminal<B>,
     ) -> Result<(), AppError> {
         if self.runner.flow_repository().is_none() {
-            let repository = Repository::new(crate::db::sqlite::open_database(self.runner.database_path())?)?;
+            let repository = Repository::new(crate::db::sqlite::open_database(
+                self.runner.database_path(),
+            )?)?;
             let repository = Arc::new(Mutex::new(repository));
             crate::flow::FlowCollector::start(
                 Arc::clone(&repository),
                 crate::flow::FlowCollectorConfig::from_app_config(&self.runner.config),
             );
         }
-        let repository = Repository::new(crate::db::sqlite::open_database(self.runner.database_path())?)?;
+        let repository = Repository::new(crate::db::sqlite::open_database(
+            self.runner.database_path(),
+        )?)?;
 
         // TUI モードでも定期監視とアラート配信を行う（Web モードと同じポーリングループ）。
         {

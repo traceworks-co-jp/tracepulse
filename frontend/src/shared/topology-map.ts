@@ -66,7 +66,7 @@ function svgElement<Tag extends keyof SVGElementTagNameMap>(tag: Tag): SVGElemen
     return document.createElementNS("http://www.w3.org/2000/svg", tag);
 }
 function widthFor(node: TopologyMapNode): number {
-    return Math.min(280, Math.max(128, (node.label || node.ip || node.id).length * 7.4 + 28, (node.stateLabel?.length || 0) * 11 + 28));
+    return Math.min(280, Math.max(128, (node.label || node.id).length * 7.4 + 28, (node.ip?.length || 0) * 8 + 28, (node.stateLabel?.length || 0) * 11 + 28));
 }
 
 export class TopologyMap<NodeType extends TopologyMapNode = TopologyMapNode, EdgeType extends TopologyMapEdge = TopologyMapEdge> {

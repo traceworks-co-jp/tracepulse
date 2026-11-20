@@ -3,7 +3,11 @@ use snmp2::{
     Oid, Value,
     v3::{Auth, AuthProtocol, Cipher, Security},
 };
-use std::{net::{IpAddr, SocketAddr}, time::{Duration, Instant}, sync::{Arc, Mutex, OnceLock}};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 pub trait ReadName {
     fn read_name<'a>(&self, buffer: &'a mut [u32]) -> Result<&'a [u32], snmp2::Error>;
@@ -64,8 +68,10 @@ fn target_gate(target: SocketAddr) -> Arc<RequestGate> {
         return Arc::new(RequestGate::new(Duration::ZERO));
     }
 
-    static GATES: OnceLock<Mutex<std::collections::HashMap<IpAddr, Arc<RequestGate>>>> = OnceLock::new();
-    GATES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+    static GATES: OnceLock<Mutex<std::collections::HashMap<IpAddr, Arc<RequestGate>>>> =
+        OnceLock::new();
+    GATES
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entry(target.ip())
@@ -95,9 +101,15 @@ impl SyncSession {
         timeout: Option<Duration>,
         request: i32,
     ) -> std::io::Result<Self> {
-        let destination: SocketAddr = destination.to_string().parse().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "SNMP requires a numeric socket address"))?;
+        let destination: SocketAddr = destination.to_string().parse().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "SNMP requires a numeric socket address",
+            )
+        })?;
         let gate = target_gate(destination);
-        snmp2::SyncSession::new_v2c(destination, community, timeout, request).map(|session| Self(session, gate))
+        snmp2::SyncSession::new_v2c(destination, community, timeout, request)
+            .map(|session| Self(session, gate))
     }
 
     pub fn authenticated(
@@ -106,7 +118,10 @@ impl SyncSession {
         timeout: Duration,
     ) -> Result<Self, AppError> {
         credentials.validate_resolved()?;
-        let destination: SocketAddr = destination.to_string().parse().map_err(|_| AppError::Validation("SNMP requires a numeric socket address".into()))?;
+        let destination: SocketAddr = destination
+            .to_string()
+            .parse()
+            .map_err(|_| AppError::Validation("SNMP requires a numeric socket address".into()))?;
         let gate = target_gate(destination);
         let protocol = match credentials.v3_auth_protocol.as_deref() {
             Some("sha1") => AuthProtocol::Sha1,

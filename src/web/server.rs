@@ -6487,7 +6487,8 @@ mod tests {
             runtime: runtime.clone(),
             authority: "127.0.0.1:18080".into(),
         };
-        let mut headers = std::collections::HashMap::from([("host".into(), "127.0.0.1:18080".into())]);
+        let mut headers =
+            std::collections::HashMap::from([("host".into(), "127.0.0.1:18080".into())]);
         assert!(context.authorized("GET", &headers));
         assert!(!context.authorized("POST", &headers));
         headers.insert("origin".into(), "http://untrusted.invalid".into());
@@ -6509,11 +6510,7 @@ mod tests {
             let request_body = format!(
                 r#"{{"device_id":{id},"enabled":true,"duration":3600,"reason":"fixture"}}"#
             );
-            let (status, body) = call(
-                "POST",
-                "/api/maintenance",
-                &request_body,
-            );
+            let (status, body) = call("POST", "/api/maintenance", &request_body);
             assert_eq!(status, "200 OK", "{body}");
             let value: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert_eq!(

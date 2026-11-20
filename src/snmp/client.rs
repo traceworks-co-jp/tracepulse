@@ -2893,17 +2893,15 @@ oid = "1.3.6.1.4.1.65000.4.0"
         returned_oid: Option<&'static str>,
     ) -> (SyncSession, MockWorker) {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket
-            .set_read_timeout(Some(MOCK_REQUEST_TIMEOUT))
-            .unwrap();
+        socket.set_read_timeout(Some(MOCK_REQUEST_TIMEOUT)).unwrap();
         let address = socket.local_addr().unwrap();
         let session = SyncSession::new(address, b"public", Some(MOCK_REQUEST_TIMEOUT), 1).unwrap();
         let server = std::thread::spawn(move || {
             for (expected_oid, value) in replies {
                 let mut buffer = [0u8; 1024];
-                let (size, peer) = socket
-                    .recv_from(&mut buffer)
-                    .unwrap_or_else(|error| panic!("mock receive waiting for {expected_oid}: {error}"));
+                let (size, peer) = socket.recv_from(&mut buffer).unwrap_or_else(|error| {
+                    panic!("mock receive waiting for {expected_oid}: {error}")
+                });
                 let (message, _) = take_tlv(&buffer[..size]);
                 let (version, rest) = take_tlv(&message[2..]);
                 let (community, rest) = take_tlv(rest);

@@ -20,19 +20,34 @@ fn collected_sysobjectid_survives_reopen_and_updates_without_affecting_other_dev
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("devices.db");
     let repo = Repository::new(initialize_database(&path).unwrap()).unwrap();
-    let id = repo.save_device_config(&DeviceConfig::new("192.0.2.1", "")).unwrap();
-    repo.save_device_config(&DeviceConfig::new("192.0.2.2", "")).unwrap();
-    repo.save_device_sys_object_id("192.0.2.1", "1.3.6.1.4.1.9.1.2800").unwrap();
-    repo.save_device_sys_object_id("192.0.2.1", "1.3.6.1.4.1.9.1.2801").unwrap();
-    assert!(repo.save_device_sys_object_id("192.0.2.1", "invalid").is_err());
-    repo.save_device_sys_object_id("192.0.2.99", "1.3.6.1.4.1.9").unwrap();
+    let id = repo
+        .save_device_config(&DeviceConfig::new("192.0.2.1", ""))
+        .unwrap();
+    repo.save_device_config(&DeviceConfig::new("192.0.2.2", ""))
+        .unwrap();
+    repo.save_device_sys_object_id("192.0.2.1", "1.3.6.1.4.1.9.1.2800")
+        .unwrap();
+    repo.save_device_sys_object_id("192.0.2.1", "1.3.6.1.4.1.9.1.2801")
+        .unwrap();
+    assert!(
+        repo.save_device_sys_object_id("192.0.2.1", "invalid")
+            .is_err()
+    );
+    repo.save_device_sys_object_id("192.0.2.99", "1.3.6.1.4.1.9")
+        .unwrap();
     drop(repo);
     let repo = Repository::new(initialize_database(&path).unwrap()).unwrap();
     let devices = repo.list_devices().unwrap();
     assert_eq!(devices.len(), 2);
     let data = repo.dashboard_device_data(&devices, 10).unwrap();
-    assert_eq!(data[&id].sys_object_id.as_deref(), Some("1.3.6.1.4.1.9.1.2801"));
-    let other = devices.iter().find(|device| device.ip == "192.0.2.2").unwrap();
+    assert_eq!(
+        data[&id].sys_object_id.as_deref(),
+        Some("1.3.6.1.4.1.9.1.2801")
+    );
+    let other = devices
+        .iter()
+        .find(|device| device.ip == "192.0.2.2")
+        .unwrap();
     assert!(data[&other.id.unwrap()].sys_object_id.is_none());
 }
 

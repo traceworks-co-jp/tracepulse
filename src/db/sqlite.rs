@@ -398,10 +398,13 @@ mod connection_tests {
         let path = directory.path().join("data.db");
         let first = initialize_database(&path).unwrap();
         let reopened = open_database(&path).unwrap();
-        let reader = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let reader =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         configure_read_connection(&reader).unwrap();
         for connection in [&first, &reopened, &reader] {
-            let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0)).unwrap();
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
             assert_eq!(mode, "wal");
             for (pragma, expected) in [
                 ("PRAGMA synchronous", 1),
