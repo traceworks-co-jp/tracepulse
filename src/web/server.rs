@@ -395,13 +395,15 @@ impl WebServer {
                     std::thread::spawn(move || {
                         let _ = handle_connection(
                             stream,
-                            repo,
-                            jobs,
-                            cfg,
-                            cfg_path,
-                            limits,
-                            web_extension,
-                            community_notifications,
+                            ConnectionContext {
+                                repo,
+                                jobs,
+                                cfg,
+                                cfg_path,
+                                limits,
+                                web_extension,
+                                community_notifications,
+                            },
                         );
                     });
                 }
@@ -772,8 +774,7 @@ fn common_notification_response(
     })
 }
 
-fn handle_connection(
-    stream: TcpStream,
+struct ConnectionContext {
     repo: Arc<Mutex<Repository>>,
     jobs: JobStore,
     cfg: Arc<Mutex<AppConfig>>,
@@ -781,7 +782,18 @@ fn handle_connection(
     limits: WebLimits,
     web_extension: Option<Arc<dyn WebExtensionProvider>>,
     community_notifications: Option<Arc<CommunityNotificationContext>>,
-) -> Result<(), AppError> {
+}
+
+fn handle_connection(stream: TcpStream, context: ConnectionContext) -> Result<(), AppError> {
+    let ConnectionContext {
+        repo,
+        jobs,
+        cfg,
+        cfg_path,
+        limits,
+        web_extension,
+        community_notifications,
+    } = context;
     let req = parse_request(&stream)?;
     let clean_path = req.path.split('?').next().unwrap_or(&req.path);
     let query = req
@@ -5348,10 +5360,11 @@ fn run_polling_loop_with_observer(
 
         let devices = match repo.lock() {
             Ok(r) => match (|| {
-                if let Some(observer) = observer.as_deref() {
-                    if let Some(ports) = observer.automatic_alert_ports(&r).map_err(AppError::Validation)? {
-                        r.sync_topology_alert_ports(&ports)?;
-                    }
+                if let Some(observer) = observer.as_deref()
+                    && let Some(ports) =
+                        observer.automatic_alert_ports(&r).map_err(AppError::Validation)?
+                {
+                    r.sync_topology_alert_ports(&ports)?;
                 }
                 r.list_devices()
             })() {
@@ -6241,7 +6254,10 @@ mod tests {
 
     #[test]
     fn extension_guard_rejects_core_api_before_dispatch() {
-        use super::{WebExtensionProvider, WebExtensionResponse, WebServer, handle_connection};
+        use super::{
+            ConnectionContext, WebExtensionProvider, WebExtensionResponse, WebServer,
+            handle_connection,
+        };
         use std::collections::HashMap;
         use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream};
@@ -6287,13 +6303,15 @@ mod tests {
             let (stream, _) = listener.accept().unwrap();
             handle_connection(
                 stream,
-                Arc::clone(&server.repository),
-                Arc::clone(&server.jobs),
-                Arc::clone(&server.config),
-                server.config_path.clone(),
-                server.limits,
-                Some(Arc::new(Deny)),
-                None,
+                ConnectionContext {
+                    repo: Arc::clone(&server.repository),
+                    jobs: Arc::clone(&server.jobs),
+                    cfg: Arc::clone(&server.config),
+                    cfg_path: server.config_path.clone(),
+                    limits: server.limits,
+                    web_extension: Some(Arc::new(Deny)),
+                    community_notifications: None,
+                },
             )
             .unwrap();
         });

@@ -59,6 +59,8 @@ fn err(error: rusqlite::Error) -> String {
     format!("maintenance database: {error}")
 }
 
+type MetricSample = (Option<f64>, Option<f64>);
+
 pub fn migrate_periods(db: &Connection) -> Result<(), String> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS maintenance_state(
@@ -421,7 +423,7 @@ fn reconcile(
             }
         }
         if let (Some(query), Some(thresholds)) = (&mut samples, thresholds) {
-            let mut latest = |start, end| -> Result<Option<(Option<f64>, Option<f64>)>, String> {
+            let mut latest = |start, end| -> Result<Option<MetricSample>, String> {
                 query
                     .query_row(params![id, start, end], |row| {
                         Ok((row.get(0)?, row.get(1)?))
