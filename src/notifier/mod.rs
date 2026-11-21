@@ -1348,35 +1348,6 @@ fn default_recommended_actions(
                 "Check duplex, speed, and MTU consistency on both link ends.".to_string(),
             ];
         }
-        AlertKind::Custom(kind)
-            if matches!(
-                kind.as_str(),
-                "PREDICTIVE_ERROR_RATE"
-                    | "PREDICTIVE_TREND"
-                    | "IF_ERROR_RATE_SPIKE"
-                    | "IF_ERROR_WEEKLY_TREND"
-            ) =>
-        {
-            return vec![
-                "Inspect physical link quality, transceiver status, and cable path.".to_string(),
-                "Compare error counters against the previous polling interval.".to_string(),
-                "Check duplex, speed, and MTU consistency on both link ends.".to_string(),
-            ];
-        }
-        AlertKind::Custom(kind) if kind == "PREDICTIVE_DOM" => {
-            return vec![
-                "Inspect the SFP and fiber path for contamination, bending, or degradation."
-                    .to_string(),
-                "Compare Rx optical power with the transceiver vendor specification.".to_string(),
-            ];
-        }
-        AlertKind::Custom(kind) if kind == "PREDICTIVE_ENV" => {
-            return vec![
-                "Compare the current temperature or fan reading with its historical baseline."
-                    .to_string(),
-                "Inspect chassis airflow, fan operation, and environmental conditions.".to_string(),
-            ];
-        }
         AlertKind::DeviceOffline => {
             return vec![
                 "Verify device reachability from the monitoring segment.".to_string(),
@@ -1671,6 +1642,32 @@ mod tests {
     }
 
     #[test]
+    fn custom_alerts_use_generic_actions_not_embedded_payloads() {
+        let device = DeviceConfig::new("192.0.2.7", "public");
+        let notification = |kind: &str| {
+            AlertNotification::from_event(
+                AlertEvent::new(
+                    AlertKind::Custom(kind.to_string()),
+                    crate::alert::AlertSeverity::Warning,
+                    &device,
+                    "Example detail",
+                )
+                .with_observed_value(r#"{"evidence":{"action":"embedded action"}}"#),
+            )
+        };
+        let first = notification("CUSTOM_ONE");
+        let second = notification("CUSTOM_TWO");
+        assert_eq!(first.recommended_actions, second.recommended_actions);
+        assert!(
+            !first
+                .recommended_actions
+                .iter()
+                .any(|action| action == "embedded action")
+        );
+        assert_eq!(first.message, "Example detail");
+    }
+
+    #[test]
     fn resolved_events_are_info_and_immediate() {
         let device = DeviceConfig {
             id: Some(7),
@@ -1682,13 +1679,13 @@ mod tests {
             last_seen_at: None,
         };
         let notification = AlertNotification::from_event(AlertEvent::custom(
-            "RESOLVED_IF_ERROR_RATE_SPIKE",
+            "RESOLVED_CUSTOM_ALERT",
             &device,
             3,
             "xe-0/0/3",
             "normal",
             "error ratio > 0.001% or positive acceleration",
-            "[RESOLVED] IF error rate returned to normal",
+            "[RESOLVED] Custom alert returned to normal",
         ));
 
         assert!(notification.is_resolved());

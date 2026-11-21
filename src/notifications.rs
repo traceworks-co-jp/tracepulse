@@ -42,6 +42,10 @@ pub trait NotificationSettingsProvider: Send + Sync {
     fn send_test(&self, channel: &str) -> Result<String, String>;
     fn status(&self) -> NotificationStatus;
 
+    fn send_resolved_enabled(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
     fn dispatch(&self, _event: &AlertEvent) -> Result<(), String> {
         Ok(())
     }

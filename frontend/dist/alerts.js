@@ -87,7 +87,7 @@
       if (items.length === 0) return `<tr><td class="empty" colspan="8">${tx("alerts_no_results")}</td></tr>`;
       return items.map((item) => {
         const severity = ["critical", "warning", "info"].includes(item.severity) ? item.severity : "info";
-        const status = item.acknowledged_at ? `<span class="alert-acknowledged">${tx("alerts_acknowledged")}</span>` : `<button class="btn alerts-ack-button" type="button" data-alert-ack="${item.id}" ${busy || loading ? "disabled" : ""}><span class="alerts-ack-icon" aria-hidden="true">\u2713</span>${tx("alerts_acknowledge")}</button>`;
+        const status = item.acknowledged_at ? `<span class="alert-acknowledged">${tx("alerts_acknowledged")}</span>` : document.body.dataset.role === "viewer" ? `<span>${tx("alerts_status_unacknowledged")}</span>` : `<button class="btn alerts-ack-button" type="button" data-alert-ack="${item.id}" ${busy || loading ? "disabled" : ""}><span class="alerts-ack-icon" aria-hidden="true">\u2713</span>${tx("alerts_acknowledge")}</button>`;
         const acknowledgedAt = item.acknowledged_at ? `<time class="alerts-acknowledged-time" datetime="${esc(item.acknowledged_at)}">${esc(fmtTime(item.acknowledged_at))}</time>` : "-";
         return `<tr class="${item.acknowledged_at ? "alert-acknowledged-row" : "alert-unacknowledged"}">
                 <td class="alerts-time-cell"><time datetime="${esc(item.created_at)}">${esc(fmtTime(item.created_at))}</time></td>
@@ -344,6 +344,7 @@
       }
     }
     window.addEventListener("tracepulse-language-change", render);
+    window.addEventListener("tracepulse-role-change", render);
     render();
     void load();
   }

@@ -707,6 +707,7 @@ fn start_poll_task(
     broadcaster: crate::alert::broadcaster::AlertBroadcaster,
     database_path: &std::path::Path,
     metric_tracker: Arc<Mutex<crate::alert::rules::MetricAlertTracker>>,
+    notifications: Option<Arc<dyn NotificationSettingsProvider>>,
 ) -> Result<PollTask, AppError> {
     let repository = Repository::new(crate::db::sqlite::open_database(database_path)?)?;
     let db_devices = repository.list_devices()?;
@@ -756,7 +757,24 @@ fn start_poll_task(
                 }
 
                 if let Ok((system, interfaces)) = engine.poll_device(&cfg) {
-                    if let Err(error) = engine.update_device_status(&cfg, "online", true) {
+                    let send_resolved = match notifications
+                        .as_deref()
+                        .map(NotificationSettingsProvider::send_resolved_enabled)
+                        .transpose()
+                    {
+                        Ok(setting) => setting.unwrap_or(true),
+                        Err(error) => {
+                            tracing::error!(device = %cfg.ip, %error, "Device recovery evaluation deferred");
+                            polled.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    };
+                    if let Err(error) = engine.update_device_status_with_recovery_setting(
+                        &cfg,
+                        "online",
+                        true,
+                        send_resolved,
+                    ) {
                         tracing::error!(device = %cfg.ip, %error, "Online status transition could not be saved");
                     }
                     if let Some(device_id) = dev.id {
@@ -918,11 +936,13 @@ impl TuiRenderer {
                 crate::db::sqlite::open_database(self.runner.database_path())?,
             )?));
             let polling_alerts = self.runner.alert_broadcaster();
+            let polling_notifications = self.runner.notification_provider();
             std::thread::spawn(move || {
                 crate::web::server::run_polling_loop(
                     polling_config,
                     polling_repository,
                     polling_alerts,
+                    polling_notifications,
                     false,
                 );
             });
@@ -1001,6 +1021,7 @@ impl TuiRenderer {
                     self.runner.alert_broadcaster(),
                     self.runner.database_path(),
                     Arc::clone(&metric_tracker),
+                    self.runner.notification_provider(),
                 ) {
                     Ok(poll_task) => {
                         mode = TuiMode::Polling(poll_task);
@@ -2453,6 +2474,7 @@ impl TuiRenderer {
                                         self.runner.alert_broadcaster(),
                                         self.runner.database_path(),
                                         Arc::clone(&metric_tracker),
+                                        self.runner.notification_provider(),
                                     ) {
                                         Ok(poll_task) => {
                                             mode = TuiMode::Polling(poll_task);

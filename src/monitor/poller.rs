@@ -53,10 +53,21 @@ impl PollingEngine {
         status: &str,
         polling_succeeded: bool,
     ) -> Result<(), AppError> {
-        if let Some(event) = self.repository.update_device_status_with_transition(
+        self.update_device_status_with_recovery_setting(device, status, polling_succeeded, true)
+    }
+
+    pub fn update_device_status_with_recovery_setting(
+        &self,
+        device: &DeviceConfig,
+        status: &str,
+        polling_succeeded: bool,
+        send_resolved: bool,
+    ) -> Result<(), AppError> {
+        if let Some(event) = self.repository.update_device_status_with_recovery_setting(
             device,
             status,
             polling_succeeded,
+            send_resolved,
         )? {
             self.alerts.publish(event);
         }
@@ -202,5 +213,37 @@ mod tests {
         assert_eq!(page.items[0].severity, "info");
         assert_eq!(page.items[1].alert_type, "DEVICE_OFFLINE");
         assert_eq!(page.items[1].severity, "critical");
+    }
+
+    #[test]
+    fn disabled_recovery_notifications_update_status_without_recording_or_publishing() {
+        let repository =
+            Repository::new(initialize_database(Path::new(":memory:")).unwrap()).unwrap();
+        let mut device = DeviceConfig::new("192.0.2.2", "public");
+        device.id = Some(repository.save_device_config(&device).unwrap());
+        repository
+            .update_device_status(&device.ip, "offline")
+            .unwrap();
+        let broadcaster = AlertBroadcaster::new();
+        let mut receiver = broadcaster.subscribe();
+        let engine = PollingEngine::with_broadcaster(AppConfig::default(), repository, broadcaster);
+        engine
+            .update_device_status_with_recovery_setting(&device, "online", true, false)
+            .unwrap();
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            engine
+                .repository
+                .find_device_by_ip(&device.ip)
+                .unwrap()
+                .unwrap()
+                .status,
+            "online"
+        );
+        let page = engine
+            .repository
+            .get_alert_history_page(&crate::db::models::AlertHistoryFilter::default(), 10, 0)
+            .unwrap();
+        assert_eq!(page.total, 0);
     }
 }

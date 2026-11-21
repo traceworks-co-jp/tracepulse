@@ -268,7 +268,7 @@ impl MaintenanceStore {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(err)?;
-        reconcile(&tx, &tx, notifier, now, thresholds)?;
+        reconcile(&tx, &tx, notifier, now, thresholds, false)?;
         tx.commit().map_err(err)
     }
 
@@ -305,6 +305,17 @@ impl MaintenanceGate for MaintenanceStore {
     }
 }
 
+/// Enqueue only system metric release summaries within the caller's transaction.
+pub fn enqueue_system_release_summaries(
+    store: &Connection,
+    core: &Connection,
+    notifier: &Notifier,
+    now: i64,
+    thresholds: &AlertConfig,
+) -> Result<Vec<AlertEvent>, String> {
+    reconcile(store, core, notifier, now, Some(thresholds), true)
+}
+
 /// Consume the first fresh post-release evaluation of each basic risk.
 fn reconcile(
     store: &Connection,
@@ -312,8 +323,9 @@ fn reconcile(
     notifier: &Notifier,
     now: i64,
     thresholds: Option<&AlertConfig>,
+    metrics_only: bool,
 ) -> Result<Vec<AlertEvent>, String> {
-    let has_ports: bool = core.query_row(
+    let has_ports: bool = !metrics_only && core.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='interface_alert_settings')",
         [], |r| r.get(0),
     ).map_err(err)?;
@@ -373,7 +385,7 @@ fn reconcile(
         }
 
         let mut risks = Vec::new();
-        if observed.is_some_and(|at| at > ended && at <= now && at >= now - 900) {
+        if !metrics_only && observed.is_some_and(|at| at > ended && at <= now && at >= now - 900) {
             let value = match status.as_str() {
                 "offline" | "critical" => Some((
                     AlertSeverity::Critical,
@@ -494,7 +506,14 @@ fn reconcile(
                 device_ip: ip,
                 interface_id: None,
                 interface_name: None,
-                kind: AlertKind::Custom("MAINTENANCE_RESUMED_AVAILABILITY".into()),
+                kind: AlertKind::Custom(
+                    if metrics_only {
+                        "MAINTENANCE_RESUMED_SYSTEM_METRICS"
+                    } else {
+                        "MAINTENANCE_RESUMED_AVAILABILITY"
+                    }
+                    .into(),
+                ),
                 severity,
                 message: format!(
                     "Maintenance ended; continuing risks: {}",

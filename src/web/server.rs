@@ -149,6 +149,18 @@ pub trait WebExtensionProvider: Send + Sync {
         None
     }
 
+    fn dashboard_unacknowledged_alerts(&self) -> Result<Option<usize>, String> {
+        Ok(None)
+    }
+
+    fn alerts_styles(&self) -> String {
+        String::new()
+    }
+
+    fn send_device_recovery(&self) -> Result<bool, String> {
+        Ok(true)
+    }
+
     fn dashboard_styles(&self) -> String {
         String::new()
     }
@@ -358,7 +370,7 @@ impl WebServer {
             let alerts = self.alerts.clone();
             let extension = self.web_extension.clone();
             std::thread::spawn(move || {
-                run_polling_loop_with_observer(cfg, repo, alerts, extension, true);
+                run_polling_loop_with_observer(cfg, repo, alerts, extension, None, true);
             });
         }
         let flow_config = self
@@ -1845,7 +1857,7 @@ fn api_device_history(
     }
 }
 
-fn parse_alert_history_filter(
+pub fn parse_alert_history_filter(
     severity: Option<&str>,
     status: Option<&str>,
     query: Option<&str>,
@@ -1879,7 +1891,7 @@ fn parse_alert_history_filter(
     })
 }
 
-fn parse_alert_history_query(
+pub fn parse_alert_history_query(
     query: &str,
 ) -> Result<(crate::db::models::AlertHistoryFilter, usize, usize), String> {
     let params = parse_form(query);
@@ -4017,8 +4029,16 @@ fn page_dashboard(
         "<section class='detail-section dashboard-recent-alerts' style='margin-top:1.25rem'>",
     );
     html.push_str("<div class='recent-alerts-heading'><h2 data-i18n='recent_alerts_title'>Recent Alerts</h2><a href='/alerts' class='view-all-alerts'><span data-i18n='alerts_view_all'>View all \u{2192}</span>");
-    if unacknowledged_alerts > 0 {
-        html.push_str(&format!("<span class='alert-unacknowledged-badge'><span class='sr-only' data-i18n='alerts_unacknowledged'>Unacknowledged</span>{unacknowledged_alerts}</span>"));
+    let alert_count = match extension.map(|value| value.dashboard_unacknowledged_alerts()) {
+        Some(Ok(Some(count))) => Some(count.to_string()),
+        Some(Err(error)) => {
+            tracing::error!(%error, "Dashboard alert count could not be read");
+            Some("?".to_string())
+        }
+        _ => Some(unacknowledged_alerts.to_string()),
+    };
+    if let Some(count) = alert_count.filter(|count| count != "0") {
+        html.push_str(&format!("<span class='alert-unacknowledged-badge'><span class='sr-only' data-i18n='alerts_unacknowledged'>Unacknowledged</span>{count}</span>"));
     }
     html.push_str("</a></div>");
     html.push_str("<div class='dashboard-alert-scroll' role='region' tabindex='0' aria-label='Recent alerts'><table id='alert-table'><thead><tr><th data-i18n='time'>Time</th><th data-i18n='hostname'>Device</th><th data-i18n='type'>Type</th><th data-i18n='severity'>Severity</th><th data-i18n='details'>Details</th></tr></thead><tbody>");
@@ -4073,6 +4093,9 @@ fn page_alerts(extension: Option<&dyn WebExtensionProvider>) -> String {
     );
     html.push_str(COMMON_CSS);
     html.push_str(ALERTS_CSS);
+    if let Some(extension) = extension {
+        html.push_str(&extension.alerts_styles());
+    }
     html.push_str("</head><body data-title-key='alerts_title'>");
     html.push_str(&navigation_html(extension));
     html.push_str("<main><h1 data-i18n='alerts_title'>Alert History</h1><section id='alerts-page' class='alerts-page' aria-live='polite'><p data-i18n='alerts_loading'>Loading alerts…</p></section></main>");
@@ -5741,9 +5764,10 @@ pub(crate) fn run_polling_loop(
     config: Arc<Mutex<AppConfig>>,
     repo: Arc<Mutex<Repository>>,
     alerts: crate::alert::AlertBroadcaster,
+    notifications: Option<Arc<dyn NotificationSettingsProvider>>,
     verbose: bool,
 ) {
-    run_polling_loop_with_observer(config, repo, alerts, None, verbose);
+    run_polling_loop_with_observer(config, repo, alerts, None, notifications, verbose);
 }
 
 fn run_polling_loop_with_observer(
@@ -5751,6 +5775,7 @@ fn run_polling_loop_with_observer(
     repo: Arc<Mutex<Repository>>,
     alerts: crate::alert::AlertBroadcaster,
     observer: Option<Arc<dyn WebExtensionProvider>>,
+    notifications: Option<Arc<dyn NotificationSettingsProvider>>,
     verbose: bool,
 ) {
     use crate::db::models::{AlertEvent, DeviceMetrics, InterfaceSample};
@@ -5975,10 +6000,29 @@ fn run_polling_loop_with_observer(
                     status: result.status.clone(),
                     last_seen_at: None,
                 };
-                match r.update_device_status_with_transition(
+                let send_resolved = if result.status == "online" {
+                    let setting = if let Some(observer) = observer.as_deref() {
+                        observer.send_device_recovery()
+                    } else if let Some(notifications) = notifications.as_deref() {
+                        notifications.send_resolved_enabled()
+                    } else {
+                        Ok(true)
+                    };
+                    match setting {
+                        Ok(enabled) => enabled,
+                        Err(error) => {
+                            tracing::error!(device_id=result.device_id, %error, "Device recovery evaluation deferred");
+                            continue;
+                        }
+                    }
+                } else {
+                    true
+                };
+                match r.update_device_status_with_recovery_setting(
                     &dev_config,
                     &result.status,
                     result.polling_succeeded,
+                    send_resolved,
                 ) {
                     Ok(Some(event)) => {
                         alerts.publish(event);

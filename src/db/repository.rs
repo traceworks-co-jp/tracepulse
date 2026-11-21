@@ -273,6 +273,16 @@ impl Repository {
         status: &str,
         polling_succeeded: bool,
     ) -> Result<Option<crate::alert::event::AlertEvent>, AppError> {
+        self.update_device_status_with_recovery_setting(device, status, polling_succeeded, true)
+    }
+
+    pub fn update_device_status_with_recovery_setting(
+        &self,
+        device: &crate::device::types::DeviceConfig,
+        status: &str,
+        polling_succeeded: bool,
+        send_resolved: bool,
+    ) -> Result<Option<crate::alert::event::AlertEvent>, AppError> {
         let transaction = self.connection.unchecked_transaction()?;
         let previous = transaction
             .query_row(
@@ -302,7 +312,8 @@ impl Repository {
             &current_device,
             &previous_status,
             status,
-        );
+        )
+        .filter(|event| send_resolved || event.kind.as_str() != "RESOLVED_DEVICE_OFFLINE");
         if let Some(event) = &event {
             transaction.execute(
                 "INSERT INTO alert_events (device_id, alert_type, severity, details, created_at)

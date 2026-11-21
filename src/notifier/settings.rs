@@ -63,6 +63,10 @@ impl NotifierSettingsHandle {
 }
 
 impl NotificationSettingsProvider for NotifierSettingsStore {
+    fn send_resolved_enabled(&self) -> Result<bool, String> {
+        Ok(self.snapshot()?.send_resolved)
+    }
+
     fn load_json(&self) -> String {
         match self.snapshot() {
             Ok(config) => match serde_json::to_value(config) {

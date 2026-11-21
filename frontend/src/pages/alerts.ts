@@ -80,7 +80,9 @@ if (root) {
             const severity = ["critical", "warning", "info"].includes(item.severity) ? item.severity : "info";
             const status = item.acknowledged_at
                 ? `<span class="alert-acknowledged">${tx("alerts_acknowledged")}</span>`
-                : `<button class="btn alerts-ack-button" type="button" data-alert-ack="${item.id}" ${busy || loading ? "disabled" : ""}><span class="alerts-ack-icon" aria-hidden="true">✓</span>${tx("alerts_acknowledge")}</button>`;
+                : document.body.dataset.role === "viewer"
+                    ? `<span>${tx("alerts_status_unacknowledged")}</span>`
+                    : `<button class="btn alerts-ack-button" type="button" data-alert-ack="${item.id}" ${busy || loading ? "disabled" : ""}><span class="alerts-ack-icon" aria-hidden="true">✓</span>${tx("alerts_acknowledge")}</button>`;
             const acknowledgedAt = item.acknowledged_at
                 ? `<time class="alerts-acknowledged-time" datetime="${escapeHtml(item.acknowledged_at)}">${escapeHtml(fmtTime(item.acknowledged_at))}</time>`
                 : "-";
@@ -351,6 +353,7 @@ if (root) {
     }
 
     window.addEventListener("tracepulse-language-change", render);
+    window.addEventListener("tracepulse-role-change", render);
     render();
     void load();
 }
