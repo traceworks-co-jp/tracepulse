@@ -654,6 +654,15 @@ impl CommunityNotificationContext {
     }
 }
 
+fn same_origin_request(headers: &HashMap<String, String>) -> bool {
+    let Some(host) = headers.get("host") else {
+        return false;
+    };
+    headers
+        .get("origin")
+        .is_some_and(|origin| origin == &format!("http://{host}"))
+}
+
 fn is_common_alert_path(path: &str) -> bool {
     matches!(
         path,
@@ -838,6 +847,17 @@ fn handle_connection(stream: TcpStream, context: ConnectionContext) -> Result<()
         }
     }
 
+    if (clean_path == "/api/alerts" || clean_path.starts_with("/api/alerts/"))
+        && req.method == "POST"
+        && !same_origin_request(&req.headers)
+    {
+        return respond_json(
+            stream,
+            "403 Forbidden",
+            serde_json::json!({"error":"invalid alert request origin or host"}).to_string(),
+        );
+    }
+
     if req.method == "GET"
         && req
             .headers
@@ -904,6 +924,9 @@ fn handle_connection(stream: TcpStream, context: ConnectionContext) -> Result<()
     if req.method == "GET" && clean_path == "/static/js/dashboard.js" {
         return respond_js(stream, DASHBOARD_BUNDLE_JS);
     }
+    if req.method == "GET" && clean_path == "/static/js/alerts.js" {
+        return respond_js(stream, ALERTS_BUNDLE_JS);
+    }
     if req.method == "GET" && clean_path == "/static/js/settings.js" {
         return respond_js(stream, SETTINGS_BUNDLE_JS);
     }
@@ -941,6 +964,36 @@ fn handle_connection(stream: TcpStream, context: ConnectionContext) -> Result<()
         let body = api_scan_status(&job_id, &jobs);
         let body = if redact { strip_community(body) } else { body };
         return respond_json(stream, "200 OK", body);
+    }
+
+    if clean_path == "/api/alerts" && req.method == "GET" {
+        let (status, body) = api_alert_history(query, &repo);
+        return respond_json(stream, status, body);
+    }
+    if clean_path == "/api/alerts/ack-all" && req.method == "POST" {
+        let (status, body) = api_acknowledge_all_alerts(&req.body, &repo);
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+    if clean_path == "/api/alerts/clear" && req.method == "POST" {
+        let (status, body) = api_clear_alert_history(&req.body, &repo);
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+    if let Some(id) = clean_path
+        .strip_prefix("/api/alerts/")
+        .and_then(|path| path.strip_suffix("/ack"))
+        && !id.is_empty()
+        && !id.contains('/')
+        && req.method == "POST"
+    {
+        let (status, body) = api_acknowledge_alert(id, &repo);
+        return respond_mutation(stream, web_extension.as_deref(), &req, status, body);
+    }
+    if clean_path == "/api/alerts" || clean_path.starts_with("/api/alerts/") {
+        return respond_json(
+            stream,
+            "405 Method Not Allowed",
+            serde_json::json!({"error":"method not allowed"}).to_string(),
+        );
     }
 
     // Route: GET /api/device/<ip>  (IP に . を含むためパスマッチで処理)
@@ -1072,6 +1125,7 @@ fn handle_connection(stream: TcpStream, context: ConnectionContext) -> Result<()
         ("GET", "/settings/snmp") => {
             respond_html(stream, page_snmp_definitions(web_extension.as_deref()))
         }
+        ("GET", "/alerts") => respond_html(stream, page_alerts(web_extension.as_deref())),
         ("GET", "/api/summary") => respond_json(stream, "200 OK", api_summary(&repo)),
         ("GET", "/api/devices") => respond_json(
             stream,
@@ -1788,6 +1842,247 @@ fn api_device_history(
     match result {
         Ok(history) => ("200 OK", history.to_string()),
         Err((status, error)) => (status, serde_json::json!({"error": error}).to_string()),
+    }
+}
+
+fn parse_alert_history_filter(
+    severity: Option<&str>,
+    status: Option<&str>,
+    query: Option<&str>,
+    days: Option<u32>,
+) -> Result<crate::db::models::AlertHistoryFilter, String> {
+    use crate::db::models::{AlertAcknowledgementFilter as AckFilter, AlertHistoryFilter};
+
+    let severity = match severity.unwrap_or("").to_ascii_lowercase().as_str() {
+        "" | "all" => None,
+        "critical" | "warning" | "info" => Some(severity.unwrap().to_ascii_lowercase()),
+        _ => return Err("severity must be critical, warning, info, or all".into()),
+    };
+    let status = match status.unwrap_or("all") {
+        "all" => AckFilter::All,
+        "unacknowledged" => AckFilter::Unacknowledged,
+        "acknowledged" => AckFilter::Acknowledged,
+        _ => return Err("status must be all, unacknowledged, or acknowledged".into()),
+    };
+    let query = query.map(str::trim).filter(|query| !query.is_empty());
+    if query.is_some_and(|query| query.chars().count() > 200) {
+        return Err("q must be at most 200 characters".into());
+    }
+    if days.is_some_and(|days| !(1..=36_500).contains(&days)) {
+        return Err("days must be between 1 and 36500".into());
+    }
+    Ok(AlertHistoryFilter {
+        severity,
+        status,
+        query: query.map(str::to_string),
+        days,
+    })
+}
+
+fn parse_alert_history_query(
+    query: &str,
+) -> Result<(crate::db::models::AlertHistoryFilter, usize, usize), String> {
+    let params = parse_form(query);
+    let parse_integer = |key: &str, default: usize| -> Result<usize, String> {
+        match params.get(key) {
+            Some(value) => value
+                .parse::<usize>()
+                .map_err(|_| format!("{key} must be a non-negative integer")),
+            None => Ok(default),
+        }
+    };
+    let limit = parse_integer("limit", 50)?;
+    let offset = parse_integer("offset", 0)?;
+    if !(1..=100).contains(&limit) {
+        return Err("limit must be between 1 and 100".into());
+    }
+    let days = match params.get("days").map(String::as_str).unwrap_or("") {
+        "" => None,
+        value => Some(
+            value
+                .parse::<u32>()
+                .map_err(|_| "days must be a positive integer".to_string())?,
+        ),
+    };
+    let filter = parse_alert_history_filter(
+        params.get("severity").map(String::as_str),
+        params.get("status").map(String::as_str),
+        params.get("q").map(String::as_str),
+        days,
+    )?;
+    Ok((filter, limit, offset))
+}
+
+fn api_alert_history(query: &str, repo: &Arc<Mutex<Repository>>) -> (&'static str, String) {
+    let (filter, limit, offset) = match parse_alert_history_query(query) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error":error}).to_string(),
+            );
+        }
+    };
+    let result = repo
+        .lock()
+        .map_err(|_| "Repository unavailable".to_string())
+        .and_then(|repository| {
+            repository
+                .get_alert_history_page(&filter, limit, offset)
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(page) => match serde_json::to_string(&page) {
+            Ok(body) => ("200 OK", body),
+            Err(error) => (
+                "500 Internal Server Error",
+                serde_json::json!({"error":error.to_string()}).to_string(),
+            ),
+        },
+        Err(error) => (
+            "500 Internal Server Error",
+            serde_json::json!({"error":error}).to_string(),
+        ),
+    }
+}
+
+fn api_acknowledge_alert(id: &str, repo: &Arc<Mutex<Repository>>) -> (&'static str, String) {
+    let Ok(id) = id.parse::<i64>() else {
+        return (
+            "400 Bad Request",
+            serde_json::json!({"error":"alert id must be a positive integer"}).to_string(),
+        );
+    };
+    if id <= 0 {
+        return (
+            "400 Bad Request",
+            serde_json::json!({"error":"alert id must be a positive integer"}).to_string(),
+        );
+    }
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let result = repo
+        .lock()
+        .map_err(|_| "Repository unavailable".to_string())
+        .and_then(|repository| {
+            repository
+                .acknowledge_alert(id, &now)
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(Some(acknowledged_at)) => (
+            "200 OK",
+            serde_json::json!({"ok":true,"id":id,"acknowledged_at":acknowledged_at}).to_string(),
+        ),
+        Ok(None) => (
+            "404 Not Found",
+            serde_json::json!({"error":"alert not found"}).to_string(),
+        ),
+        Err(error) => (
+            "500 Internal Server Error",
+            serde_json::json!({"error":error}).to_string(),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AlertFilterRequest {
+    #[serde(default)]
+    severity: Option<String>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+fn api_acknowledge_all_alerts(body: &str, repo: &Arc<Mutex<Repository>>) -> (&'static str, String) {
+    let request = match serde_json::from_str::<AlertFilterRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error":error.to_string()}).to_string(),
+            );
+        }
+    };
+    let filter = match parse_alert_history_filter(
+        request.severity.as_deref(),
+        Some("all"),
+        request.q.as_deref(),
+        request.days,
+    ) {
+        Ok(filter) => filter,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error":error}).to_string(),
+            );
+        }
+    };
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let result = repo
+        .lock()
+        .map_err(|_| "Repository unavailable".to_string())
+        .and_then(|repository| {
+            repository
+                .acknowledge_matching_alerts(&filter, &now)
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(updated) => (
+            "200 OK",
+            serde_json::json!({"ok":true,"updated":updated}).to_string(),
+        ),
+        Err(error) => (
+            "500 Internal Server Error",
+            serde_json::json!({"error":error}).to_string(),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClearAlertHistoryRequest {
+    mode: String,
+}
+
+fn api_clear_alert_history(body: &str, repo: &Arc<Mutex<Repository>>) -> (&'static str, String) {
+    let request = match serde_json::from_str::<ClearAlertHistoryRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error":error.to_string()}).to_string(),
+            );
+        }
+    };
+    let acknowledged_only = match request.mode.as_str() {
+        "acknowledged" => true,
+        "all" => false,
+        _ => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error":"mode must be acknowledged or all"}).to_string(),
+            );
+        }
+    };
+    let result = repo
+        .lock()
+        .map_err(|_| "Repository unavailable".to_string())
+        .and_then(|repository| {
+            repository
+                .clear_alert_history(acknowledged_only)
+                .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(deleted) => (
+            "200 OK",
+            serde_json::json!({"ok":true,"deleted":deleted}).to_string(),
+        ),
+        Err(error) => (
+            "500 Internal Server Error",
+            serde_json::json!({"error":error}).to_string(),
+        ),
     }
 }
 
@@ -3621,7 +3916,7 @@ fn page_dashboard(
     redact: bool,
 ) -> String {
     let alert_config = cfg.lock().map(|c| c.alert.clone()).unwrap_or_default();
-    let (devices, spikes_count, devices_json, recent_alerts) = {
+    let (devices, spikes_count, devices_json, recent_alerts, unacknowledged_alerts) = {
         if let Ok(r) = repo.lock() {
             let devs = match r.list_devices() {
                 Ok(devices) => devices,
@@ -3651,9 +3946,16 @@ fn page_dashboard(
                 })
                 .collect();
             let alerts = r.get_recent_alerts(10).unwrap_or_default();
-            (devs, sc, json, alerts)
+            let unacknowledged = match r.count_unacknowledged_alerts() {
+                Ok(count) => count,
+                Err(error) => {
+                    tracing::warn!(%error, "Dashboard alert count could not be read");
+                    0
+                }
+            };
+            (devs, sc, json, alerts, unacknowledged)
         } else {
-            (vec![], 0, vec![], vec![])
+            (vec![], 0, vec![], vec![], 0)
         }
     };
 
@@ -3714,7 +4016,11 @@ fn page_dashboard(
     html.push_str(
         "<section class='detail-section dashboard-recent-alerts' style='margin-top:1.25rem'>",
     );
-    html.push_str("<h2 data-i18n='recent_alerts_title'>Recent Alerts</h2>");
+    html.push_str("<div class='recent-alerts-heading'><h2 data-i18n='recent_alerts_title'>Recent Alerts</h2><a href='/alerts' class='view-all-alerts'><span data-i18n='alerts_view_all'>View all \u{2192}</span>");
+    if unacknowledged_alerts > 0 {
+        html.push_str(&format!("<span class='alert-unacknowledged-badge'><span class='sr-only' data-i18n='alerts_unacknowledged'>Unacknowledged</span>{unacknowledged_alerts}</span>"));
+    }
+    html.push_str("</a></div>");
     html.push_str("<div class='dashboard-alert-scroll' role='region' tabindex='0' aria-label='Recent alerts'><table id='alert-table'><thead><tr><th data-i18n='time'>Time</th><th data-i18n='hostname'>Device</th><th data-i18n='type'>Type</th><th data-i18n='severity'>Severity</th><th data-i18n='details'>Details</th></tr></thead><tbody>");
     if recent_alerts.is_empty() {
         html.push_str("<tr><td colspan='5' class='empty'>No alerts recorded</td></tr>");
@@ -3754,6 +4060,23 @@ fn page_dashboard(
         html.push_str(&extension.dashboard_scripts());
     }
     html.push_str("</body></html>");
+    html
+}
+
+fn page_alerts(extension: Option<&dyn WebExtensionProvider>) -> String {
+    let mut html = String::new();
+    html.push_str(HTML_DOCTYPE);
+    html.push_str("<html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
+    html.push_str(BRAND_HEAD_HTML);
+    html.push_str(
+        "<script src='/static/js/theme.js'></script><title>TracePulse – Alert History</title>",
+    );
+    html.push_str(COMMON_CSS);
+    html.push_str(ALERTS_CSS);
+    html.push_str("</head><body data-title-key='alerts_title'>");
+    html.push_str(&navigation_html(extension));
+    html.push_str("<main><h1 data-i18n='alerts_title'>Alert History</h1><section id='alerts-page' class='alerts-page' aria-live='polite'><p data-i18n='alerts_loading'>Loading alerts…</p></section></main>");
+    html.push_str("<script src='/static/js/i18n.js'></script><script src='/static/js/alerts.js'></script></body></html>");
     html
 }
 
@@ -4480,13 +4803,11 @@ const COMMON_CSS: &str = "<style>
     body main { max-width:1200px; margin:1.75rem auto 3rem; padding:0 clamp(1rem,3vw,2rem); }
     body main h1 { margin:0 0 1.25rem; color:var(--tp-text); font-size:1.7rem; line-height:1.25; font-weight:650; }
     body main h2, body main h3 { color:var(--tp-text); }
-    body main :is(.card,.settings-section,.detail-section,.diag-card,.manual-box,#scan-progress,.dashboard-table-scroll,.enterprise-analytics-panel,.enterprise-analytics-grid article,.destination-card,.fx-filter-bar,.fx-zone-card,.fx-timeline,.fx-detail-scroll,.fx-axis-chart) { border-color:var(--tp-border); border-radius:8px; }
+    body main :is(.card,.settings-section,.detail-section,.diag-card,.manual-box,#scan-progress,.dashboard-table-scroll,.destination-card,.fx-filter-bar,.fx-zone-card,.fx-timeline,.fx-detail-scroll,.fx-axis-chart) { border-color:var(--tp-border); border-radius:8px; }
     body main .card { background:var(--tp-surface); }
-    body main :is(.settings-section,.detail-section,.diag-card,.manual-box,#scan-progress,.dashboard-table-scroll,.enterprise-analytics-panel,.enterprise-analytics-grid article,.destination-card,.fx-filter-bar,.fx-zone-card,.fx-timeline,.fx-detail-scroll,.fx-axis-chart) { background-color:var(--tp-surface); color:var(--tp-text); }
+    body main :is(.settings-section,.detail-section,.diag-card,.manual-box,#scan-progress,.dashboard-table-scroll,.destination-card,.fx-filter-bar,.fx-zone-card,.fx-timeline,.fx-detail-scroll,.fx-axis-chart) { background-color:var(--tp-surface); color:var(--tp-text); }
     body main .discovery-workflow { background:var(--tp-surface); border-color:var(--tp-border); }
-    body main .settings-section h2, body main .detail-section h2, body main .diag-card h3, body main .enterprise-card-heading h2 { color:var(--tp-accent); }
-    body main .enterprise-analytics-panel { --ea-surface:rgba(21,35,55,.72); --ea-card:#152337; --ea-border:#2b4057; --ea-heading:#eef5fb; --ea-text:#d0dce8; --ea-muted:#a6b4c6; --ea-track:#0c1727; }
-    html[data-theme='light'] body main .enterprise-analytics-panel { --ea-surface:rgba(255,255,255,.82); --ea-card:#fff; --ea-border:#d5e0e8; --ea-heading:#152337; --ea-text:#34495e; --ea-muted:#5d7084; --ea-track:#eaf0f4; }
+    body main .settings-section h2, body main .detail-section h2, body main .diag-card h3 { color:var(--tp-accent); }
     body main :is(input:not([type='checkbox']):not([type='radio']):not([type='hidden']),select,textarea) { border-color:#40556d; border-radius:5px; background:#0c1727; color:var(--tp-text); font:inherit; }
     html[data-theme='light'] body main :is(input:not([type='checkbox']):not([type='radio']):not([type='hidden']),select,textarea) { border-color:#cbd8e2; background:#fff; color:var(--tp-text); }
     body main :is(input:not([type='checkbox']):not([type='radio']):not([type='hidden']),select,textarea):focus { border-color:var(--tp-accent); outline:none; box-shadow:0 0 0 3px rgba(56,197,178,.16); }
@@ -4504,7 +4825,7 @@ const COMMON_CSS: &str = "<style>
     body main tr:hover td { background:rgba(56,197,178,.06); }
     html[data-theme='light'] body main tr:hover td { background:#eff8f7; }
     body main a { color:var(--tp-accent); }
-    body main :is(.field-hint,.host-hint,.diag-note,.enterprise-muted,.fx-hint,.fx-summary) { color:var(--tp-muted); }
+    body main :is(.field-hint,.host-hint,.diag-note,.fx-hint,.fx-summary) { color:var(--tp-muted); }
     @media(max-width:760px) { body main { margin:1.25rem auto 2rem; } body main h1 { font-size:1.45rem; } body main .field-row, body main .hardware-oid-fields, body main .diag-grid { grid-template-columns:1fr; } body main .actions { align-items:stretch; } }
 </style>";
 
@@ -4554,6 +4875,7 @@ const NAV_HTML: &str = "<nav>
     <a href='/' data-i18n='nav_dashboard'>Dashboard</a>
     <a href='/discovery' data-i18n='nav_discovery'>Discovery</a>
   <a href='/diagnostics' data-i18n='nav_diagnostics'>Diagnostics</a>
+  <a href='/alerts' data-i18n='nav_alerts'>Alerts</a>
   <a href='/settings' data-i18n='nav_settings'>Settings</a>
     </div>
     <div class='nav-controls'>
@@ -4595,6 +4917,30 @@ const SETTINGS_CSS: &str = "<style>
     .settings-field-error { margin:.4rem 0 0; color:#f87171; font-size:.78rem; line-height:1.5; overflow-wrap:anywhere; }
     .settings-field-error[hidden] { display:none; }
     html[data-theme='light'] .settings-field-error { color:#b91c1c; }
+      #core-maintenance .maintenance-header { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; padding-bottom:1rem; border-bottom:1px solid var(--tp-border); }
+      #core-maintenance .maintenance-header h2 { margin:0; padding:0; border:0; color:var(--tp-accent); }
+      #core-maintenance .maintenance-state { display:grid; justify-items:end; gap:.3rem; max-width:55%; text-align:right; }
+      #core-maintenance .maintenance-status-badge { display:inline-flex; align-items:center; min-height:1.75rem; padding:.15rem .65rem; border:1px solid var(--tp-border); border-radius:999px; background:var(--tp-raised); color:var(--tp-muted); font-size:.8rem; font-weight:650; line-height:1.35; }
+      #core-maintenance .maintenance-status-badge.is-muted { border-color:#b45309; background:rgba(245,158,11,.16); color:#fcd34d; }
+      html[data-theme='light'] #core-maintenance .maintenance-status-badge.is-muted { border-color:#f59e0b; background:#fffbeb; color:#92400e; }
+      #core-maintenance .maintenance-status-details { display:grid; gap:.1rem; color:var(--tp-muted); font-size:.76rem; line-height:1.45; overflow-wrap:anywhere; }
+      #core-maintenance .maintenance-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; margin-top:1.1rem; }
+      #core-maintenance .maintenance-field { display:flex; min-width:0; flex-direction:column; gap:.45rem; }
+      #core-maintenance .maintenance-field-full { grid-column:1 / -1; }
+      #core-maintenance .maintenance-field label { color:var(--tp-muted); font-size:.84rem; font-weight:600; }
+      #core-maintenance .maintenance-field input,
+      #core-maintenance .maintenance-field select { box-sizing:border-box; width:100%; min-width:0; min-height:2.65rem; padding:.55rem .7rem; border:1px solid var(--tp-border); border-radius:5px; background:var(--tp-raised); color:var(--tp-text); font:inherit; }
+      #core-maintenance .maintenance-actions { display:flex; flex-wrap:wrap; gap:.7rem; margin-top:1.1rem; padding-top:1rem; border-top:1px solid var(--tp-border); }
+      #core-maintenance .maintenance-actions .btn { min-width:7rem; }
+      #core-maintenance [role='alert'] { margin:.75rem 0 0; color:#f87171; overflow-wrap:anywhere; }
+      html[data-theme='light'] #core-maintenance [role='alert'] { color:#b91c1c; }
+      @media(max-width:600px) {
+        #core-maintenance .maintenance-header { flex-direction:column; }
+        #core-maintenance .maintenance-state { justify-items:start; max-width:100%; text-align:left; }
+        #core-maintenance .maintenance-form-grid { grid-template-columns:1fr; }
+        #core-maintenance .maintenance-field-full { grid-column:auto; }
+        #core-maintenance .maintenance-actions .btn { flex:1 1 7rem; }
+      }
   .score-bar { display:flex; align-items:center; gap:.75rem; margin-top:.5rem; }
   .score-bar span { font-size:.82rem; color:#94a3b8; min-width:6rem; }
     .score-legend { display:grid; gap:.3rem; margin-top:.5rem; font-size:.82rem; color:#94a3b8; }
@@ -4917,8 +5263,73 @@ const DEVICE_DETAIL_CSS: &str = "<style>
     @media (max-width:760px) { .traffic-protocols { grid-template-columns:1fr; } .traffic-summary-card, .traffic-timeseries-card, .traffic-protocol-card, .traffic-applications-card, .traffic-endpoints-card, .traffic-talkers-card { grid-column:span 1; } .traffic-kpi-row { grid-template-columns:repeat(2,minmax(0,1fr)); } .traffic-donut-wrap { justify-content:center; flex-wrap:wrap; } }
 </style>";
 
+const ALERTS_CSS: &str = "<style>
+    #alerts-page { display:grid; gap:1rem; }
+    #alerts-page .alerts-overview { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; padding:1rem; border:1px solid var(--tp-border); border-radius:8px; background:var(--tp-surface); }
+    #alerts-page .alerts-stats, #alerts-page .alerts-toolbar { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; }
+    #alerts-page .alerts-stat { display:grid; min-width:8rem; gap:.15rem; padding:.55rem .75rem; border:1px solid var(--tp-border); border-radius:6px; background:var(--tp-raised); }
+    #alerts-page .alerts-stat span { color:var(--tp-muted); font-size:.78rem; }
+    #alerts-page .alerts-stat strong { color:var(--tp-text); font-size:1.2rem; }
+    #alerts-page .alerts-filter-form { display:grid; grid-template-columns:minmax(12rem,2fr) repeat(3,minmax(8rem,1fr)) auto; align-items:end; gap:.75rem; padding:1rem; border:1px solid var(--tp-border); border-radius:8px; background:var(--tp-surface); }
+    #alerts-page .alerts-filter-field { display:flex; min-width:0; flex-direction:column; gap:.35rem; }
+    #alerts-page .alerts-filter-field label { color:var(--tp-muted); font-size:.8rem; font-weight:600; }
+    #alerts-page .alerts-filter-field :is(input,select) { box-sizing:border-box; width:100%; min-width:0; min-height:2.55rem; padding:.5rem .65rem; }
+    #alerts-page .alerts-table-scroll { width:100%; min-width:0; max-width:100%; overflow-x:auto; overflow-y:hidden; border:1px solid var(--tp-border); border-radius:8px; background:var(--tp-surface); }
+    #alerts-page .alerts-table { width:100%; min-width:1100px; table-layout:fixed; margin:0; border:0; border-radius:0; }
+    #alerts-page .alerts-table th, #alerts-page .alerts-table td { padding:.5rem; vertical-align:top; }
+    #alerts-page .alerts-table th { white-space:nowrap; text-transform:uppercase; letter-spacing:.035em; font-size:.72rem; }
+    #alerts-page .alerts-table th:nth-child(1), #alerts-page .alerts-table td:nth-child(1) { width:11%; overflow-wrap:anywhere; }
+    #alerts-page .alerts-table th:nth-child(2), #alerts-page .alerts-table td:nth-child(2) { width:12%; overflow-wrap:anywhere; }
+    #alerts-page .alerts-table th:nth-child(3), #alerts-page .alerts-table td:nth-child(3) { width:12%; white-space:nowrap; }
+    #alerts-page .alerts-table th:nth-child(4), #alerts-page .alerts-table td:nth-child(4) { width:14%; white-space:nowrap; }
+    #alerts-page .alerts-table th:nth-child(5), #alerts-page .alerts-table td:nth-child(5) { width:10%; }
+    #alerts-page .alerts-table th:nth-child(6), #alerts-page .alerts-table td:nth-child(6) { width:14%; max-width:320px; overflow-wrap:anywhere; }
+    #alerts-page .alerts-table th:nth-child(7), #alerts-page .alerts-table td:nth-child(7) { width:14%; }
+    #alerts-page .alerts-table th:nth-child(8), #alerts-page .alerts-table td:nth-child(8) { width:13%; overflow-wrap:anywhere; }
+    #alerts-page .alerts-ip-cell { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.78rem; }
+    #alerts-page .alerts-status-cell { padding-right:1rem; text-align:center; }
+    #alerts-page .alerts-acknowledged-at-cell { padding-left:1rem; text-align:center; }
+    #alerts-page .alerts-ack-button { display:inline-flex; align-items:center; justify-content:center; gap:.4rem; min-height:2rem; padding:6px 12px; border:1px solid #2dd4bf; border-radius:6px; background:rgba(20,184,166,.22); color:#f0fdfa; font-weight:600; white-space:nowrap; cursor:pointer; transition:background-color .15s ease, box-shadow .15s ease, transform .15s ease; }
+    #alerts-page .alerts-ack-button:hover:not(:disabled) { background:#0f766e; box-shadow:0 3px 8px rgba(45,212,191,.22); transform:translateY(-1px); }
+    #alerts-page .alerts-ack-button:focus-visible { outline:2px solid #5eead4; outline-offset:2px; }
+    #alerts-page .alerts-ack-button:disabled { cursor:not-allowed; opacity:.65; }
+    #alerts-page .alerts-ack-icon { line-height:1; }
+    html[data-theme='light'] #alerts-page .alerts-ack-button { border-color:#0f766e; background:#0f766e; color:#fff; }
+    html[data-theme='light'] #alerts-page .alerts-ack-button:hover:not(:disabled) { background:#115e59; }
+    #alerts-page .alerts-table tr.alert-unacknowledged td:first-child { border-left:3px solid #f59e0b; }
+    #alerts-page .alert-severity, #alerts-page .alert-acknowledged { display:inline-flex; align-items:center; white-space:nowrap; padding:.2rem .55rem; border:1px solid var(--tp-border); border-radius:999px; font-size:.75rem; font-weight:650; }
+    #alerts-page .alert-severity.sev-critical { border-color:#ef4444; background:rgba(239,68,68,.14); color:#fca5a5; }
+    #alerts-page .alert-severity.sev-warning { border-color:#f59e0b; background:rgba(245,158,11,.14); color:#fcd34d; }
+    #alerts-page .alert-severity.sev-info { border-color:#38bdf8; background:rgba(56,189,248,.12); color:#7dd3fc; }
+    #alerts-page .alert-acknowledged { border-color:#10b981; background:rgba(16,185,129,.12); color:#6ee7b7; }
+    html[data-theme='light'] #alerts-page .alert-severity.sev-critical { background:#fef2f2; color:#b91c1c; }
+    html[data-theme='light'] #alerts-page .alert-severity.sev-warning { background:#fffbeb; color:#92400e; }
+    html[data-theme='light'] #alerts-page .alert-severity.sev-info { background:#eff6ff; color:#1d4ed8; }
+    html[data-theme='light'] #alerts-page .alert-acknowledged { background:#ecfdf5; color:#047857; }
+    #alerts-page .alerts-pagination { display:flex; align-items:center; justify-content:space-between; gap:.75rem; flex-wrap:wrap; }
+    #alerts-page .alerts-page-controls { display:flex; align-items:center; gap:.6rem; }
+    #alerts-page .alerts-page-controls label { display:flex; align-items:center; gap:.4rem; color:var(--tp-muted); font-size:.82rem; }
+    #alerts-page .alerts-page-controls select { padding:.35rem .5rem; border:1px solid var(--tp-border); border-radius:5px; background:var(--tp-raised); color:var(--tp-text); }
+    #alerts-page .alerts-error { margin:0; color:#f87171; overflow-wrap:anywhere; }
+    html[data-theme='light'] #alerts-page .alerts-error { color:#b91c1c; }
+    #alerts-page .alerts-dialog { width:min(30rem,calc(100% - 2rem)); padding:1.25rem; border:1px solid var(--tp-border); border-radius:10px; background:var(--tp-surface); color:var(--tp-text); box-shadow:0 16px 48px rgb(0 0 0 / .35); }
+    #alerts-page .alerts-dialog::backdrop { background:rgb(2 6 23 / .65); }
+    #alerts-page .alerts-dialog h2 { margin:0 0 .5rem; }
+    #alerts-page .alerts-dialog p { color:var(--tp-muted); }
+    #alerts-page .alerts-dialog-actions { display:flex; justify-content:flex-end; gap:.6rem; flex-wrap:wrap; margin-top:1rem; }
+    @media(max-width:900px) { #alerts-page .alerts-filter-form { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+    @media(max-width:600px) {
+      #alerts-page .alerts-overview { align-items:stretch; }
+      #alerts-page .alerts-toolbar { display:grid; grid-template-columns:1fr; }
+      #alerts-page .alerts-filter-form { grid-template-columns:1fr; }
+      #alerts-page .alerts-pagination { align-items:flex-start; flex-direction:column; }
+      #alerts-page .alerts-page-controls { width:100%; justify-content:space-between; }
+    }
+</style>";
+
 const DEVICE_DETAIL_BUNDLE_JS: &str = include_str!("../../frontend/dist/device-detail.js");
 const DASHBOARD_BUNDLE_JS: &str = include_str!("../../frontend/dist/dashboard.js");
+const ALERTS_BUNDLE_JS: &str = include_str!("../../frontend/dist/alerts.js");
 pub const fn notification_settings_html() -> &'static str {
     include_str!("../../frontend/fragments/notifications.html")
 }
@@ -4944,7 +5355,12 @@ const DASHBOARD_CSS: &str = "<style>
     .health-meter { display:inline-block; width:4rem; height:.5rem; margin-left:.5rem; vertical-align:middle; overflow:hidden; background:#334155; border-radius:4px; }
     .health-meter-fill { display:block; height:100%; background:currentColor; }
     html[data-theme='light'] .health-meter { background:#e2e8f0; }
-    .dashboard-recent-alerts > h2 { margin:0; padding:.85rem 1rem; }
+    .dashboard-recent-alerts .recent-alerts-heading { display:flex; align-items:center; justify-content:space-between; gap:.5rem; }
+    .dashboard-recent-alerts .recent-alerts-heading h2 { flex:1; margin:0; padding:.85rem 1rem; }
+    .dashboard-recent-alerts .view-all-alerts { display:inline-flex; align-items:center; gap:.45rem; margin-right:1rem; color:var(--tp-accent); font-size:.84rem; font-weight:650; text-decoration:none; white-space:nowrap; }
+    .dashboard-recent-alerts .view-all-alerts:hover { text-decoration:underline; }
+    .dashboard-recent-alerts .alert-unacknowledged-badge { display:inline-flex; min-width:1.35rem; height:1.35rem; align-items:center; justify-content:center; padding:0 .25rem; border:1px solid #b45309; border-radius:999px; background:rgba(245,158,11,.16); color:#fcd34d; font-size:.72rem; }
+    html[data-theme='light'] .dashboard-recent-alerts .alert-unacknowledged-badge { border-color:#f59e0b; background:#fffbeb; color:#92400e; }
     .dashboard-alert-scroll { max-width:100%; overflow-x:auto; }
     .dashboard-table-scroll { max-height:min(60vh, 560px); overflow:auto; border:1px solid #334155; border-radius:.5rem; background:#1e293b; }
     html[data-theme='light'] .dashboard-table-scroll { border-color:#cbd5e1; background:#fff; }
@@ -5035,7 +5451,6 @@ const DISCOVERY_CSS: &str = "<style>
   .topology-toolbar { margin-left:auto; display:flex; flex-wrap:wrap; gap:.35rem; }
   .btn-xs { padding:.3rem .6rem; font-size:.78rem; }
   .topology-badge { font-size:.72rem; font-weight:600; letter-spacing:.02em; padding:.2rem .55rem; border-radius:9999px; background:#1e3a5f; color:#93c5fd; border:1px solid #1d4ed8; }
-  .topology-badge.enterprise { background:#052e16; color:#86efac; border-color:#166534; }
   #topology-canvas-wrap { position:relative; overflow:hidden; background:#0b1220; border:1px solid #334155; border-radius:.5rem; height:520px; }
   html[data-theme='light'] #topology-canvas-wrap { background:#f8fafc; border-color:#cbd5e1; }
   #topology-canvas { width:100%; height:100%; display:block; cursor:grab; touch-action:none; }
@@ -5445,8 +5860,8 @@ fn run_polling_loop_with_observer(
                             name: device.label().to_string(),
                         community: device.community.clone(),
                         device_id,
-                        previous_status: device.status.clone(),
                         status: status.to_string(),
+                        polling_succeeded: is_online,
                         sampled_at: now.clone(),
                         metrics: None,
                         sys_object_id: None,
@@ -5551,17 +5966,6 @@ fn run_polling_loop_with_observer(
             };
 
             if let Ok(r) = repo.lock() {
-                let _ = r.update_device_status(&result.ip, &result.status);
-                if !result.template_metrics.is_empty()
-                    && let Err(error) = r.save_template_metric_samples(
-                        result.device_id,
-                        &result.template_metrics,
-                        &result.sampled_at,
-                    )
-                {
-                    tracing::warn!(device = %result.ip, %error, "Template metric history could not be saved");
-                }
-
                 let dev_config = DeviceConfig {
                     id: Some(result.device_id),
                     name: result.name.clone(),
@@ -5571,21 +5975,27 @@ fn run_polling_loop_with_observer(
                     status: result.status.clone(),
                     last_seen_at: None,
                 };
-
-                // ダウン継続中に毎周期通知しないよう、遷移した瞬間だけ配信する。
-                if result.status == "offline" && result.previous_status != "offline" {
-                    alerts.publish(crate::alert::AlertEvent::device_offline(
-                        &dev_config,
-                        "SNMP probe failed",
-                    ));
+                match r.update_device_status_with_transition(
+                    &dev_config,
+                    &result.status,
+                    result.polling_succeeded,
+                ) {
+                    Ok(Some(event)) => {
+                        alerts.publish(event);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!(device_id=result.device_id, %error, "Device status transition could not be saved");
+                    }
                 }
-                if result.previous_status == "offline" && result.status == "online" {
-                    alerts.publish(crate::alert::AlertEvent::new(
-                        crate::alert::AlertKind::Custom("RESOLVED_DEVICE_OFFLINE".into()),
-                        crate::alert::AlertSeverity::Info,
-                        &dev_config,
-                        "[RESOLVED] SNMP polling succeeded",
-                    ));
+                if !result.template_metrics.is_empty()
+                    && let Err(error) = r.save_template_metric_samples(
+                        result.device_id,
+                        &result.template_metrics,
+                        &result.sampled_at,
+                    )
+                {
+                    tracing::warn!(device = %result.ip, %error, "Template metric history could not be saved");
                 }
                 for (index, name, admin, oper) in &result.port_states {
                     match r.observe_port_link(
@@ -5739,8 +6149,8 @@ struct PollResult {
     name: String,
     community: String,
     device_id: i64,
-    previous_status: String,
     status: String,
+    polling_succeeded: bool,
     sampled_at: String,
     metrics: Option<crate::db::models::DeviceMetrics>,
     template_metrics: Vec<crate::snmp::client::TemplateMetricReading>,
@@ -5756,8 +6166,8 @@ impl PollResult {
             name: String::new(),
             community: "public".to_string(),
             device_id: 0,
-            previous_status: "offline".to_string(),
             status: "offline".to_string(),
+            polling_succeeded: false,
             sampled_at: chrono_now(),
             metrics: None,
             template_metrics: vec![],
@@ -6208,15 +6618,17 @@ mod tests {
 
     use super::{
         MAX_MONITORED_NODES, WebLimits, WebServer, WebTopologyEdge, WebTopologyInterface,
-        WebTopologyReport, annotate_edge_health, api_flow_analytics, api_live_flow_analytics,
+        WebTopologyReport, annotate_edge_health, api_acknowledge_alert, api_acknowledge_all_alerts,
+        api_alert_history, api_clear_alert_history, api_flow_analytics, api_live_flow_analytics,
         classify_interface_diagnostic, effective_interface_link_status, evaluate_port_health,
-        merge_duplicate_edges, page_dashboard, page_device_detail, page_discovery, parse_cdp_edges,
-        persist_config, strip_community,
+        merge_duplicate_edges, page_alerts, page_dashboard, page_device_detail, page_discovery,
+        parse_cdp_edges, persist_config, strip_community,
     };
     use crate::config::AppConfig;
     use crate::db::models::{Device, FlowRecord, InterfacePortDelta, InterfaceSample};
     use crate::db::repository::Repository;
     use crate::db::sqlite::initialize_database;
+    use crate::device::DeviceConfig;
     use rusqlite::Connection;
     use std::collections::BTreeMap;
 
@@ -7700,6 +8112,123 @@ mod tests {
             classify_interface_diagnostic("up", 0, 0, 0, 0, 0),
             "healthy"
         );
+    }
+
+    #[test]
+    fn alert_history_api_filters_paginates_acknowledges_and_clears() {
+        use crate::db::models::AlertEvent;
+
+        let repository =
+            Repository::new(initialize_database(std::path::Path::new(":memory:")).unwrap())
+                .unwrap();
+        let device_id = repository
+            .save_device_config(&DeviceConfig::new("192.0.2.91", "fixture"))
+            .unwrap();
+        let save_alert = |severity: &str, details: &str| {
+            repository
+                .save_alert(&AlertEvent {
+                    id: None,
+                    device_id,
+                    alert_type: format!("{severity}_event"),
+                    severity: severity.to_string(),
+                    details: details.to_string(),
+                    created_at: None,
+                })
+                .unwrap()
+        };
+        let critical_id = save_alert("critical", "router link down");
+        let warning_id = save_alert("warning", "router CPU high");
+        let info_id = save_alert("info", "router memory normal");
+        repository
+            .acknowledge_alert(warning_id, "2026-11-21 00:00:00")
+            .unwrap();
+        let repo = Arc::new(Mutex::new(repository));
+
+        let (status, body) = api_alert_history("limit=1&offset=0&status=all", &repo);
+        assert_eq!(status, "200 OK");
+        let page: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(page["total"], 3);
+        assert_eq!(page["unacknowledged_count"], 2);
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        let (status, next_body) = api_alert_history("limit=1&offset=1&status=all", &repo);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&next_body).unwrap()["total"],
+            3
+        );
+
+        let (status, filtered_body) = api_alert_history(
+            "limit=20&offset=0&severity=critical&status=unacknowledged&q=router&days=30",
+            &repo,
+        );
+        assert_eq!(status, "200 OK");
+        let filtered: serde_json::Value = serde_json::from_str(&filtered_body).unwrap();
+        assert_eq!(filtered["total"], 1);
+        assert_eq!(filtered["items"][0]["id"], critical_id);
+
+        let (status, first_ack) = api_acknowledge_alert(&critical_id.to_string(), &repo);
+        assert_eq!(status, "200 OK");
+        let first_ack: serde_json::Value = serde_json::from_str(&first_ack).unwrap();
+        let (status, repeated_ack) = api_acknowledge_alert(&critical_id.to_string(), &repo);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&repeated_ack).unwrap()["acknowledged_at"],
+            first_ack["acknowledged_at"]
+        );
+
+        let (status, bulk_ack) =
+            api_acknowledge_all_alerts(r#"{"severity":"info","q":"router","days":30}"#, &repo);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&bulk_ack).unwrap()["updated"],
+            1
+        );
+        assert!(info_id > 0);
+        assert_eq!(
+            api_alert_history("status=unacknowledged", &repo).0,
+            "200 OK"
+        );
+        let unacknowledged: serde_json::Value =
+            serde_json::from_str(&api_alert_history("status=unacknowledged", &repo).1).unwrap();
+        assert_eq!(unacknowledged["total"], 0);
+
+        let (status, cleared_acknowledged) =
+            api_clear_alert_history(r#"{"mode":"acknowledged"}"#, &repo);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&cleared_acknowledged).unwrap()["deleted"],
+            3
+        );
+        repo.lock()
+            .unwrap()
+            .save_alert(&AlertEvent {
+                id: None,
+                device_id,
+                alert_type: "warning_event".into(),
+                severity: "warning".into(),
+                details: "new router event".into(),
+                created_at: None,
+            })
+            .unwrap();
+        let (status, cleared_all) = api_clear_alert_history(r#"{"mode":"all"}"#, &repo);
+        assert_eq!(status, "200 OK");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&cleared_all).unwrap()["deleted"],
+            1
+        );
+        assert_eq!(api_alert_history("limit=0", &repo).0, "400 Bad Request");
+        assert_eq!(
+            api_clear_alert_history(r#"{"mode":"invalid"}"#, &repo).0,
+            "400 Bad Request"
+        );
+    }
+
+    #[test]
+    fn alert_history_page_includes_shared_navigation_and_compiled_script() {
+        let page = page_alerts(None);
+        assert!(page.contains("href='/alerts' data-i18n='nav_alerts'"));
+        assert!(page.contains("id='alerts-page'"));
+        assert!(page.contains("/static/js/alerts.js"));
     }
 }
 

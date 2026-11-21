@@ -1,9 +1,11 @@
 use crate::db::models::{
-    AlertEvent, Device, DeviceMetrics, FlowApplicationShare, FlowEndpointShare, FlowRecord,
-    FlowSummary, FlowTimeseries, InterfacePortDelta, InterfaceSample, InterfaceSpike,
-    ProtocolShare, RecentAlert, TopTalker,
+    AlertAcknowledgementFilter, AlertEvent, AlertHistoryFilter, AlertHistoryItem, AlertHistoryPage,
+    Device, DeviceMetrics, FlowApplicationShare, FlowEndpointShare, FlowRecord, FlowSummary,
+    FlowTimeseries, InterfacePortDelta, InterfaceSample, InterfaceSpike, ProtocolShare,
+    RecentAlert, TopTalker,
 };
 use crate::error::AppError;
+use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params, params_from_iter};
 use std::collections::HashMap;
 
@@ -27,6 +29,46 @@ fn parse_tags(json: String) -> rusqlite::Result<Vec<String>> {
     serde_json::from_str(&json).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, Box::new(error))
     })
+}
+
+fn alert_filter_clause(filter: &AlertHistoryFilter, include_status: bool) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    if let Some(severity) = &filter.severity {
+        clauses.push("a.severity = ?");
+        values.push(Value::Text(severity.clone()));
+    }
+    if let Some(query) = filter.query.as_deref().filter(|query| !query.is_empty()) {
+        clauses.push(
+            "(instr(lower(coalesce(d.display_name, '')), lower(?)) > 0
+              OR instr(lower(coalesce(d.name, '')), lower(?)) > 0
+              OR instr(lower(coalesce(d.ip, '')), lower(?)) > 0
+              OR instr(lower(a.alert_type), lower(?)) > 0
+              OR instr(lower(a.details), lower(?)) > 0)",
+        );
+        values.extend((0..5).map(|_| Value::Text(query.to_string())));
+    }
+    if let Some(days) = filter.days {
+        clauses.push("a.created_at >= datetime('now', ?)");
+        values.push(Value::Text(format!("-{days} days")));
+    }
+    if include_status {
+        match filter.status {
+            AlertAcknowledgementFilter::All => {}
+            AlertAcknowledgementFilter::Unacknowledged => {
+                clauses.push("a.acknowledged_at IS NULL");
+            }
+            AlertAcknowledgementFilter::Acknowledged => {
+                clauses.push("a.acknowledged_at IS NOT NULL");
+            }
+        }
+    }
+    let where_clause = if clauses.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        clauses.join(" AND ")
+    };
+    (where_clause, values)
 }
 
 impl Repository {
@@ -223,6 +265,59 @@ impl Repository {
         )?;
 
         Ok(())
+    }
+
+    pub fn update_device_status_with_transition(
+        &self,
+        device: &crate::device::types::DeviceConfig,
+        status: &str,
+        polling_succeeded: bool,
+    ) -> Result<Option<crate::alert::event::AlertEvent>, AppError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let previous = transaction
+            .query_row(
+                "SELECT id, status FROM devices WHERE ip = ?1",
+                params![device.ip],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((device_id, previous_status)) = previous else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+
+        transaction.execute(
+            "UPDATE devices
+             SET status = ?1,
+                 last_seen_at = CASE WHEN ?2 THEN CURRENT_TIMESTAMP ELSE last_seen_at END,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE ip = ?3",
+            params![status, polling_succeeded, device.ip],
+        )?;
+
+        let mut current_device = device.clone();
+        current_device.id = Some(device_id);
+        current_device.status = status.to_string();
+        let event = crate::alert::rules::device_status_transition_alert(
+            &current_device,
+            &previous_status,
+            status,
+        );
+        if let Some(event) = &event {
+            transaction.execute(
+                "INSERT INTO alert_events (device_id, alert_type, severity, details, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    device_id,
+                    event.kind.as_str(),
+                    event.severity.as_str(),
+                    event.message,
+                    event.occurred_at.to_rfc3339(),
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(event)
     }
 
     pub fn remove_device_by_ip(&self, ip: &str) -> Result<(), AppError> {
@@ -1400,7 +1495,7 @@ impl Repository {
     }
 
     pub fn save_alert(&self, alert: &AlertEvent) -> Result<i64, AppError> {
-        let id = self.connection.execute(
+        self.connection.execute(
             "INSERT INTO alert_events (device_id, alert_type, severity, details, created_at)
              VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
             params![
@@ -1410,8 +1505,7 @@ impl Repository {
                 alert.details
             ],
         )?;
-
-        Ok(id as i64)
+        Ok(self.connection.last_insert_rowid())
     }
 
     pub fn cleanup_old_history(&self, history_days: u32) -> Result<usize, AppError> {
@@ -2009,6 +2103,133 @@ impl Repository {
         Ok(rows)
     }
 
+    pub fn get_alert_history_page(
+        &self,
+        filter: &AlertHistoryFilter,
+        limit: usize,
+        offset: usize,
+    ) -> Result<AlertHistoryPage, AppError> {
+        let (where_clause, values) = alert_filter_clause(filter, true);
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM alert_events a
+             LEFT JOIN devices d ON d.id = a.device_id
+             WHERE {where_clause}"
+        );
+        let total: i64 =
+            self.connection
+                .query_row(&count_sql, params_from_iter(values.iter()), |row| {
+                    row.get(0)
+                })?;
+
+        let (unacknowledged_where, unacknowledged_values) = alert_filter_clause(filter, false);
+        let unacknowledged_sql = format!(
+            "SELECT COUNT(*) FROM alert_events a
+             LEFT JOIN devices d ON d.id = a.device_id
+             WHERE a.acknowledged_at IS NULL AND {unacknowledged_where}"
+        );
+        let unacknowledged_count: i64 = self.connection.query_row(
+            &unacknowledged_sql,
+            params_from_iter(unacknowledged_values.iter()),
+            |row| row.get(0),
+        )?;
+
+        let list_sql = format!(
+            "SELECT a.id, a.device_id,
+                    COALESCE(NULLIF(d.display_name, ''), NULLIF(d.name, ''), d.ip, CAST(a.device_id AS TEXT)),
+                    COALESCE(d.ip, ''), a.alert_type, a.severity, a.details, a.created_at, a.acknowledged_at
+             FROM alert_events a
+             LEFT JOIN devices d ON d.id = a.device_id
+             WHERE {where_clause}
+             ORDER BY a.created_at DESC, a.id DESC
+             LIMIT ? OFFSET ?"
+        );
+        let mut list_values = values;
+        list_values.push(Value::Integer(limit as i64));
+        list_values.push(Value::Integer(offset as i64));
+        let mut statement = self.connection.prepare(&list_sql)?;
+        let items = statement
+            .query_map(params_from_iter(list_values.iter()), |row| {
+                Ok(AlertHistoryItem {
+                    id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    device_name: row.get(2)?,
+                    device_ip: row.get(3)?,
+                    alert_type: row.get(4)?,
+                    severity: row.get(5)?,
+                    details: row.get(6)?,
+                    created_at: row.get(7)?,
+                    acknowledged_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AlertHistoryPage {
+            total: total as usize,
+            unacknowledged_count: unacknowledged_count as usize,
+            items,
+        })
+    }
+
+    pub fn count_unacknowledged_alerts(&self) -> Result<usize, AppError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM alert_events WHERE acknowledged_at IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    pub fn acknowledge_alert(
+        &self,
+        id: i64,
+        acknowledged_at: &str,
+    ) -> Result<Option<String>, AppError> {
+        self.connection.execute(
+            "UPDATE alert_events
+             SET acknowledged_at = COALESCE(acknowledged_at, ?1)
+             WHERE id = ?2",
+            params![acknowledged_at, id],
+        )?;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT acknowledged_at FROM alert_events WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn acknowledge_matching_alerts(
+        &self,
+        filter: &AlertHistoryFilter,
+        acknowledged_at: &str,
+    ) -> Result<usize, AppError> {
+        let (where_clause, mut values) = alert_filter_clause(filter, false);
+        let sql = format!(
+            "UPDATE alert_events
+             SET acknowledged_at = ?1
+             WHERE acknowledged_at IS NULL
+               AND id IN (
+                   SELECT a.id FROM alert_events a
+                   LEFT JOIN devices d ON d.id = a.device_id
+                   WHERE {where_clause}
+               )"
+        );
+        values.insert(0, Value::Text(acknowledged_at.to_string()));
+        Ok(self
+            .connection
+            .execute(&sql, params_from_iter(values.iter()))?)
+    }
+
+    pub fn clear_alert_history(&self, acknowledged_only: bool) -> Result<usize, AppError> {
+        let sql = if acknowledged_only {
+            "DELETE FROM alert_events WHERE acknowledged_at IS NOT NULL"
+        } else {
+            "DELETE FROM alert_events"
+        };
+        Ok(self.connection.execute(sql, [])?)
+    }
+
     /// 保存済みの interface_error_spike アラートから直近10分のスパイク一覧を返す。
     pub fn get_recent_interface_spikes(
         &self,
@@ -2347,6 +2568,7 @@ mod counter_tests {
                         ).unwrap();
                     }
                 }
+
                 transaction.commit().unwrap();
                 if encrypted {
                     encrypted_times.push(start.elapsed());
@@ -2364,5 +2586,130 @@ mod counter_tests {
             encrypted_times[3].as_secs_f64() / plain_times[3].as_secs_f64()
         );
         assert_eq!(repository.count_rows("device_metrics").unwrap(), 60_000);
+    }
+}
+
+#[cfg(test)]
+mod alert_history_tests {
+    use super::*;
+    use crate::db::models::AlertAcknowledgementFilter;
+    use crate::db::sqlite::initialize_database;
+    use std::path::Path;
+
+    fn repository_with_alerts() -> Repository {
+        let repository =
+            Repository::new(initialize_database(Path::new(":memory:")).unwrap()).unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO devices(id,name,ip,community,device_type,display_name)
+                 VALUES(1,'router-one','192.0.2.1','private','switch','Edge Router One')",
+                [],
+            )
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO alert_events(device_id,alert_type,severity,details,created_at)
+                 VALUES(1,'link_down','critical','Gi1 link down',datetime('now','-1 hour'))",
+                [],
+            )
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO alert_events(device_id,alert_type,severity,details,created_at,acknowledged_at)
+                 VALUES(1,'cpu_high','warning','CPU high',datetime('now','-1 day'),datetime('now'))",
+                [],
+            )
+            .unwrap();
+        repository
+            .connection
+            .execute(
+                "INSERT INTO alert_events(device_id,alert_type,severity,details,created_at)
+                 VALUES(1,'memory_high','info','Memory high',datetime('now','-2 days'))",
+                [],
+            )
+            .unwrap();
+        repository
+    }
+
+    #[test]
+    fn alert_history_filters_counts_and_paginates() {
+        let repository = repository_with_alerts();
+        let page = repository
+            .get_alert_history_page(&AlertHistoryFilter::default(), 2, 0)
+            .unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.unacknowledged_count, 2);
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].severity, "critical");
+        assert_eq!(page.items[0].device_name, "Edge Router One");
+        assert!(page.items[0].acknowledged_at.is_none());
+
+        let next_page = repository
+            .get_alert_history_page(&AlertHistoryFilter::default(), 2, 2)
+            .unwrap();
+        assert_eq!(next_page.total, 3);
+        assert_eq!(next_page.items.len(), 1);
+
+        let filtered = repository
+            .get_alert_history_page(
+                &AlertHistoryFilter {
+                    severity: Some("warning".into()),
+                    status: AlertAcknowledgementFilter::Acknowledged,
+                    query: Some("edge router".into()),
+                    days: Some(30),
+                },
+                20,
+                0,
+            )
+            .unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.unacknowledged_count, 0);
+        assert_eq!(filtered.items[0].details, "CPU high");
+    }
+
+    #[test]
+    fn alert_acknowledgement_is_idempotent_and_history_can_be_cleared_by_status() {
+        let repository = repository_with_alerts();
+        let id: i64 = repository
+            .connection
+            .query_row(
+                "SELECT id FROM alert_events WHERE severity='critical'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let acknowledged_at = "2026-11-21 00:00:00";
+        assert_eq!(
+            repository
+                .acknowledge_alert(id, acknowledged_at)
+                .unwrap()
+                .as_deref(),
+            Some(acknowledged_at)
+        );
+        assert_eq!(
+            repository
+                .acknowledge_alert(id, "2026-11-21 00:01:00")
+                .unwrap()
+                .as_deref(),
+            Some(acknowledged_at)
+        );
+        assert_eq!(
+            repository
+                .acknowledge_matching_alerts(
+                    &AlertHistoryFilter {
+                        severity: Some("info".into()),
+                        ..AlertHistoryFilter::default()
+                    },
+                    acknowledged_at,
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(repository.count_unacknowledged_alerts().unwrap(), 0);
+        assert_eq!(repository.clear_alert_history(true).unwrap(), 3);
+        assert_eq!(repository.clear_alert_history(false).unwrap(), 0);
     }
 }

@@ -75,7 +75,7 @@ test("Community settings expose saved notification channels and global/device ma
         await route.fulfill({ json: { slack: {}, teams: {}, webhook: { enabled: true, webhook_url: "http://127.0.0.1:19090/fixture" },
             flap_guard: {}, retry: {} } });
     });
-    let change: { device_id: number | null; enabled: boolean } | undefined;
+    let change: { device_id: number | null; enabled: boolean; duration: number | null; reason: string } | undefined;
     await page.route("**/api/maintenance", async route => {
         if (route.request().method() === "POST") {
             change = route.request().postDataJSON();
@@ -91,8 +91,37 @@ test("Community settings expose saved notification channels and global/device ma
     await page.evaluate(() => window.saveNotifications?.());
     await expect.poll(() => saved).toMatchObject({ webhook: { enabled: true, webhook_url: "http://127.0.0.1:19090/updated" } });
     const controls = page.locator("#core-maintenance");
+    await expect(controls.locator(".maintenance-status-badge")).toHaveText("Not muted");
+    await expect(controls.getByLabel("Scope")).toBeVisible();
+    await expect(controls.getByLabel("Duration")).toBeVisible();
+    await expect(controls.getByLabel("Reason")).toHaveAttribute("placeholder", "e.g., Planned switch firmware upgrade");
+    await expect(controls.getByRole("button", { name: "Mute", exact: true })).toHaveClass(/btn-primary/);
+    await expect(controls.getByRole("button", { name: "Unmute", exact: true })).toHaveClass(/btn-secondary/);
+    const formGrid = controls.locator(".maintenance-form-grid");
+    await expect(formGrid).toHaveCSS("display", "grid");
+    const scopeBox = await controls.getByLabel("Scope").boundingBox();
+    const durationBox = await controls.getByLabel("Duration").boundingBox();
+    expect(scopeBox).not.toBeNull();
+    expect(durationBox).not.toBeNull();
+    expect(durationBox!.x).toBeGreaterThan(scopeBox!.x);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobileScopeBox = await controls.getByLabel("Scope").boundingBox();
+    const mobileDurationBox = await controls.getByLabel("Duration").boundingBox();
+    expect(mobileScopeBox).not.toBeNull();
+    expect(mobileDurationBox).not.toBeNull();
+    expect(mobileDurationBox!.y).toBeGreaterThan(mobileScopeBox!.y);
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await controls.getByLabel("Reason").fill("planned switch firmware upgrade");
     await controls.getByRole("button", { name: "Mute", exact: true }).click();
     await expect(controls).toContainText("Muted: collection and recording continue.");
+    await expect(controls.locator(".maintenance-status-badge")).toHaveText("Muted");
+    await expect(controls.locator(".maintenance-status-details")).toContainText("fixture");
+    expect(change?.duration).toBe(3600);
+    expect(change?.reason).toBe("planned switch firmware upgrade");
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+    await expect(controls.locator(".maintenance-status-badge")).toHaveCSS("color", "rgb(146, 64, 14)");
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+    await expect(controls.locator(".maintenance-status-badge")).toHaveCSS("color", "rgb(252, 211, 77)");
     expect(change?.device_id).toBeNull();
     await controls.locator("select").first().selectOption("1");
     await controls.getByRole("button", { name: "Mute", exact: true }).click();
@@ -101,6 +130,8 @@ test("Community settings expose saved notification channels and global/device ma
     await expect.poll(() => change?.enabled).toBe(false);
     await page.evaluate(() => window.setLanguage?.("ja"));
     await expect(controls.getByRole("heading")).toHaveText("アラート静観");
+    await expect(controls.getByLabel("期間")).toBeVisible();
+    await expect(controls.getByLabel("理由")).toHaveAttribute("placeholder", "例：スイッチのファームウェア更新");
 });
 
 test("Community alert settings and maintenance APIs persist and reject cross-origin mutations", async ({ request, baseURL }) => {

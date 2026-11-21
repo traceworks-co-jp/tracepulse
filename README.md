@@ -90,17 +90,18 @@ Web UI mode is available at `http://localhost:8080` after startup.
 
 This repository is the public TracePulse Core. It owns the monitoring runtime,
 the generic Web UI host, and the `WebExtensionProvider` integration contract.
-It contains no Enterprise analytics routes, pages, or frontend assets. Licensed
-features are implemented and distributed separately by TracePulse Enterprise,
-which registers its own extension provider at startup.
+It contains no Enterprise-only analytics routes, pages, or frontend assets.
+Community includes built-in outbound notifications; other licensed Enterprise
+features are implemented separately by TracePulse Enterprise, which registers
+its own extension provider at startup.
 
 ---
 
 ## Notifications
 
-Community builds record and display alerts but do not deliver outbound
-notifications. Delivery and destination configuration are provided by the
-separate TracePulse Enterprise package through the notification provider API.
+Community includes outbound alert delivery to Slack, Teams, Syslog, generic
+Webhooks, and SMTP. Configure destinations and send test notifications from
+Settings. Notification channels are disabled until configured.
 
 ---
 
@@ -541,9 +542,9 @@ third-party license notice page. Native release archives also include
 
 The public repository provides the Community edition. Both Community and Enterprise have a system ceiling of **200 monitored nodes per instance**, rather than an edition-specific registration cap. Enterprise integrations continue to supply the licensed `max_nodes` through `WebLimits.max_devices`; the effective limit is the smaller of that value and 200. Unset limits also use the 200-node ceiling. Community CIDR discovery remains restricted to a single `/24` subnet.
 
-Enterprise-only analytics and bundled assets are not included in the public repository. Enterprise integrations are supplied through private provider implementations using the public extension interfaces. Changing the Community edition flag alone therefore does not provide the Enterprise implementation.
+Enterprise-only analytics and their bundled assets are not included in the public repository. Other licensed Enterprise features are supplied through private provider implementations using the public extension interfaces. Community's built-in Slack, Teams, Syslog, Webhook, and SMTP notifications are available without an Enterprise integration. Changing the Community edition flag alone does not provide Enterprise-only features.
 
-Modified builds must not be represented as official TracePulse Enterprise products or use TracePulse trademarks without permission. Choose Enterprise for automated predictive monitoring, automated security management and trust scoring, automatically saved topology with last-known-good (LKG) retention during failures, status-aware highlighting/filtering, integrations, support, and updates—not to unlock additional nodes beyond the instance ceiling.
+Modified builds must not be represented as official TracePulse Enterprise products or use TracePulse trademarks without permission. Choose Enterprise for automated predictive monitoring, automated security management and trust scoring, automatically saved topology with last-known-good (LKG) retention during failures, status-aware highlighting/filtering, additional licensed integrations, support, and updates—not to unlock additional nodes beyond the instance ceiling.
 
 ---
 
@@ -567,7 +568,7 @@ TracePulse は、SNMP を用いてネットワーク機器の異常兆候を検�
 
 ## Notifications
 
-Community 版はアラートを記録・表示しますが、外部への通知配送は行いません。通知先の設定と配送は、汎用通知プロバイダー API を使用する別パッケージの TracePulse Enterprise で提供します。
+Community版には、Slack、Teams、Syslog、汎用Webhook、SMTPへの標準アラート通知機能が含まれます。通知先の設定とテスト送信は設定画面から行えます。各通知チャネルは設定するまで無効です。
 
 ---
 
@@ -729,9 +730,9 @@ history_days = 7
 
 公開リポジトリで提供するのは Community 版です。Community 版固有の台数制限を廃止し、Community・Enterprise 共通のシステム上限を **1インスタンスあたり最大200監視ノード** とします。Enterprise 連携では、引き続きライセンスの `max_nodes` を `WebLimits.max_devices` に指定し、その値と200の小さい方を適用します。上限未指定時も200ノードです。Community 版の CIDR 自動探索範囲は、引き続き単一の `/24` サブネットです。
 
-Enterprise 専用の分析機能およびバンドル済みアセットは公開リポジトリには含めません。Enterprise 連携は、公開されている拡張インターフェースを通じて非公開のプロバイダー実装から提供します。そのため、Community 版のエディションフラグを変更するだけでは Enterprise 実装を利用できません。
+Enterprise 専用の分析機能および専用アセットは公開リポジトリには含めません。その他のライセンス機能は、公開されている拡張インターフェースを通じて非公開のプロバイダー実装から提供します。Community版標準の Slack、Teams、Syslog、Webhook、SMTP 通知は Enterprise 連携なしで利用できます。Community版のエディションフラグを変更するだけでは Enterprise 専用機能を利用できません。
 
-改変版を公式の TracePulse Enterprise と表示したり、許可なく TracePulse の商標を使用したりすることは禁止します。おまかせ予兆監視・おまかせセキュリティ管理／信用スコア・自動保存トポロジ（障害時LKG保持）・ステータス連動ハイライト＆フィルタリング、Enterprise 連携、サポート、アップデートをご利用の場合は公式 Enterprise 版をご検討ください。Enterprise への移行でインスタンス上限が増えるものではありません。
+改変版を公式の TracePulse Enterprise と表示したり、許可なく TracePulse の商標を使用したりすることは禁止します。おまかせ予兆監視・おまかせセキュリティ管理／信用スコア・自動保存トポロジ（障害時LKG保持）・ステータス連動ハイライト＆フィルタリング、追加のライセンス連携、サポート、アップデートをご利用の場合は公式 Enterprise 版をご検討ください。Enterprise への移行でインスタンス上限が増えるものではありません。
 
 本プロジェクトは Apache License, Version 2.0 の下で提供されます。詳細は
 [LICENSE-APACHE](LICENSE-APACHE) または[ライセンス全文](http://www.apache.org/licenses/LICENSE-2.0)

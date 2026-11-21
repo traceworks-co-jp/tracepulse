@@ -64,7 +64,7 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     return document.createElementNS("http://www.w3.org/2000/svg", tag);
   }
   function widthFor(node) {
-    return Math.min(280, Math.max(128, (node.label || node.ip || node.id).length * 7.4 + 28, (node.stateLabel?.length || 0) * 11 + 28));
+    return Math.min(280, Math.max(128, (node.label || node.id).length * 7.4 + 28, (node.ip?.length || 0) * 8 + 28, (node.stateLabel?.length || 0) * 11 + 28));
   }
   var TopologyMap = class {
     constructor(svg, options = {}) {

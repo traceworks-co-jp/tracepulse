@@ -268,7 +268,7 @@ impl MaintenanceStore {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(err)?;
-        reconcile(&tx, &tx, notifier, now, true, thresholds)?;
+        reconcile(&tx, &tx, notifier, now, thresholds)?;
         tx.commit().map_err(err)
     }
 
@@ -311,10 +311,9 @@ fn reconcile(
     core: &Connection,
     notifier: &Notifier,
     now: i64,
-    include_basic: bool,
     thresholds: Option<&AlertConfig>,
 ) -> Result<Vec<AlertEvent>, String> {
-    let has_ports: bool = include_basic && core.query_row(
+    let has_ports: bool = core.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='interface_alert_settings')",
         [], |r| r.get(0),
     ).map_err(err)?;
@@ -374,7 +373,7 @@ fn reconcile(
         }
 
         let mut risks = Vec::new();
-        if include_basic && observed.is_some_and(|at| at > ended && at <= now && at >= now - 900) {
+        if observed.is_some_and(|at| at > ended && at <= now && at >= now - 900) {
             let value = match status.as_str() {
                 "offline" | "critical" => Some((
                     AlertSeverity::Critical,
@@ -495,14 +494,7 @@ fn reconcile(
                 device_ip: ip,
                 interface_id: None,
                 interface_name: None,
-                kind: AlertKind::Custom(
-                    if include_basic {
-                        "MAINTENANCE_RESUMED_AVAILABILITY"
-                    } else {
-                        "MAINTENANCE_RESUMED_SYSTEM_METRICS"
-                    }
-                    .into(),
-                ),
+                kind: AlertKind::Custom("MAINTENANCE_RESUMED_AVAILABILITY".into()),
                 severity,
                 message: format!(
                     "Maintenance ended; continuing risks: {}",
@@ -528,18 +520,6 @@ fn reconcile(
         )
         .map_err(err)?;
     Ok(output)
-}
-
-/// Enterprise keeps its existing availability/port logic and reuses the metric evaluator.
-/// `store` must be a write transaction on the same database as the notifier Outbox.
-pub fn enqueue_system_release_summaries(
-    store: &Connection,
-    core: &Connection,
-    notifier: &Notifier,
-    now: i64,
-    thresholds: &AlertConfig,
-) -> Result<Vec<AlertEvent>, String> {
-    reconcile(store, core, notifier, now, false, Some(thresholds))
 }
 
 #[cfg(test)]

@@ -47,6 +47,22 @@ impl PollingEngine {
         self.alerts.publish(event)
     }
 
+    pub fn update_device_status(
+        &self,
+        device: &DeviceConfig,
+        status: &str,
+        polling_succeeded: bool,
+    ) -> Result<(), AppError> {
+        if let Some(event) = self.repository.update_device_status_with_transition(
+            device,
+            status,
+            polling_succeeded,
+        )? {
+            self.alerts.publish(event);
+        }
+        Ok(())
+    }
+
     pub fn poll_device(
         &self,
         device: &DeviceConfig,
@@ -126,5 +142,65 @@ impl PollingEngine {
             }
         }
         Ok((system, interfaces))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::sqlite::initialize_database;
+    use std::path::Path;
+
+    #[test]
+    fn status_transitions_are_saved_and_published_once() {
+        let repository =
+            Repository::new(initialize_database(Path::new(":memory:")).unwrap()).unwrap();
+        let mut device = DeviceConfig::new("192.0.2.1", "public");
+        device.name = "edge-router".into();
+        device.id = Some(repository.save_device_config(&device).unwrap());
+        repository
+            .update_device_status(&device.ip, "online")
+            .unwrap();
+
+        let broadcaster = AlertBroadcaster::new();
+        let mut receiver = broadcaster.subscribe();
+        let engine = PollingEngine::with_broadcaster(AppConfig::default(), repository, broadcaster);
+
+        engine
+            .update_device_status(&device, "offline", false)
+            .unwrap();
+        let offline = receiver.try_recv().unwrap();
+        assert_eq!(offline.kind.as_str(), "DEVICE_OFFLINE");
+        assert_eq!(
+            offline.severity,
+            crate::alert::status::AlertSeverity::Critical
+        );
+        assert!(receiver.try_recv().is_err());
+
+        engine
+            .update_device_status(&device, "offline", false)
+            .unwrap();
+        assert!(receiver.try_recv().is_err());
+
+        engine
+            .update_device_status(&device, "online", true)
+            .unwrap();
+        let recovered = receiver.try_recv().unwrap();
+        assert_eq!(recovered.kind.as_str(), "RESOLVED_DEVICE_OFFLINE");
+        assert_eq!(
+            recovered.severity,
+            crate::alert::status::AlertSeverity::Info
+        );
+        assert!(receiver.try_recv().is_err());
+
+        let page = engine
+            .repository
+            .get_alert_history_page(&crate::db::models::AlertHistoryFilter::default(), 10, 0)
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.items[0].alert_type, "RESOLVED_DEVICE_OFFLINE");
+        assert_eq!(page.items[0].severity, "info");
+        assert_eq!(page.items[1].alert_type, "DEVICE_OFFLINE");
+        assert_eq!(page.items[1].severity, "critical");
     }
 }

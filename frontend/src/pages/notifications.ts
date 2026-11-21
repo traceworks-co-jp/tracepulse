@@ -47,7 +47,7 @@ function populateNotifications(settings: NotificationSettings): void {
     field<HTMLInputElement>("syslog_port").value = String(settings.syslog?.port || 514);
     field<HTMLSelectElement>("syslog_transport").value = settings.syslog?.transport || "udp";
     field<HTMLSelectElement>("syslog_format").value = settings.syslog?.format || "cef";
-    field<HTMLInputElement>("syslog_app_name").value = settings.syslog?.app_name || "tracepulse-enterprise";
+    field<HTMLInputElement>("syslog_app_name").value = settings.syslog?.app_name || "tracepulse";
     field<HTMLInputElement>("smtp_enabled").checked = !!settings.smtp?.enabled;
     field<HTMLInputElement>("smtp_host").value = settings.smtp?.host || "";
     field<HTMLInputElement>("smtp_port").value = String(settings.smtp?.port || 587);

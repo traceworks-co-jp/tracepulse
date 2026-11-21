@@ -36,7 +36,7 @@ instructions in [SECURITY.md](SECURITY.md); do not report them in a public Issue
 
 TracePulse Core covers self-hosted SNMP monitoring of multiple devices, CIDR discovery, local alert recording and display, and Web UI diagnostics. Issue reports about these capabilities, including vendor template compatibility, are welcome within the Community edition's documented limits.
 
-Outbound alert delivery (including Slack, Teams, and email), multi-user RBAC, SIEM integrations, and Enterprise-only analytics are outside Core's scope. These capabilities are considered separately for TracePulse Enterprise; their mention here does not mean they are currently available. See the [Community Edition and Enterprise Features](README.md#community-edition-and-enterprise-features) section for the implementation boundary and edition limits.
+TracePulse Core includes outbound alert delivery through Slack, Teams, Syslog, generic Webhooks, and SMTP. Multi-user RBAC, dedicated SIEM integrations beyond the built-in Syslog channel, and Enterprise-only analytics remain outside Core's scope and are considered separately for TracePulse Enterprise. See the [Community Edition and Enterprise Features](README.md#community-edition-and-enterprise-features) section for the implementation boundary and edition limits.
 
 Use a GitHub Issue or Discussion to ask whether a proposal fits this boundary.
 

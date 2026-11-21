@@ -101,32 +101,7 @@ impl AlertNotification {
         } else {
             format!("{} on {}", event.kind, event.device_name)
         };
-        let recommended_actions = if alert_kind.starts_with("SECURITY_")
-            || alert_kind.starts_with("RESOLVED_SECURITY_")
-        {
-            let action = (|| {
-                let payload = event
-                    .observed_value
-                    .as_deref()
-                    .ok_or("security notification has no structured evidence".to_string())?;
-                let value: serde_json::Value =
-                    serde_json::from_str(payload).map_err(|error| error.to_string())?;
-                value["evidence"]["action"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or("security notification has no remediation".to_string())
-            })();
-            match action {
-                Ok(action) => vec![action],
-                Err(error) => {
-                    tracing::error!(target:"tracepulse::security_management",error_code="ERR_SECURITY_NOTIFICATION_EVIDENCE",
-                        context=%serde_json::json!({"event_id":event.id,"reason":error}),"security notification evidence is invalid");
-                    vec!["Security evidence is unavailable; review Managed Security and service logs before taking action.".into()]
-                }
-            }
-        } else {
-            default_recommended_actions(&event.kind, severity)
-        };
+        let recommended_actions = default_recommended_actions(&event.kind, severity);
 
         Self {
             id: event.id,
@@ -274,7 +249,7 @@ impl Default for SyslogConfig {
             port: 514,
             transport: SyslogTransport::Udp,
             format: SyslogFormat::Cef,
-            app_name: "tracepulse-enterprise".to_string(),
+            app_name: "tracepulse".to_string(),
         }
     }
 }
@@ -603,7 +578,7 @@ impl AdvancedNotifier {
             window: config.flap_guard.window(),
             maintenance: None,
             outbox: None,
-            source: "tracepulse-enterprise",
+            source: "tracepulse",
         })
     }
 
@@ -925,7 +900,7 @@ pub async fn send_test_notification(
                 NotifierError::MissingWebhookUrl("TRACEPULSE_WEBHOOK_URL".to_string())
             })?;
         let payload = serde_json::json!({
-            "source": "tracepulse-enterprise",
+            "source": "tracepulse",
             "alert": alert_json(&test_alert_batch().last_alert),
         });
         return send_json_with_retry(
@@ -1053,7 +1028,7 @@ async fn send_syslog(
     let address = format!("{}:{}", config.host, config.port);
     let message = match config.format {
         SyslogFormat::Cef => format!(
-            "CEF:0|TracePulse|Enterprise|1|{}|{}|{}|src={} dst={} msg={}",
+            "CEF:0|TracePulse|tracepulse|1|{}|{}|{}|src={} dst={} msg={}",
             alert.alert_kind,
             escape_syslog(&alert.title),
             syslog_severity(alert.severity),
@@ -1062,7 +1037,7 @@ async fn send_syslog(
             escape_syslog(&alert.message),
         ),
         SyslogFormat::Leef => format!(
-            "LEEF:2.0|TracePulse|Enterprise|1|{}|devTime={}\tsev={}\tsrc={}\tdst={}\tmsg={}",
+            "LEEF:2.0|TracePulse|tracepulse|1|{}|devTime={}\tsev={}\tsrc={}\tdst={}\tmsg={}",
             escape_syslog(&alert.alert_kind),
             escape_syslog(&alert.occurred_at),
             syslog_severity(alert.severity),
@@ -1402,7 +1377,15 @@ fn default_recommended_actions(
                 "Inspect chassis airflow, fan operation, and environmental conditions.".to_string(),
             ];
         }
-        AlertKind::HealthDegraded | AlertKind::DeviceOffline | AlertKind::Custom(_) => {}
+        AlertKind::DeviceOffline => {
+            return vec![
+                "Verify device reachability from the monitoring segment.".to_string(),
+                "Check power, uplink, routing, and recent maintenance activity.".to_string(),
+                "Escalate to on-call network operations if the device remains unreachable."
+                    .to_string(),
+            ];
+        }
+        AlertKind::HealthDegraded | AlertKind::Custom(_) => {}
     }
 
     match severity {
@@ -1551,8 +1534,10 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_syslog_tests_deliver_to_local_udp_and_tcp_receivers() {
+        assert_eq!(NotifierConfig::default().syslog.app_name, "tracepulse");
         for (format, expected) in [
-            (SyslogFormat::Cef, "CEF:0|TracePulse|"),
+            (SyslogFormat::Cef, "CEF:0|TracePulse|tracepulse|"),
+            (SyslogFormat::Leef, "LEEF:2.0|TracePulse|tracepulse|"),
             (SyslogFormat::Rfc5424, ">1 "),
             (SyslogFormat::Rfc3164, "TracePulse:"),
         ] {
@@ -1710,6 +1695,31 @@ mod tests {
         assert!(notification.is_immediate());
         assert_eq!(notification.severity, NotificationSeverity::Info);
         assert!(notification.title.starts_with("[RESOLVED]"));
+    }
+
+    #[test]
+    fn offline_events_are_critical_and_keep_reachability_actions() {
+        let device = DeviceConfig {
+            id: Some(7),
+            name: "edge-1".to_string(),
+            ip: "192.0.2.7".to_string(),
+            community: "public".to_string(),
+            device_type: "router".to_string(),
+            status: "offline".to_string(),
+            last_seen_at: None,
+        };
+        let notification =
+            AlertNotification::from_event(AlertEvent::device_offline(&device, "SNMP timeout"));
+
+        assert_eq!(notification.alert_kind, "DEVICE_OFFLINE");
+        assert_eq!(notification.severity, NotificationSeverity::Critical);
+        assert!(notification.is_immediate());
+        assert!(
+            notification
+                .recommended_actions
+                .iter()
+                .any(|action| action.contains("reachability"))
+        );
     }
 
     #[tokio::test]

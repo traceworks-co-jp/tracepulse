@@ -89,6 +89,42 @@ pub struct RecentAlert {
     pub created_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AlertAcknowledgementFilter {
+    #[default]
+    All,
+    Unacknowledged,
+    Acknowledged,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AlertHistoryFilter {
+    pub severity: Option<String>,
+    pub status: AlertAcknowledgementFilter,
+    pub query: Option<String>,
+    pub days: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertHistoryItem {
+    pub id: i64,
+    pub device_id: i64,
+    pub device_name: String,
+    pub device_ip: String,
+    pub alert_type: String,
+    pub severity: String,
+    pub details: String,
+    pub created_at: String,
+    pub acknowledged_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertHistoryPage {
+    pub total: usize,
+    pub unacknowledged_count: usize,
+    pub items: Vec<AlertHistoryItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceMetrics {
     pub id: Option<i64>,

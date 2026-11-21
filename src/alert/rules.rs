@@ -54,6 +54,32 @@ pub fn interface_error_rate(
     (total > 0).then(|| (errors as f64 / total as f64) * 100.0)
 }
 
+pub fn device_status_transition_alert(
+    device: &crate::device::types::DeviceConfig,
+    previous_status: &str,
+    current_status: &str,
+) -> Option<crate::alert::event::AlertEvent> {
+    if current_status.eq_ignore_ascii_case("offline")
+        && !previous_status.eq_ignore_ascii_case("offline")
+    {
+        Some(crate::alert::event::AlertEvent::device_offline(
+            device,
+            "SNMP polling failed",
+        ))
+    } else if previous_status.eq_ignore_ascii_case("offline")
+        && current_status.eq_ignore_ascii_case("online")
+    {
+        Some(crate::alert::event::AlertEvent::new(
+            crate::alert::event::AlertKind::Custom("RESOLVED_DEVICE_OFFLINE".into()),
+            AlertSeverity::Info,
+            device,
+            "[RESOLVED] SNMP polling succeeded",
+        ))
+    } else {
+        None
+    }
+}
+
 #[derive(Default)]
 pub struct MetricAlertTracker {
     active: std::collections::HashMap<(i64, Option<i64>, String), AlertSeverity>,
@@ -189,6 +215,23 @@ mod metric_tests {
             }
             .validate()
         );
+    }
+
+    #[test]
+    fn device_status_alerts_are_emitted_only_on_offline_and_recovery_transitions() {
+        let mut device = crate::device::types::DeviceConfig::new("192.0.2.1", "public");
+        device.id = Some(1);
+
+        let offline = device_status_transition_alert(&device, "online", "offline").unwrap();
+        assert_eq!(offline.kind.as_str(), "DEVICE_OFFLINE");
+        assert_eq!(offline.severity, AlertSeverity::Critical);
+        assert!(device_status_transition_alert(&device, "offline", "offline").is_none());
+        assert!(device_status_transition_alert(&device, "warning", "online").is_none());
+
+        let recovered = device_status_transition_alert(&device, "offline", "online").unwrap();
+        assert_eq!(recovered.kind.as_str(), "RESOLVED_DEVICE_OFFLINE");
+        assert_eq!(recovered.severity, AlertSeverity::Info);
+        assert!(recovered.message.starts_with("[RESOLVED]"));
     }
 
     #[test]

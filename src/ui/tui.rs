@@ -745,9 +745,8 @@ fn start_poll_task(
                     .probe_device_once(&cfg, Duration::from_millis(600))
                     .is_err()
                 {
-                    let _ = engine.repository.update_device_status(&cfg.ip, "offline");
-                    if !dev.status.eq_ignore_ascii_case("offline") {
-                        engine.publish_alert(AlertEvent::device_offline(&cfg, "SNMP timeout"));
+                    if let Err(error) = engine.update_device_status(&cfg, "offline", false) {
+                        tracing::error!(device = %cfg.ip, %error, "Offline status transition could not be saved");
                     }
                     if let (Some(id), Ok(mut tracker)) = (dev.id, metric_tracker.lock()) {
                         tracker.transitions(id, Vec::new());
@@ -757,14 +756,8 @@ fn start_poll_task(
                 }
 
                 if let Ok((system, interfaces)) = engine.poll_device(&cfg) {
-                    let _ = engine.repository.update_device_status(&cfg.ip, "online");
-                    if dev.status.eq_ignore_ascii_case("offline") {
-                        engine.publish_alert(AlertEvent::new(
-                            crate::alert::AlertKind::Custom("RESOLVED_DEVICE_OFFLINE".into()),
-                            crate::alert::AlertSeverity::Info,
-                            &cfg,
-                            "[RESOLVED] SNMP polling succeeded",
-                        ));
+                    if let Err(error) = engine.update_device_status(&cfg, "online", true) {
+                        tracing::error!(device = %cfg.ip, %error, "Online status transition could not be saved");
                     }
                     if let Some(device_id) = dev.id {
                         let mut metric_events = engine.config.alert.system_alerts(

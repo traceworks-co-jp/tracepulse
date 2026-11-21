@@ -195,9 +195,29 @@ pub fn initialize_database(path: &Path) -> Result<Connection, AppError> {
     ensure_device_metrics_nullable(&connection)?;
     ensure_device_metrics_columns(&connection)?;
     ensure_flow_record_columns(&connection)?;
+    ensure_alert_acknowledged_column(&connection)?;
     super::port_alerts::migrate(&connection)?;
 
     Ok(connection)
+}
+
+fn ensure_alert_acknowledged_column(connection: &Connection) -> Result<(), AppError> {
+    let mut stmt = connection.prepare("PRAGMA table_info(alert_events)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "acknowledged_at") {
+        connection.execute(
+            "ALTER TABLE alert_events ADD COLUMN acknowledged_at TEXT",
+            [],
+        )?;
+    }
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_alert_events_acknowledged_created \
+         ON alert_events(acknowledged_at, created_at DESC)",
+        [],
+    )?;
+    Ok(())
 }
 
 fn ensure_device_metadata_columns(connection: &Connection) -> Result<(), AppError> {
@@ -208,6 +228,7 @@ fn ensure_device_metadata_columns(connection: &Connection) -> Result<(), AppErro
     if !columns.iter().any(|column| column == "display_name") {
         connection.execute("ALTER TABLE devices ADD COLUMN display_name TEXT", [])?;
     }
+
     if !columns.iter().any(|column| column == "tags") {
         connection.execute(
             "ALTER TABLE devices ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
@@ -416,5 +437,44 @@ mod connection_tests {
                 assert_eq!(value, expected, "{pragma}");
             }
         }
+    }
+
+    #[test]
+    fn existing_alert_table_is_migrated_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE alert_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    device_id INTEGER NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    details TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let migrated = initialize_database(&path).unwrap();
+        assert_acknowledged_column_count(&migrated);
+        drop(migrated);
+
+        let reopened = initialize_database(&path).unwrap();
+        assert_acknowledged_column_count(&reopened);
+    }
+
+    fn assert_acknowledged_column_count(connection: &Connection) {
+        let count = connection
+            .prepare("PRAGMA table_info(alert_events)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|column| column == "acknowledged_at")
+            .count();
+        assert_eq!(count, 1);
     }
 }

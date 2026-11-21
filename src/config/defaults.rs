@@ -46,7 +46,7 @@ pub fn default_critical_threshold() -> u32 {
 }
 
 pub fn default_history_days() -> u32 {
-    7
+    30
 }
 
 pub fn default_timezone() -> String {

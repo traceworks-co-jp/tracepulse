@@ -477,7 +477,7 @@ test("DOM power columns show dBm and bandwidth uses percentage values without re
     await expect(rows.nth(3).locator("td").nth(10)).toHaveText("0.0 dBm");
     await expect(rows.nth(3).locator(".status-warning")).toHaveCount(0);
     await page.addScriptTag({ content: "TracePulseDeviceDetail.renderInterfaces([]);" });
-    await expect(page.locator("#if-tbody td")).toHaveAttribute("colspan", "13");
+    await expect(page.locator("#if-tbody td")).toHaveAttribute("colspan", "14");
 });
 
 test("vendor hardware states render normal power and critical failures correctly", async ({ page }) => {
@@ -679,7 +679,7 @@ test("numeric template metrics render exact values and explicit errors safely", 
 test("SNMP settings show the template disclaimer in English and Japanese", async ({ page }) => {
     await page.goto("/settings/snmp");
     const disclaimer = page.locator("[data-i18n='snmp_template_disclaimer']");
-    await expect(disclaimer).toContainText("TraceWorks assumes no liability");
+    await expect(disclaimer).toContainText("TraceWorks Co., Ltd. assumes no liability");
     await page.evaluate(() => window.setLanguage?.("ja"));
     await expect(disclaimer).toContainText("EULA");
     await expect(disclaimer).toContainText("無許可アクセス");
@@ -761,7 +761,7 @@ test("setup guide discovers and registers only selected devices then finishes", 
     await expect(guide.locator("#setup-status")).toContainText("Monitoring starts automatically");
     expect(registered).toEqual([{ ip: "192.0.2.1", name: "<router>", community: "test-secret" }]);
     await guide.getByRole("button", { name: "Next", exact: true }).click();
-    await expect(guide).toContainText("Outbound notifications are not available in Community edition");
+    await expect(guide).toContainText("Configure Slack, Teams, Syslog, Webhook, or SMTP delivery in Settings");
     await guide.getByRole("button", { name: "Finish", exact: true }).click();
     await expect(page.locator(".setup-launch")).toBeHidden();
     await page.reload();
@@ -1037,12 +1037,17 @@ test("interface diagnostic badges reject untrusted status values", async ({ page
     await expect(page.locator("#if-tbody .diagnostic-badge.down")).toHaveText("Down");
 });
 
-test("Community settings do not expose notification destinations", async ({ page, request }) => {
+test("Community settings expose standard notification destinations", async ({ page, request }) => {
     await page.goto("/settings");
-    await expect(page.locator(".destination-grid")).toHaveCount(0);
-    await expect(page.locator("script[src='/static/js/notifications.js']")).toHaveCount(0);
-    expect((await request.get("/static/js/notifications.js")).status()).toBe(404);
-    expect((await request.get("/api/notifications")).status()).toBe(404);
+    await expect(page.locator(".destination-grid")).toBeVisible();
+    await expect(page.locator("script[src='/static/js/notifications.js']")).toHaveCount(1);
+    expect((await request.get("/static/js/notifications.js")).status()).toBe(200);
+    const response = await request.get("/api/notifications");
+    expect(response.status()).toBe(200);
+    const settings = await response.json();
+    for (const channel of ["slack", "teams", "syslog", "webhook", "smtp"]) {
+        expect(settings[channel]).toBeDefined();
+    }
 });
 
 test("dashboard alert table scrolls within the mobile viewport", async ({ page }) => {

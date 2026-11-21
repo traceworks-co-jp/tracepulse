@@ -130,7 +130,7 @@ impl AlertEvent {
         let message = format!("{} ({}) -> {}", device.name, device.ip, reason);
         Self::new(
             AlertKind::DeviceOffline,
-            AlertSeverity::Offline,
+            AlertSeverity::Critical,
             device,
             message,
         )
