@@ -1,6 +1,7 @@
 [alert]
+error_rate_threshold = 0.05
 health_critical_threshold = 60
-health_warning_threshold = 80
+health_warning_threshold = 70
 spike_threshold = 10
 
 [alert.bandwidth]
@@ -20,7 +21,7 @@ critical = 90.0
 warning = 80.0
 
 [display]
-timezone = "utc"
+timezone = "jst"
 
 [flow]
 bind_addr = "0.0.0.0"
@@ -28,14 +29,60 @@ ipfix_port = 4739
 netflow_port = 2055
 sflow_port = 6343
 
+[notifier]
+send_resolved = true
+
+[notifier.flap_guard]
+window_seconds = 10
+
+[notifier.pagerduty]
+enabled = false
+endpoint = "https://events.pagerduty.com/v2/enqueue"
+integration_key_env = "TRACEPULSE_PAGERDUTY_ROUTING_KEY"
+
+[notifier.retry]
+max_attempts = 3
+
+[notifier.slack]
+enabled = false
+webhook_url_env = "TRACEPULSE_SLACK_WEBHOOK_URL"
+
+[notifier.smtp]
+enabled = false
+from = "tracepulse@localhost"
+host = "127.0.0.1"
+port = 587
+starttls = true
+to = []
+
+[notifier.syslog]
+app_name = "tracepulse"
+enabled = false
+format = "cef"
+host = "127.0.0.1"
+port = 514
+transport = "udp"
+
+[notifier.teams]
+enabled = false
+webhook_url_env = "TRACEPULSE_TEAMS_WEBHOOK_URL"
+
+[notifier.webhook]
+enabled = false
+webhook_url_env = "TRACEPULSE_WEBHOOK_URL"
+
 [polling]
 interval_seconds = 30
 
 [retention]
-history_days = 7
+history_days = 30
 
 [snmp]
-default_community = "tpenc:v1:SMtEBXBVsSvSTO57XYHrleVpFGEM+waaQiNC6GVKCrfeTKNjdWAzkhq3c0MXxxroiP7XzdpR/GSwcgDnBFTXf9jHwAohjEyqx8sJKlb4B+KkmxJB+2eSUj9UVTmxGA=="
+cpu_oid_override = ""
+credentials_encrypted = "tpenc:v1:V0AO1/4FFOsA/kcvqY0+QejMwOVK/cAi61TkfNSVleikgt8Bdecg4zj7VeVM2SKiqib/ry+ihWuxhVjKPsG79x1YQ2vQV+G+Cga+R1WqAHo1aG5splI6Ag+Z0qIqeeY28cpuwJXhBVJvbfpNjlF6qIGu6WS/uwzHNI9zJcrKlnggaCCKiLc/MaRsGhBRX8iZZ2beRy+ya7ebv77raToPfAjue+csI//fVWGz9vltjt5QggcPq2idobMG1SFK+KEP3khLmEJ2ywy5s3CAp3AvBBW7dNvhshwa1l4CXrZdGvZYrhsUwoZLRC/T/olvWS9OGHPBS90FSlNYtWXb3WPs0SocntR91VWcOTPNGu5TUTUCuZ/+7a2wHqSkMTY67X0X8ve+dyfIPizqIXHxU1LaUQ=="
+default_community = "tpenc:v1:fDk4FY/uPqegup72ca0/AZqKCrK4jVWMOWb3KPkNjKZMsQCid1kitWka0bOBXIc9TfVlRy39R+HgLm1nLmr9m1HOhFl080KbFyn7P6uX6iXOXW3No8a7k2WFRr1r1Q=="
+hardware_oid_overrides = []
+memory_oid_override = ""
 
 [web]
 port = 8080
