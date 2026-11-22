@@ -1,5 +1,18 @@
 use crate::db::models::InterfaceSample;
 
+pub(crate) fn link_status_text(link_status: u32) -> &'static str {
+    match link_status {
+        1 => "up",
+        2 => "down",
+        3 => "testing",
+        4 => "unknown",
+        5 => "dormant",
+        6 => "notPresent",
+        7 => "lowerLayerDown",
+        _ => "unknown",
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InterfaceMonitor {
     pub if_index: i32,
@@ -73,21 +86,10 @@ impl InterfaceMonitor {
         in_octets: u64,
         out_octets: u64,
     ) -> Self {
-        let status = match link_status {
-            1 => "up",
-            2 => "down",
-            3 => "testing",
-            4 => "unknown",
-            5 => "dormant",
-            6 => "notPresent",
-            7 => "lowerLayerDown",
-            _ => "unknown",
-        };
-
         Self {
             if_index,
             if_name: if_name.to_string(),
-            link_status: status.to_string(),
+            link_status: link_status_text(link_status).to_string(),
             if_admin_status: None,
             if_oper_status: (1..=7).contains(&link_status).then_some(link_status),
             in_errors,

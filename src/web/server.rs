@@ -4673,7 +4673,7 @@ fn page_diagnostics_from_params(
     html.push_str("<span id='diag-progress' class='diag-progress' aria-live='polite'></span>");
     html.push_str("</div>");
     html.push_str("</form>");
-    html.push_str("<p class='diag-note' data-i18n='diagnostics_help'>Check sysObjectID, vendor presets, CPU candidates, and ifIndex mappings.</p>");
+    html.push_str("<p class='diag-note' data-i18n='diagnostics_help'>Check sysObjectID, vendor presets, CPU / memory candidates, interfaces, and hardware sensors.</p>");
     html.push_str("</div>");
     html.push_str(&result_html);
     html.push_str("</main>");
@@ -5106,7 +5106,7 @@ const DIAGNOSTICS_CSS: &str = "<style>
   .diag-pill.na { background:#334155; color:#cbd5e1; }
   .diag-pill.err { background:#450a0a; color:#f87171; }
   .diag-note { color:#94a3b8; font-size:.9rem; line-height:1.5; }
-  .diag-progress { margin-left:.75rem; color:#38bdf8; font-size:.9rem; font-weight:600; }
+  .diag-progress { display:inline-flex; align-items:center; gap:.4rem; flex-wrap:wrap; min-width:0; color:#38bdf8; font-size:.9rem; font-weight:600; }
   .diag-error { color:#f87171; font-weight:600; }
   .diag-empty { color:#64748b; font-style:italic; }
   html[data-theme='light'] .diag-card { background:#fff; border-color:#cbd5e1; }

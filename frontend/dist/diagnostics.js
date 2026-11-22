@@ -248,24 +248,36 @@ ${JSON.stringify(result.data, null, 2)}`).join("\n\n")}`;
     const button = document.getElementById("diag-run-btn");
     const progress = document.getElementById("diag-progress");
     if (button) button.disabled = true;
-    if (progress) progress.textContent = t("diagnostics_running");
-    const body = new URLSearchParams();
-    new FormData(form).forEach((value, key) => {
-      if (typeof value === "string") body.append(key, value);
-    });
-    fetch(form.action, {
-      method: "POST",
-      cache: "no-store",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", ...window.tracepulseRequestHeaders?.() },
-      body: body.toString()
-    }).then((response) => response.text()).then((html) => {
-      document.open();
-      document.write(html);
-      document.close();
-    }).catch((error) => {
-      if (progress) progress.textContent = String(error);
-      if (button) button.disabled = false;
-    });
+    const started = performance.now();
+    const updateProgress = () => {
+      const seconds = Math.floor((performance.now() - started) / 1e3);
+      if (progress) progress.textContent = `${t("diagnostics_elapsed").replace("{seconds}", String(seconds))} \u2014 ${t("diagnostics_progress_detail")}`;
+    };
+    updateProgress();
+    const timer = window.setInterval(updateProgress, 1e3);
+    void (async () => {
+      try {
+        const body = new URLSearchParams();
+        new FormData(form).forEach((value, key) => {
+          if (typeof value === "string") body.append(key, value);
+        });
+        const response = await fetch(form.action, {
+          method: "POST",
+          cache: "no-store",
+          headers: { "Content-Type": "application/x-www-form-urlencoded", ...window.tracepulseRequestHeaders?.() },
+          body: body.toString()
+        });
+        const html = await response.text();
+        window.clearInterval(timer);
+        document.open();
+        document.write(html);
+        document.close();
+      } catch (error) {
+        window.clearInterval(timer);
+        if (progress) progress.textContent = String(error);
+        if (button) button.disabled = false;
+      }
+    })();
     return false;
   }
   window.startDiagnostics = startDiagnostics;

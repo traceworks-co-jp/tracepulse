@@ -2,7 +2,7 @@ use super::session::{ReadName, SyncSession};
 use crate::config::SnmpConfig;
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
-use crate::monitor::interface::InterfaceMonitor;
+use crate::monitor::interface::{InterfaceMonitor, link_status_text};
 use crate::snmp::template::{
     InterfaceTableTemplate, PercentageAggregation, TemplateRegistry, VendorOidTemplate,
 };
@@ -497,23 +497,16 @@ impl SnmpClient {
             vendor_name.as_deref(),
         )?;
 
-        let interface_indexes = self.discover_interface_indexes(device)?;
-        let mut interfaces = Vec::new();
-        for if_index in interface_indexes {
-            if let Ok(iface) = self.query_interface(device, if_index, None) {
-                interfaces.push(SnmpInterfaceDiagnostic {
-                    if_index: iface.if_index as u32,
-                    if_name: iface.if_name,
-                    link_status: iface.link_status,
-                });
-            }
-        }
-
+        let mut bulk = BulkWalker::new(&mut session);
+        let interfaces = query_diagnostic_interfaces(&mut bulk)?;
         let hardware = self
-            .query_hardware_inventory(device, sys_object_id.as_deref())
-            .unwrap_or_else(|_| HardwareInventory {
-                sensors: Vec::new(),
-                probes: Vec::new(),
+            .query_hardware_inventory_with_walker(&mut bulk, sys_object_id.as_deref())
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Hardware inventory unavailable during diagnostics");
+                HardwareInventory {
+                    sensors: Vec::new(),
+                    probes: Vec::new(),
+                }
             });
 
         Ok(SnmpDiagnostics {
@@ -1638,6 +1631,160 @@ fn query_u32_with_table_fallback(
     query_table_first_u32(session, oid)
 }
 
+struct BulkWalker<'a> {
+    session: &'a mut SyncSession,
+    use_getnext: bool,
+}
+
+impl<'a> BulkWalker<'a> {
+    fn new(session: &'a mut SyncSession) -> Self {
+        Self {
+            session,
+            use_getnext: false,
+        }
+    }
+
+    fn column(
+        &mut self,
+        prefix: &[u32],
+    ) -> Result<std::collections::BTreeMap<u32, SnmpValue>, AppError> {
+        let mut rows = std::collections::BTreeMap::new();
+        let mut current = prefix.to_vec();
+        let mut repetitions = 20;
+        loop {
+            let response = if self.use_getnext {
+                self.session.getnext(&current)
+            } else {
+                self.session.getbulk(&current, repetitions)
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(error) if !self.use_getnext => {
+                    tracing::warn!(%error, oid = %oid_to_string(prefix), "GETBULK failed; retrying with GETNEXT");
+                    self.use_getnext = true;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(AppError::Io(format!(
+                        "SNMP walk {}: {error:?}",
+                        oid_to_string(prefix)
+                    )));
+                }
+            };
+            if response.error_status != 0 {
+                let status = response.error_status;
+                let index = response.error_index;
+                drop(response);
+                if self.use_getnext && status == 2 {
+                    return Ok(rows);
+                }
+                if !self.use_getnext && status == 1 && repetitions > 1 {
+                    repetitions = (repetitions / 2).max(1);
+                    continue;
+                }
+                if !self.use_getnext && matches!(status, 1 | 2 | 5) {
+                    tracing::warn!(status, oid = %oid_to_string(prefix), "GETBULK rejected; retrying with GETNEXT");
+                    self.use_getnext = true;
+                    continue;
+                }
+                return Err(AppError::Io(format!(
+                    "SNMP walk {}: agent error {status} at {index}",
+                    oid_to_string(prefix)
+                )));
+            }
+            let mut advanced = false;
+            for (name, value) in response.varbinds {
+                if matches!(
+                    value,
+                    Value::EndOfMibView
+                        | Value::NoSuchObject
+                        | Value::NoSuchInstance
+                        | Value::Null
+                        | Value::Constructed(0x82, _)
+                ) {
+                    return Ok(rows);
+                }
+                let mut buffer = [0u32; 128];
+                let oid = name
+                    .read_name(&mut buffer)
+                    .map_err(|error| AppError::Io(format!("invalid SNMP walk OID: {error:?}")))?;
+                if !oid.starts_with(prefix) {
+                    return Ok(rows);
+                }
+                if oid <= current.as_slice() {
+                    return Err(AppError::Io(format!(
+                        "non-increasing SNMP walk OID: {}",
+                        oid_to_string(oid)
+                    )));
+                }
+                if let [index] = &oid[prefix.len()..] {
+                    if rows.len() == DEFAULT_WALK_MAX_VARBINDS {
+                        return Err(AppError::Io(format!(
+                            "SNMP column {} exceeds {} rows",
+                            oid_to_string(prefix),
+                            DEFAULT_WALK_MAX_VARBINDS
+                        )));
+                    }
+                    rows.insert(*index, SnmpValue::from_raw(&value));
+                }
+                current = oid.to_vec();
+                advanced = true;
+            }
+            if !advanced {
+                return Ok(rows);
+            }
+        }
+    }
+
+    fn optional_column(&mut self, prefix: &[u32]) -> std::collections::BTreeMap<u32, SnmpValue> {
+        self.column(prefix).unwrap_or_else(|error| {
+            tracing::warn!(%error, oid = %oid_to_string(prefix), "Hardware column unavailable");
+            Default::default()
+        })
+    }
+}
+
+fn query_diagnostic_interfaces(
+    bulk: &mut BulkWalker<'_>,
+) -> Result<Vec<SnmpInterfaceDiagnostic>, AppError> {
+    let statuses = bulk.column(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 8])?;
+    let names = bulk.column(&[1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1])?;
+    let descrs = if statuses.keys().any(|index| {
+        !names
+            .get(index)
+            .is_some_and(|value| value.as_string().is_some_and(|name| !name.is_empty()))
+    }) {
+        bulk.column(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 2])?
+    } else {
+        Default::default()
+    };
+    Ok(statuses
+        .into_iter()
+        .map(|(if_index, status)| {
+            let if_name = names
+                .get(&if_index)
+                .and_then(SnmpValue::as_string)
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    descrs
+                        .get(&if_index)
+                        .and_then(SnmpValue::as_string)
+                        .filter(|name| !name.is_empty())
+                })
+                .unwrap_or_else(|| format!("if-{if_index}"));
+            let status = status
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            SnmpInterfaceDiagnostic {
+                if_index,
+                if_name,
+                link_status: link_status_text(status).to_string(),
+            }
+        })
+        .collect())
+}
+
 pub(super) fn query_template_column(
     session: &mut SyncSession,
     prefix: &[u32],
@@ -2086,34 +2233,24 @@ impl SnmpClient {
         session: &mut SyncSession,
         sys_object_id: Option<&str>,
     ) -> Result<HardwareInventory, AppError> {
-        let mut inventory = query_hardware_inventory_with_session(session, None)?;
+        self.query_hardware_inventory_with_walker(&mut BulkWalker::new(session), sys_object_id)
+    }
+
+    fn query_hardware_inventory_with_walker(
+        &self,
+        bulk: &mut BulkWalker<'_>,
+        sys_object_id: Option<&str>,
+    ) -> Result<HardwareInventory, AppError> {
+        let mut inventory = query_hardware_inventory_with_session(bulk)?;
 
         let template = self.templates.select(sys_object_id);
-        let template_inventory = self.query_sensors_from_template(session, template);
+        let template_inventory = self.query_sensors_from_template(bulk.session, template);
         inventory.sensors.extend(template_inventory.sensors);
         inventory.probes.extend(template_inventory.probes);
 
         if let Some(overrides) = &self.overrides {
             merge_manual_hardware_overrides(
-                session,
-                &overrides.hardware_oid_overrides,
-                &mut inventory,
-            );
-        }
-        Ok(inventory)
-    }
-
-    fn query_hardware_inventory(
-        &self,
-        device: &DeviceConfig,
-        sys_object_id: Option<&str>,
-    ) -> Result<HardwareInventory, AppError> {
-        let mut session = self.open_session(device)?;
-        let mut inventory =
-            self.query_hardware_inventory_with_session(&mut session, sys_object_id)?;
-        if let Some(overrides) = &self.overrides {
-            merge_manual_hardware_overrides(
-                &mut session,
+                bulk.session,
                 &overrides.hardware_oid_overrides,
                 &mut inventory,
             );
@@ -2172,25 +2309,41 @@ fn merge_manual_hardware_overrides(
 }
 
 fn query_hardware_inventory_with_session(
-    session: &mut SyncSession,
-    _vendor_enterprise_id: Option<u32>,
+    bulk: &mut BulkWalker<'_>,
 ) -> Result<HardwareInventory, AppError> {
-    let physical_names = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 7])?;
-    let physical_descrs = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 2])?;
-    let physical_class = query_table_i64_values(session, &[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 5])?;
+    let physical_names = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 7]);
+    let physical_descrs = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 2]);
+    let physical_class = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 47, 1, 1, 1, 1, 5]);
 
-    let sensor_names = query_table_strings(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 1, 2])?;
-    let sensor_values = query_table_i64_values(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 4])?;
-    let sensor_statuses = query_table_i64_values(session, &[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 5])?;
+    let sensor_names = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 1, 2]);
+    let sensor_types = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 2]);
+    let sensor_values = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 4]);
+    let sensor_statuses = bulk.optional_column(&[1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 5]);
 
-    let physical_name_map: HashMap<u32, String> = physical_names.into_iter().collect();
-    let physical_descr_map: HashMap<u32, String> = physical_descrs.into_iter().collect();
-    // ★ アンダースコアを外して physical_class_map に戻す
-    let physical_class_map: HashMap<u32, i64> = physical_class.into_iter().collect();
+    let strings = |rows: std::collections::BTreeMap<u32, SnmpValue>| -> HashMap<u32, String> {
+        rows.into_iter()
+            .filter_map(|(index, value)| value.as_string().map(|value| (index, value)))
+            .collect()
+    };
+    let numbers = |rows: std::collections::BTreeMap<u32, SnmpValue>| -> HashMap<u32, i64> {
+        rows.into_iter()
+            .filter_map(|(index, value)| {
+                let value = match value {
+                    SnmpValue::Integer(value) => Some(value),
+                    value => value.as_u64().and_then(|value| i64::try_from(value).ok()),
+                };
+                value.map(|value| (index, value))
+            })
+            .collect()
+    };
+    let physical_name_map = strings(physical_names);
+    let physical_descr_map = strings(physical_descrs);
+    let physical_class_map = numbers(physical_class);
 
-    let sensor_name_map: HashMap<u32, String> = sensor_names.into_iter().collect();
-    let sensor_value_map: HashMap<u32, i64> = sensor_values.into_iter().collect();
-    let sensor_status_map: HashMap<u32, i64> = sensor_statuses.into_iter().collect();
+    let sensor_name_map = strings(sensor_names);
+    let sensor_type_map = numbers(sensor_types);
+    let sensor_value_map = numbers(sensor_values);
+    let sensor_status_map = numbers(sensor_statuses);
 
     let probes = vec![
         SnmpOidProbe {
@@ -2251,7 +2404,16 @@ fn query_hardware_inventory_with_session(
             .or_else(|| physical_name_map.get(&index).cloned())
             .or_else(|| physical_descr_map.get(&index).cloned())
             .unwrap_or_else(|| format!("sensor-{}", index));
-        let sensor_type = classify_hardware_sensor(&raw_name);
+        let mut sensor_type = classify_hardware_sensor(&raw_name);
+        if sensor_type == "sensor" {
+            sensor_type = match sensor_type_map.get(&index) {
+                Some(6) => "power",
+                Some(8) => "temperature",
+                Some(10) => "fan",
+                _ => "sensor",
+            }
+            .to_string();
+        }
         let unit = sensor_unit_for_type(&sensor_type);
         let value = sensor_value_map.get(&index).copied();
         let status = sensor_status_map.get(&index).copied();
@@ -2440,6 +2602,7 @@ mod template_collection_tests {
         port: u16,
         session: SyncSession,
         requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<u32>>>>,
+        request_pdus: std::sync::Arc<std::sync::Mutex<Vec<(u8, Vec<u32>, u32)>>>,
         stop: std::sync::Arc<AtomicBool>,
         _server: MockWorker,
     }
@@ -2463,8 +2626,10 @@ mod template_collection_tests {
                 SyncSession::new(address, b"public", Some(MOCK_REQUEST_TIMEOUT), 1).unwrap();
             let stop = std::sync::Arc::new(AtomicBool::new(false));
             let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let request_pdus = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let server_stop = stop.clone();
             let server_requests = requests.clone();
+            let server_pdus = request_pdus.clone();
             let server = std::thread::spawn(move || {
                 while !server_stop.load(Ordering::Relaxed) {
                     let mut buffer = [0u8; 2048];
@@ -2486,7 +2651,7 @@ mod template_collection_tests {
                     let (request, _) = take_tlv(rest);
                     let (request_id, rest) = take_tlv(&request[2..]);
                     let (_, rest) = take_tlv(rest);
-                    let (_, rest) = take_tlv(rest);
+                    let (max_repetitions, rest) = take_tlv(rest);
                     let (bindings, _) = take_tlv(rest);
                     let (binding, _) = take_tlv(&bindings[2..]);
                     let (oid, _) = take_tlv(&binding[2..]);
@@ -2501,6 +2666,13 @@ mod template_collection_tests {
                         }
                     }
                     server_requests.lock().unwrap().push(requested.clone());
+                    let repetitions = max_repetitions[2..]
+                        .iter()
+                        .fold(0u32, |value, byte| (value << 8) | u32::from(*byte));
+                    server_pdus
+                        .lock()
+                        .unwrap()
+                        .push((request[0], requested.clone(), repetitions));
                     let mut response_bindings = Vec::new();
                     let rejected_bulk = request[0] == 0xa5 && bulk_error_status != 0;
                     if !rejected_bulk {
@@ -2529,7 +2701,7 @@ mod template_collection_tests {
                                     std::ops::Bound::Excluded(requested.clone()),
                                     std::ops::Bound::Unbounded,
                                 ))
-                                .take(20)
+                                .take(repetitions as usize)
                                 .map(|(oid, value)| (oid.clone(), value.clone()))
                                 .collect::<Vec<_>>();
                             if batch.is_empty() {
@@ -2560,6 +2732,7 @@ mod template_collection_tests {
                 port: address.port(),
                 session,
                 requests,
+                request_pdus,
                 stop,
                 _server: MockWorker(Some(server)),
             }
@@ -2672,6 +2845,131 @@ mod template_collection_tests {
         );
         assert_eq!(result.count, 2);
         assert_eq!(agent.requests.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn diagnostics_collects_interfaces_and_sensors_with_bulk_and_getnext_fallback() {
+        let mut rows = vec![
+            (
+                "1.3.6.1.2.1.1.2.0".to_string(),
+                encoded_oid("1.3.6.1.4.1.65000.1"),
+            ),
+            (
+                "1.3.6.1.2.1.2.2.1.2.2".to_string(),
+                tlv(0x04, b"fallback descr"),
+            ),
+            (
+                "1.3.6.1.2.1.31.1.1.1.1.1".to_string(),
+                tlv(0x04, b"port one"),
+            ),
+            ("1.3.6.1.2.1.31.1.1.1.1.2".to_string(), tlv(0x04, b"")),
+            (
+                "1.3.6.1.2.1.47.1.1.1.1.7.42".to_string(),
+                tlv(0x04, b"chassis temp"),
+            ),
+            (
+                "1.3.6.1.2.1.47.1.1.1.1.2.42".to_string(),
+                tlv(0x04, b"sensor description"),
+            ),
+            ("1.3.6.1.2.1.47.1.1.1.1.5.42".to_string(), tlv(0x02, &[8])),
+            ("1.3.6.1.2.1.99.1.1.1.2.42".to_string(), tlv(0x02, &[8])),
+            ("1.3.6.1.2.1.99.1.1.1.4.42".to_string(), tlv(0x02, &[45])),
+            ("1.3.6.1.2.1.99.1.1.1.5.42".to_string(), tlv(0x02, &[3])),
+        ];
+        for index in 1..=25 {
+            rows.push((
+                format!("1.3.6.1.2.1.2.2.1.8.{index}"),
+                tlv(0x02, &[(index % 8) as u8]),
+            ));
+        }
+        let borrowed = rows
+            .iter()
+            .map(|(oid, value)| (oid.as_str(), value.clone()))
+            .collect::<Vec<_>>();
+        for error_status in [0, 1, 2, 5] {
+            let agent = TemplateAgent::with_bulk_error(borrowed.clone(), error_status);
+            let result = bundled_client()
+                .with_destination_port(agent.port)
+                .diagnose_device(&DeviceConfig::new("127.0.0.1", "public"))
+                .unwrap();
+            assert_eq!(result.interfaces.len(), 25);
+            assert_eq!(result.interfaces[0].if_name, "port one");
+            assert_eq!(result.interfaces[1].if_name, "fallback descr");
+            assert_eq!(result.interfaces[2].if_name, "if-3");
+            for interface in &result.interfaces {
+                assert_eq!(
+                    interface.link_status,
+                    link_status_text(interface.if_index % 8)
+                );
+            }
+            let sensor = result
+                .hardware_sensors
+                .iter()
+                .find(|sensor| sensor.index == 42 && sensor.source == "entity-sensor")
+                .unwrap();
+            assert_eq!(sensor.name, "chassis temp");
+            assert_eq!(sensor.value, Some(45));
+            assert_eq!(sensor.status, Some(3));
+            assert!(sensor.is_alarm);
+            let requests = agent.request_pdus.lock().unwrap();
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|(pdu, oid, _)| *pdu == 0xa0 && *oid == vec![1, 3, 6, 1, 2, 1, 1, 2, 0])
+                    .count(),
+                1
+            );
+            assert!(!requests.iter().any(|(pdu, oid, _)| {
+                *pdu == 0xa0 && oid.starts_with(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 14])
+            }));
+            let bulk = requests
+                .iter()
+                .filter(|(pdu, _, _)| *pdu == 0xa5)
+                .collect::<Vec<_>>();
+            if error_status == 0 {
+                assert!(bulk.iter().all(|(_, _, repetitions)| *repetitions == 20));
+                let statuses = requests
+                    .iter()
+                    .filter(|(pdu, oid, _)| {
+                        *pdu == 0xa5 && oid.starts_with(&[1, 3, 6, 1, 2, 1, 2, 2, 1, 8])
+                    })
+                    .count();
+                assert_eq!(statuses, 2);
+                for prefix in [
+                    "1.3.6.1.2.1.31.1.1.1.1",
+                    "1.3.6.1.2.1.2.2.1.2",
+                    "1.3.6.1.2.1.47.1.1.1.1.7",
+                    "1.3.6.1.2.1.47.1.1.1.1.2",
+                    "1.3.6.1.2.1.47.1.1.1.1.5",
+                    "1.3.6.1.2.1.99.1.1.1.2",
+                    "1.3.6.1.2.1.99.1.1.1.4",
+                    "1.3.6.1.2.1.99.1.1.1.5",
+                ] {
+                    assert!(
+                        requests.iter().any(|(pdu, oid, _)| *pdu == 0xa5
+                            && *oid == parse_oid_string(prefix).unwrap()),
+                        "missing bulk walk {prefix}"
+                    );
+                }
+            } else {
+                let repetitions: Vec<_> = bulk
+                    .iter()
+                    .map(|(_, _, repetitions)| *repetitions)
+                    .collect();
+                assert_eq!(
+                    repetitions,
+                    if error_status == 1 {
+                        vec![20, 10, 5, 2, 1]
+                    } else {
+                        vec![20]
+                    }
+                );
+                assert!(
+                    requests.iter().any(|(pdu, oid, _)| *pdu == 0xa1
+                        && *oid == vec![1, 3, 6, 1, 2, 1, 99, 1, 1, 1, 4])
+                );
+            }
+        }
     }
 
     #[test]
@@ -2850,8 +3148,17 @@ oid = "1.3.6.1.4.1.65000.4.0"
     }
 
     fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
-        assert!(body.len() < 128);
-        [vec![tag, body.len() as u8], body.to_vec()].concat()
+        let length = body.len();
+        let mut header = vec![tag];
+        if length < 128 {
+            header.push(length as u8);
+        } else if length <= 255 {
+            header.extend([0x81, length as u8]);
+        } else {
+            assert!(length <= 65535);
+            header.extend([0x82, (length >> 8) as u8, length as u8]);
+        }
+        [header, body.to_vec()].concat()
     }
 
     fn take_tlv(bytes: &[u8]) -> (&[u8], &[u8]) {
