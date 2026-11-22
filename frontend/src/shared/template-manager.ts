@@ -3,7 +3,7 @@ import { showOperationProgress } from "./operation-progress";
 type Json = string | number | boolean | Json[] | { [key: string]: Json };
 type Document = { [key: string]: Json };
 type Category = "system" | "interfaces" | "hardware" | "profile";
-interface DefinitionRow { label: string; path: string; value: Json; commit: (value: Json) => void; remove?: () => void; configured?: boolean; }
+interface DefinitionRow { label: string; path: string; value: Json; commit: (value: Json) => void; remove?: () => void; configured?: boolean; highlightPath?: string; }
 interface Common { cpu_oid: string; memory_oid: string; hardware_oids: string[]; }
 interface Definitions { common: Common; profiles: Record<string, Document>; }
 interface Profile { id: string; source: string; document: Document; base: Document | null; resettable: boolean; }
@@ -18,6 +18,7 @@ const messages = {
         profile: "Profile", common: "Common additional OIDs (all devices)", save: "Save and apply", reload: "Reload saved definitions",
         reset: "Reset / remove user profile", add: "Add", remove: "Remove", import: "Import TOML", export: "Export TOML",
         newProfile: "New profile sysObjectID prefix", create: "Create profile", saved: "Saved and applied",
+        savedToast: "Saved and applied (Generation {generation})", closeToast: "Dismiss notification",
         dirty: "Unsaved changes", source: "Definition source", version: "Saved / applied generation", property: "Optional section",
         preview: "Preview profile selection", sysObject: "sysObjectID", noSelector: "Enter a numeric sysObjectID prefix.",
         discard: "Discard all unsaved changes?", resetConfirm: "Reset this profile? A file-backed profile will be restored; a GUI-only profile will be removed. Save to apply.",
@@ -49,6 +50,7 @@ const messages = {
         profile: "プロファイル", common: "共通追加OID（全デバイス）", save: "保存して適用", reload: "保存済み定義を再読込",
         reset: "リセット・ユーザープロファイル削除", add: "追加", remove: "削除", import: "TOMLをインポート", export: "TOMLをエクスポート",
         newProfile: "新規プロファイルのsysObjectIDプレフィックス", create: "プロファイル作成", saved: "保存・適用しました",
+        savedToast: "保存・適用しました（世代 {generation}）— 次回のポーリング・診断から反映されます", closeToast: "通知を閉じる",
         dirty: "未保存の変更があります", source: "定義元", version: "保存済み／適用済み世代", property: "追加可能なセクション",
         preview: "プロファイル選択をプレビュー", sysObject: "sysObjectID", noSelector: "数値のsysObjectIDプレフィックスを入力してください。",
         discard: "未保存の変更をすべて破棄しますか？", resetConfirm: "リセットしますか？ファイル由来の定義は元に戻し、GUIのみの定義は削除します。保存するまで監視には反映されません。",
@@ -276,6 +278,31 @@ export function initializeTemplateManager(): void {
         #snmp-definitions .template-toolbar select,#snmp-definitions .template-toolbar button{box-sizing:border-box;height:40px;font-size:.9rem;line-height:1.25}
         @media(max-width:600px){#snmp-definitions .template-toolbar>label{flex-basis:100%}#snmp-definitions .template-toolbar button{height:auto;min-height:40px}}
         #snmp-definitions .template-toolbar .template-save{background:var(--tp-accent,#38c5b2);color:#082524;border-color:transparent;font-weight:600}
+        #snmp-definitions .template-toolbar[data-state=dirty] .template-save{outline:2px solid #f59e0b;outline-offset:2px;box-shadow:0 0 12px rgba(245,158,11,.5)}
+        #snmp-definitions .template-status-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}
+        #snmp-definitions .template-status-bar p{margin:0}
+        #snmp-definitions [data-template-status]:empty{display:none}
+        #snmp-definitions [data-template-status][data-state]{display:inline-flex;align-items:center;gap:.45rem;max-width:100%;box-sizing:border-box;padding:.45rem .7rem;border-radius:6px;font-weight:600}
+        #snmp-definitions [data-template-status][data-state=saved]{background:rgba(20,83,45,.55);border:1px solid #22c55e;color:#86efac;animation:template-status-appear .3s ease-out}
+        #snmp-definitions [data-template-status][data-state=saved]::before{content:"✓";font-weight:700}
+        #snmp-definitions [data-template-status][data-state=dirty]{background:rgba(120,53,15,.45);border:1px solid #f59e0b;color:#fde68a}
+        #snmp-definitions [data-template-status][data-state=dirty]::before{content:"●";font-size:.75em}
+        html[data-theme=light] #snmp-definitions [data-template-status][data-state=saved]{background:#dcfce7;border-color:#16a34a;color:#166534}
+        html[data-theme=light] #snmp-definitions [data-template-status][data-state=dirty]{background:#fef3c7;border-color:#d97706;color:#92400e}
+        #snmp-definitions .template-generation{display:inline-flex;align-items:center;max-width:100%;box-sizing:border-box;padding:.4rem .7rem;border:1px solid var(--tp-border,#475569);border-radius:999px;background:var(--tp-bg,#0b1524);color:var(--tp-text,#eef5fb);font-size:.85rem}
+        html[data-theme=light] #snmp-definitions .template-generation{background:#f1f5f9;color:#0f172a}
+        #snmp-definitions .template-generation.template-generation-flash{animation:template-generation-flash 1.5s ease-out}
+        #snmp-definitions .template-items tr.template-row-highlight td{animation:template-row-highlight 2.5s ease-out}
+        .template-saved-toast{position:fixed;z-index:1200;top:1rem;right:1rem;display:flex;align-items:flex-start;gap:.6rem;box-sizing:border-box;width:max-content;max-width:calc(100vw - 2rem);padding:.75rem 1rem;border:1px solid #22c55e;border-radius:8px;background:#14532d;color:#dcfce7;box-shadow:0 8px 24px #0006;transition:opacity .25s ease,transform .25s ease;animation:template-status-appear .3s ease-out}
+        .template-saved-toast::before{content:"✓";font-weight:700}
+        .template-saved-toast span{overflow-wrap:anywhere}
+        .template-saved-toast button{flex:none;padding:0 .2rem;border:0;background:transparent;color:inherit;font-size:1.2rem;line-height:1;cursor:pointer}
+        .template-saved-toast.is-closing{opacity:0;transform:translateY(-8px);pointer-events:none}
+        html[data-theme=light] .template-saved-toast{background:#dcfce7;border-color:#16a34a;color:#166534;box-shadow:0 8px 24px #0003}
+        @keyframes template-status-appear{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes template-generation-flash{0%,30%{background:#166534;color:#dcfce7;box-shadow:0 0 12px #22c55e}100%{box-shadow:0 0 0 transparent}}
+        @keyframes template-row-highlight{0%,20%{background:rgba(34,197,94,.35)}100%{background:transparent}}
+        @media(prefers-reduced-motion:reduce){#snmp-definitions [data-template-status][data-state=saved],#snmp-definitions .template-generation.template-generation-flash,#snmp-definitions .template-items tr.template-row-highlight td,.template-saved-toast{animation:none}.template-saved-toast{transition:none}}
         #snmp-definitions .template-tabs{display:flex;gap:4px;overflow:auto;border-bottom:1px solid var(--tp-border,#334155);margin:14px 0}
         #snmp-definitions .template-tabs button{flex:0 0 auto;border:0;border-bottom:3px solid transparent;border-radius:0;background:transparent;padding:10px 12px}
         #snmp-definitions .template-tabs [aria-selected=true]{border-bottom-color:var(--tp-accent,#38c5b2);color:var(--tp-accent,#38c5b2);font-weight:600}
@@ -317,7 +344,12 @@ export function initializeTemplateManager(): void {
     let dirty = false;
     let busy = false;
     let message = "";
+    let savedMessage = false;
     let error = "";
+    let flashGeneration = false;
+    let toast: HTMLElement | undefined;
+    let toastTimer: number | undefined;
+    let toastRemovalTimer: number | undefined;
     let capture = (): void => { };
     let category: Category = "system";
     let activeDialog: HTMLDialogElement | undefined;
@@ -325,6 +357,21 @@ export function initializeTemplateManager(): void {
     let operation: Key = "loading";
     let operationStarted = 0;
     let stopOperationProgress = (): void => { };
+    const showSavedToast = (generation: number): void => {
+        if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+        if (toastRemovalTimer !== undefined) window.clearTimeout(toastRemovalTimer);
+        toast?.remove();
+        const node = element("div"); node.className = "template-saved-toast"; node.setAttribute("role", "status");
+        const content = element("span", text("savedToast").replace("{generation}", String(generation)));
+        const close = button("×", () => dismiss()); close.setAttribute("aria-label", text("closeToast"));
+        const dismiss = (): void => {
+            if (toastTimer !== undefined) window.clearTimeout(toastTimer);
+            node.classList.add("is-closing");
+            toastRemovalTimer = window.setTimeout(() => { node.remove(); if (toast === node) toast = undefined; }, 250);
+        };
+        node.append(content, close); document.body.append(node); toast = node;
+        toastTimer = window.setTimeout(dismiss, 3500);
+    };
     const run = async (action: () => Promise<void>, kind: Key = "loading"): Promise<void> => {
         if (busy) return;
         operation = kind; operationStarted = performance.now();
@@ -335,15 +382,17 @@ export function initializeTemplateManager(): void {
     };
     const changed = (): void => {
         capture();
-        dirty = true; message = "";
-        const status = root.querySelector("[data-template-status]");
-        if (status) status.textContent = text("dirty");
+        dirty = true; message = ""; savedMessage = false;
+        const status = root.querySelector<HTMLElement>("[data-template-status]");
+        if (status) { status.textContent = text("dirty"); status.dataset.state = "dirty"; }
+        const toolbar = root.querySelector<HTMLElement>(".template-toolbar");
+        if (toolbar) toolbar.dataset.state = "dirty";
     };
     const load = async (): Promise<void> => {
         const [loadedView, loadedDevices] = await Promise.all([api<View>("/api/snmp/definitions"), registeredDevices()]);
         view = loadedView; devices = loadedDevices;
         definitions = clone(view.definitions);
-        dirty = false; message = "";
+        dirty = false; message = ""; savedMessage = false;
     };
     const editTree = (value: Json, path: string, update: (value: Json) => void, remove?: () => void, notify = changed, refresh = render): HTMLElement => {
         if (typeof value !== "object") {
@@ -458,8 +507,14 @@ export function initializeTemplateManager(): void {
                 const details = invalid.closest("details"); if (details) details.open = true;
                 alert.textContent = text("invalidNumber"); invalid.focus(); return;
             }
-            row.commit(local); commitDraft(); dirty = true; modalDirty = false; message = ""; error = "";
+            row.commit(local); commitDraft(); dirty = true; modalDirty = false; message = ""; savedMessage = false; error = "";
             node.close(); render();
+            const path = row.highlightPath || row.path;
+            const updated = Array.from(root.querySelectorAll<HTMLElement>("[data-template-row]")).find(entry => entry.dataset.templateRow === path);
+            if (updated) {
+                updated.classList.add("template-row-highlight");
+                window.setTimeout(() => updated.classList.remove("template-row-highlight"), 2500);
+            }
         };
         node.showModal();
     };
@@ -504,13 +559,13 @@ export function initializeTemplateManager(): void {
     const additionsFor = (doc: Document, common: boolean): DefinitionRow[] => {
         if (common) {
             if (category === "system") return ["cpu_oid", "memory_oid"].filter(key => !doc[key]).map(key => ({ label: fieldLabel(`common.${key}`), path: `common.${key}`, value: "", commit: next => { doc[key] = next; } }));
-            if (category === "hardware") return [{ label: fieldLabel("common.hardware_oids"), path: "common.hardware_oids.0", value: "temperature|", commit: next => { doc.hardware_oids = [...array(doc.hardware_oids), next]; } }];
+            if (category === "hardware") return [{ label: fieldLabel("common.hardware_oids"), path: `common.hardware_oids.${array(doc.hardware_oids).length}`, value: "temperature|", commit: next => { doc.hardware_oids = [...array(doc.hardware_oids), next]; } }];
             return [];
         }
         if (category === "system") return [
             { label: text("cpuCandidate"), path: `profile.cpu.candidates.${array(object(doc.cpu).candidates).length}`, value: "", commit: next => { doc.cpu = { ...object(doc.cpu), candidates: [...array(object(doc.cpu).candidates), next] }; } },
             {
-                label: text("memorySource"), path: "profile.memory", value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false }, commit: next => {
+                label: text("memorySource"), path: "profile.memory", highlightPath: "memory" in doc ? `profile.memory.fallbacks.${array(object(doc.memory).fallbacks).length}` : "profile.memory", value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false }, commit: next => {
                     if ("memory" in doc) object(doc.memory).fallbacks = [...array(object(doc.memory).fallbacks), next]; else doc.memory = next;
                 }
             },
@@ -550,6 +605,7 @@ export function initializeTemplateManager(): void {
             else draft.profiles[profileId] = doc;
         };
         const toolbar = element("div"); toolbar.className = "template-toolbar";
+        if (dirty) toolbar.dataset.state = "dirty";
         const label = element("label", text("profile")), select = element("select"); select.id = "template-profile";
         const deviceGroup = element("optgroup"), commonGroup = element("optgroup");
         deviceGroup.label = text("deviceProfiles"); commonGroup.label = text("commonProfiles");
@@ -560,7 +616,8 @@ export function initializeTemplateManager(): void {
         label.append(select); toolbar.append(label);
         const save = button(text("save"), () => void run(async () => {
             const next = await api<View>("/api/snmp/definitions", { generation: currentView.generation, definitions: draft });
-            view = next; definitions = clone(next.definitions); dirty = false; message = text("saved");
+            view = next; definitions = clone(next.definitions); dirty = false; message = text("saved"); savedMessage = true;
+            flashGeneration = true; showSavedToast(next.applied_generation);
         }, "saving"));
         save.className = "template-save"; toolbar.append(save);
         if (profile) {
@@ -661,15 +718,24 @@ export function initializeTemplateManager(): void {
                 const document = base.value === "@empty" ? { description: "", cpu: { candidates: [] }, memory: {}, sensors: {}, metrics: [], tables: {} } : clone(choices.get(base.value)!.document);
                 const enterprise = /^1\.3\.6\.1\.4\.1\.(\d+)(?=\.|$)/.exec(id);
                 draft.profiles[id] = { ...document, name: name.value.trim(), sysObjectID_prefix: id, enterprise_id: enterprise ? Number(enterprise[1]) : 0 };
-                dirty = true; message = ""; capture = () => { };
+                dirty = true; message = ""; savedMessage = false; capture = () => { };
                 selected = id; node.close(); render();
             };
             updateScope();
             node.showModal();
         }));
         root.append(toolbar);
-        const status = element("p", [dirty ? text("dirty") : "", message].filter(Boolean).join(" — ")); status.dataset.templateStatus = ""; status.setAttribute("role", "status"); root.append(status);
-        root.append(element("p", `${text("version")}: ${view.generation} / ${view.applied_generation}`));
+        const statusBar = element("div"); statusBar.className = "template-status-bar";
+        const status = element("p", [dirty ? text("dirty") : "", savedMessage ? text("saved") : message].filter(Boolean).join(" — "));
+        status.dataset.templateStatus = ""; status.setAttribute("role", "status");
+        if (dirty) status.dataset.state = "dirty"; else if (savedMessage) status.dataset.state = "saved";
+        const generation = element("p", `${text("version")}: ${view.generation} / ${view.applied_generation}`);
+        generation.className = "template-generation";
+        if (flashGeneration && !busy) {
+            generation.classList.add("template-generation-flash"); flashGeneration = false;
+            window.setTimeout(() => generation.classList.remove("template-generation-flash"), 1500);
+        }
+        statusBar.append(status, generation); root.append(statusBar);
         {
             const matches = common ? devices : devices.filter(device => selectedProfile(device.sys_object_id, choices) === selected);
             const count = element("dd", String(matches.length)); count.dataset.templateMatches = "";
@@ -743,7 +809,7 @@ export function initializeTemplateManager(): void {
         const previewLabel = element("label", text("sysObject")), sysObject = element("input"); sysObject.id = "template-preview-oid"; previewLabel.append(sysObject);
         preview.append(previewLabel, button(text("preview"), () => {
             const oid = sysObject.value;
-            void run(async () => { const result = await api<{ id: string; document: Document }>("/api/snmp/definitions/preview", { definitions: draft, sys_object_id: oid }); message = `${text("preview")}: ${result.document.name} (${result.id})`; }, "previewing");
+            void run(async () => { const result = await api<{ id: string; document: Document }>("/api/snmp/definitions/preview", { definitions: draft, sys_object_id: oid }); message = `${text("preview")}: ${result.document.name} (${result.id})`; savedMessage = false; }, "previewing");
         }));
         const notes = element("details"); notes.append(element("summary", text("notes")), element("p", text("help")), element("p", text("storage")), element("p", text("disclaimer")));
         root.append(preview, notes);

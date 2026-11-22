@@ -39,6 +39,109 @@ async function addItem(page: Page, category: string, label: string) {
     return page.getByRole("dialog");
 }
 
+for (const language of ["en", "ja"] as const) {
+    test(`save feedback and edited rows are visible and dismissible in ${language}`, async ({ page, request }) => {
+        const view = (await (await request.get("/api/snmp/definitions")).json()).data;
+        let generation = view.generation;
+        let failSave = false;
+        await page.route("**/api/snmp/definitions/preview", route => route.fulfill({ json: { ok: true, data: { id: "generic", document: { name: "Generic" } } } }));
+        await page.route("**/api/snmp/definitions", async route => {
+            if (route.request().method() !== "POST") return route.fulfill({ json: { ok: true, data: view } });
+            if (failSave) return route.fulfill({ status: 500, json: { ok: false, error: "Save failed" } });
+            generation++;
+            return route.fulfill({ json: { ok: true, data: { ...view, generation, applied_generation: generation, definitions: route.request().postDataJSON().definitions } } });
+        });
+        await page.setViewportSize({ width: 375, height: 900 });
+        await page.goto("/settings/snmp");
+        await expect(page.locator("#template-profile")).toBeVisible();
+        if (language === "ja") await page.locator("#lang-select").selectOption("ja");
+        await page.clock.install();
+        const root = page.locator("#snmp-definitions");
+        const status = root.locator("[data-template-status]");
+        const save = root.locator(".template-save");
+        await expect(status).toBeEmpty();
+        await expect(status).toBeHidden();
+        const row = root.locator('[data-template-row="profile.cpu.candidates.0"]');
+        await row.locator("button").first().click();
+        const dialog = page.getByRole("dialog");
+        await dialog.locator('[data-template-path="profile.cpu.candidates.0"]').fill("1.3.6.1.4.1.65000.4.0");
+        await dialog.getByRole("button", { name: language === "ja" ? "編集内容を反映" : "Apply to draft", exact: true }).click();
+        await expect(row).toHaveClass(/template-row-highlight/);
+        await expect(status).toHaveAttribute("data-state", "dirty");
+        await expect(status).toHaveText(language === "ja" ? "未保存の変更があります" : "Unsaved changes");
+        await expect(save).toHaveCSS("outline-color", "rgb(245, 158, 11)");
+        expect(await status.evaluate(node => getComputedStyle(node, "::before").content)).toBe('"●"');
+        for (const [theme, background, border, color] of [
+            ["dark", "rgba(120, 53, 15, 0.45)", "rgb(245, 158, 11)", "rgb(253, 230, 138)"],
+            ["light", "rgb(254, 243, 199)", "rgb(217, 119, 6)", "rgb(146, 64, 14)"],
+        ] as const) {
+            await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
+            await expect(status).toHaveCSS("background-color", background);
+            await expect(status).toHaveCSS("border-top-color", border);
+            await expect(status).toHaveCSS("color", color);
+        }
+        await page.clock.fastForward(2500);
+        await expect(row).not.toHaveClass(/template-row-highlight/);
+        await save.click();
+        await expect(status).toHaveAttribute("data-state", "saved");
+        await expect(status).toHaveText(language === "ja" ? "保存・適用しました" : "Saved and applied");
+        await expect(root.locator(".template-generation")).toContainText(`${generation} / ${generation}`);
+        await expect(root.locator(".template-generation")).toHaveClass(/template-generation-flash/);
+        await expect(root.locator(".template-generation")).toHaveCSS("animation-name", "template-generation-flash");
+        const toast = page.locator(".template-saved-toast");
+        await expect(toast).toHaveText(language === "ja"
+            ? `保存・適用しました（世代 ${generation}）— 次回のポーリング・診断から反映されます×`
+            : `Saved and applied (Generation ${generation})×`);
+        expect(await status.evaluate(node => getComputedStyle(node, "::before").content)).toBe('"✓"');
+        for (const [theme, background, border, color] of [
+            ["dark", "rgba(20, 83, 45, 0.55)", "rgb(34, 197, 94)", "rgb(134, 239, 172)"],
+            ["light", "rgb(220, 252, 231)", "rgb(22, 163, 74)", "rgb(22, 101, 52)"],
+        ] as const) {
+            await page.evaluate(value => { document.documentElement.dataset.theme = value; }, theme);
+            await expect(status).toHaveCSS("background-color", background);
+            await expect(status).toHaveCSS("border-top-color", border);
+            await expect(status).toHaveCSS("color", color);
+        }
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+        await toast.getByRole("button").click();
+        await page.clock.fastForward(250);
+        await expect(toast).toHaveCount(0);
+        await save.click();
+        await expect(toast).toBeVisible();
+        await page.clock.fastForward(2000);
+        await save.click();
+        await expect(toast).toHaveCount(1);
+        await page.clock.fastForward(3499);
+        await expect(toast).toBeVisible();
+        await page.clock.fastForward(251);
+        await expect(toast).toHaveCount(0);
+        await root.getByText(language === "ja" ? "プロファイル選択をプレビュー" : "Preview profile selection", { exact: true }).first().click();
+        await root.locator("#template-preview-oid").fill("1.3.6.1.4.1.65000");
+        await root.getByRole("button", { name: language === "ja" ? "プロファイル選択をプレビュー" : "Preview profile selection", exact: true }).click();
+        await expect(status).toContainText("Generic (generic)");
+        await expect(status).not.toHaveAttribute("data-state", "saved");
+        failSave = true;
+        await save.click();
+        await expect(root.getByRole("alert")).toContainText("Save failed");
+        await expect(toast).toHaveCount(0);
+    });
+}
+
+test("new fallback memory and additional hardware highlight the inserted row", async ({ page }) => {
+    await page.goto("/settings/snmp");
+    let dialog = await addItem(page, "system", "Memory source");
+    await dialog.locator('[data-template-path="profile.memory.oid"]').fill("1.3.6.1.4.1.65000.1.0");
+    await dialog.getByRole("button", { name: "Apply to draft", exact: true }).click();
+    await expect(page.locator('[data-template-row="profile.memory.fallbacks.0"]')).toHaveClass(/template-row-highlight/);
+    await page.locator("#template-profile").selectOption("@common");
+    for (let index = 0; index < 2; index++) {
+        dialog = await addItem(page, "hardware", "Additional hardware sensor OIDs");
+        await dialog.locator(`[data-template-path="common.hardware_oids.${index}"]`).fill(`temperature|1.3.6.1.4.1.65000.${index + 2}.0`);
+        await dialog.getByRole("button", { name: "Apply to draft", exact: true }).click();
+        await expect(page.locator(`[data-template-row="common.hardware_oids.${index}"]`)).toHaveClass(/template-row-highlight/);
+    }
+});
+
 test("profile assistants restore the full OID, copy the selected base and retain explicit errors", async ({ page, request }) => {
     const view = (await (await request.get("/api/snmp/definitions")).json()).data;
     await page.route("**/api/devices", route => route.fulfill({ json: [

@@ -47,6 +47,8 @@ var TracePulseSnmpDefinitions = (() => {
       newProfile: "New profile sysObjectID prefix",
       create: "Create profile",
       saved: "Saved and applied",
+      savedToast: "Saved and applied (Generation {generation})",
+      closeToast: "Dismiss notification",
       dirty: "Unsaved changes",
       source: "Definition source",
       version: "Saved / applied generation",
@@ -131,6 +133,8 @@ var TracePulseSnmpDefinitions = (() => {
       newProfile: "\u65B0\u898F\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u306EsysObjectID\u30D7\u30EC\u30D5\u30A3\u30C3\u30AF\u30B9",
       create: "\u30D7\u30ED\u30D5\u30A1\u30A4\u30EB\u4F5C\u6210",
       saved: "\u4FDD\u5B58\u30FB\u9069\u7528\u3057\u307E\u3057\u305F",
+      savedToast: "\u4FDD\u5B58\u30FB\u9069\u7528\u3057\u307E\u3057\u305F\uFF08\u4E16\u4EE3 {generation}\uFF09\u2014 \u6B21\u56DE\u306E\u30DD\u30FC\u30EA\u30F3\u30B0\u30FB\u8A3A\u65AD\u304B\u3089\u53CD\u6620\u3055\u308C\u307E\u3059",
+      closeToast: "\u901A\u77E5\u3092\u9589\u3058\u308B",
       dirty: "\u672A\u4FDD\u5B58\u306E\u5909\u66F4\u304C\u3042\u308A\u307E\u3059",
       source: "\u5B9A\u7FA9\u5143",
       version: "\u4FDD\u5B58\u6E08\u307F\uFF0F\u9069\u7528\u6E08\u307F\u4E16\u4EE3",
@@ -418,6 +422,31 @@ var TracePulseSnmpDefinitions = (() => {
         #snmp-definitions .template-toolbar select,#snmp-definitions .template-toolbar button{box-sizing:border-box;height:40px;font-size:.9rem;line-height:1.25}
         @media(max-width:600px){#snmp-definitions .template-toolbar>label{flex-basis:100%}#snmp-definitions .template-toolbar button{height:auto;min-height:40px}}
         #snmp-definitions .template-toolbar .template-save{background:var(--tp-accent,#38c5b2);color:#082524;border-color:transparent;font-weight:600}
+        #snmp-definitions .template-toolbar[data-state=dirty] .template-save{outline:2px solid #f59e0b;outline-offset:2px;box-shadow:0 0 12px rgba(245,158,11,.5)}
+        #snmp-definitions .template-status-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0}
+        #snmp-definitions .template-status-bar p{margin:0}
+        #snmp-definitions [data-template-status]:empty{display:none}
+        #snmp-definitions [data-template-status][data-state]{display:inline-flex;align-items:center;gap:.45rem;max-width:100%;box-sizing:border-box;padding:.45rem .7rem;border-radius:6px;font-weight:600}
+        #snmp-definitions [data-template-status][data-state=saved]{background:rgba(20,83,45,.55);border:1px solid #22c55e;color:#86efac;animation:template-status-appear .3s ease-out}
+        #snmp-definitions [data-template-status][data-state=saved]::before{content:"\u2713";font-weight:700}
+        #snmp-definitions [data-template-status][data-state=dirty]{background:rgba(120,53,15,.45);border:1px solid #f59e0b;color:#fde68a}
+        #snmp-definitions [data-template-status][data-state=dirty]::before{content:"\u25CF";font-size:.75em}
+        html[data-theme=light] #snmp-definitions [data-template-status][data-state=saved]{background:#dcfce7;border-color:#16a34a;color:#166534}
+        html[data-theme=light] #snmp-definitions [data-template-status][data-state=dirty]{background:#fef3c7;border-color:#d97706;color:#92400e}
+        #snmp-definitions .template-generation{display:inline-flex;align-items:center;max-width:100%;box-sizing:border-box;padding:.4rem .7rem;border:1px solid var(--tp-border,#475569);border-radius:999px;background:var(--tp-bg,#0b1524);color:var(--tp-text,#eef5fb);font-size:.85rem}
+        html[data-theme=light] #snmp-definitions .template-generation{background:#f1f5f9;color:#0f172a}
+        #snmp-definitions .template-generation.template-generation-flash{animation:template-generation-flash 1.5s ease-out}
+        #snmp-definitions .template-items tr.template-row-highlight td{animation:template-row-highlight 2.5s ease-out}
+        .template-saved-toast{position:fixed;z-index:1200;top:1rem;right:1rem;display:flex;align-items:flex-start;gap:.6rem;box-sizing:border-box;width:max-content;max-width:calc(100vw - 2rem);padding:.75rem 1rem;border:1px solid #22c55e;border-radius:8px;background:#14532d;color:#dcfce7;box-shadow:0 8px 24px #0006;transition:opacity .25s ease,transform .25s ease;animation:template-status-appear .3s ease-out}
+        .template-saved-toast::before{content:"\u2713";font-weight:700}
+        .template-saved-toast span{overflow-wrap:anywhere}
+        .template-saved-toast button{flex:none;padding:0 .2rem;border:0;background:transparent;color:inherit;font-size:1.2rem;line-height:1;cursor:pointer}
+        .template-saved-toast.is-closing{opacity:0;transform:translateY(-8px);pointer-events:none}
+        html[data-theme=light] .template-saved-toast{background:#dcfce7;border-color:#16a34a;color:#166534;box-shadow:0 8px 24px #0003}
+        @keyframes template-status-appear{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+        @keyframes template-generation-flash{0%,30%{background:#166534;color:#dcfce7;box-shadow:0 0 12px #22c55e}100%{box-shadow:0 0 0 transparent}}
+        @keyframes template-row-highlight{0%,20%{background:rgba(34,197,94,.35)}100%{background:transparent}}
+        @media(prefers-reduced-motion:reduce){#snmp-definitions [data-template-status][data-state=saved],#snmp-definitions .template-generation.template-generation-flash,#snmp-definitions .template-items tr.template-row-highlight td,.template-saved-toast{animation:none}.template-saved-toast{transition:none}}
         #snmp-definitions .template-tabs{display:flex;gap:4px;overflow:auto;border-bottom:1px solid var(--tp-border,#334155);margin:14px 0}
         #snmp-definitions .template-tabs button{flex:0 0 auto;border:0;border-bottom:3px solid transparent;border-radius:0;background:transparent;padding:10px 12px}
         #snmp-definitions .template-tabs [aria-selected=true]{border-bottom-color:var(--tp-accent,#38c5b2);color:var(--tp-accent,#38c5b2);font-weight:600}
@@ -459,7 +488,12 @@ var TracePulseSnmpDefinitions = (() => {
     let dirty = false;
     let busy = false;
     let message = "";
+    let savedMessage = false;
     let error = "";
+    let flashGeneration = false;
+    let toast;
+    let toastTimer;
+    let toastRemovalTimer;
     let capture = () => {
     };
     let category = "system";
@@ -468,6 +502,29 @@ var TracePulseSnmpDefinitions = (() => {
     let operation = "loading";
     let operationStarted = 0;
     let stopOperationProgress = () => {
+    };
+    const showSavedToast = (generation) => {
+      if (toastTimer !== void 0) window.clearTimeout(toastTimer);
+      if (toastRemovalTimer !== void 0) window.clearTimeout(toastRemovalTimer);
+      toast?.remove();
+      const node = element("div");
+      node.className = "template-saved-toast";
+      node.setAttribute("role", "status");
+      const content = element("span", text("savedToast").replace("{generation}", String(generation)));
+      const close = button("\xD7", () => dismiss());
+      close.setAttribute("aria-label", text("closeToast"));
+      const dismiss = () => {
+        if (toastTimer !== void 0) window.clearTimeout(toastTimer);
+        node.classList.add("is-closing");
+        toastRemovalTimer = window.setTimeout(() => {
+          node.remove();
+          if (toast === node) toast = void 0;
+        }, 250);
+      };
+      node.append(content, close);
+      document.body.append(node);
+      toast = node;
+      toastTimer = window.setTimeout(dismiss, 3500);
     };
     const run = async (action, kind = "loading") => {
       if (busy) return;
@@ -490,8 +547,14 @@ var TracePulseSnmpDefinitions = (() => {
       capture();
       dirty = true;
       message = "";
+      savedMessage = false;
       const status = root.querySelector("[data-template-status]");
-      if (status) status.textContent = text("dirty");
+      if (status) {
+        status.textContent = text("dirty");
+        status.dataset.state = "dirty";
+      }
+      const toolbar = root.querySelector(".template-toolbar");
+      if (toolbar) toolbar.dataset.state = "dirty";
     };
     const load = async () => {
       const [loadedView, loadedDevices] = await Promise.all([api("/api/snmp/definitions"), registeredDevices()]);
@@ -500,6 +563,7 @@ var TracePulseSnmpDefinitions = (() => {
       definitions = clone(view.definitions);
       dirty = false;
       message = "";
+      savedMessage = false;
     };
     const editTree = (value, path, update, remove, notify = changed, refresh = render) => {
       if (typeof value !== "object") {
@@ -679,9 +743,16 @@ var TracePulseSnmpDefinitions = (() => {
         dirty = true;
         modalDirty = false;
         message = "";
+        savedMessage = false;
         error = "";
         node.close();
         render();
+        const path = row.highlightPath || row.path;
+        const updated = Array.from(root.querySelectorAll("[data-template-row]")).find((entry) => entry.dataset.templateRow === path);
+        if (updated) {
+          updated.classList.add("template-row-highlight");
+          window.setTimeout(() => updated.classList.remove("template-row-highlight"), 2500);
+        }
       };
       node.showModal();
     };
@@ -766,7 +837,7 @@ var TracePulseSnmpDefinitions = (() => {
         if (category === "system") return ["cpu_oid", "memory_oid"].filter((key) => !doc[key]).map((key) => ({ label: fieldLabel(`common.${key}`), path: `common.${key}`, value: "", commit: (next) => {
           doc[key] = next;
         } }));
-        if (category === "hardware") return [{ label: fieldLabel("common.hardware_oids"), path: "common.hardware_oids.0", value: "temperature|", commit: (next) => {
+        if (category === "hardware") return [{ label: fieldLabel("common.hardware_oids"), path: `common.hardware_oids.${array(doc.hardware_oids).length}`, value: "temperature|", commit: (next) => {
           doc.hardware_oids = [...array(doc.hardware_oids), next];
         } }];
         return [];
@@ -778,6 +849,7 @@ var TracePulseSnmpDefinitions = (() => {
         {
           label: text("memorySource"),
           path: "profile.memory",
+          highlightPath: "memory" in doc ? `profile.memory.fallbacks.${array(object(doc.memory).fallbacks).length}` : "profile.memory",
           value: { mode: "direct", oid: "", aggregation: "first", used_is_bytes: false },
           commit: (next) => {
             if ("memory" in doc) object(doc.memory).fallbacks = [...array(object(doc.memory).fallbacks), next];
@@ -841,6 +913,7 @@ var TracePulseSnmpDefinitions = (() => {
       };
       const toolbar = element("div");
       toolbar.className = "template-toolbar";
+      if (dirty) toolbar.dataset.state = "dirty";
       const label = element("label", text("profile")), select = element("select");
       select.id = "template-profile";
       const deviceGroup = element("optgroup"), commonGroup = element("optgroup");
@@ -862,6 +935,9 @@ var TracePulseSnmpDefinitions = (() => {
         definitions = clone(next.definitions);
         dirty = false;
         message = text("saved");
+        savedMessage = true;
+        flashGeneration = true;
+        showSavedToast(next.applied_generation);
       }, "saving"));
       save.className = "template-save";
       toolbar.append(save);
@@ -1048,6 +1124,7 @@ var TracePulseSnmpDefinitions = (() => {
           draft.profiles[id] = { ...document2, name: name.value.trim(), sysObjectID_prefix: id, enterprise_id: enterprise ? Number(enterprise[1]) : 0 };
           dirty = true;
           message = "";
+          savedMessage = false;
           capture = () => {
           };
           selected = id;
@@ -1058,11 +1135,22 @@ var TracePulseSnmpDefinitions = (() => {
         node.showModal();
       }));
       root.append(toolbar);
-      const status = element("p", [dirty ? text("dirty") : "", message].filter(Boolean).join(" \u2014 "));
+      const statusBar = element("div");
+      statusBar.className = "template-status-bar";
+      const status = element("p", [dirty ? text("dirty") : "", savedMessage ? text("saved") : message].filter(Boolean).join(" \u2014 "));
       status.dataset.templateStatus = "";
       status.setAttribute("role", "status");
-      root.append(status);
-      root.append(element("p", `${text("version")}: ${view.generation} / ${view.applied_generation}`));
+      if (dirty) status.dataset.state = "dirty";
+      else if (savedMessage) status.dataset.state = "saved";
+      const generation = element("p", `${text("version")}: ${view.generation} / ${view.applied_generation}`);
+      generation.className = "template-generation";
+      if (flashGeneration && !busy) {
+        generation.classList.add("template-generation-flash");
+        flashGeneration = false;
+        window.setTimeout(() => generation.classList.remove("template-generation-flash"), 1500);
+      }
+      statusBar.append(status, generation);
+      root.append(statusBar);
       {
         const matches = common ? devices : devices.filter((device) => selectedProfile(device.sys_object_id, choices) === selected);
         const count = element("dd", String(matches.length));
@@ -1210,6 +1298,7 @@ var TracePulseSnmpDefinitions = (() => {
         void run(async () => {
           const result = await api("/api/snmp/definitions/preview", { definitions: draft, sys_object_id: oid });
           message = `${text("preview")}: ${result.document.name} (${result.id})`;
+          savedMessage = false;
         }, "previewing");
       }));
       const notes = element("details");
