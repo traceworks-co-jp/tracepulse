@@ -119,16 +119,16 @@ var TracePulseDeviceDetail = (() => {
     }
     const element = document.createElement("div");
     element.className = "operation-progress";
-    const bar = document.createElement("progress");
-    bar.setAttribute("aria-label", label);
-    const status = document.createElement("p");
-    status.setAttribute("role", "status");
-    status.setAttribute("aria-live", "polite");
-    element.append(bar, status);
+    const bar2 = document.createElement("progress");
+    bar2.setAttribute("aria-label", label);
+    const status2 = document.createElement("p");
+    status2.setAttribute("role", "status");
+    status2.setAttribute("aria-live", "polite");
+    element.append(bar2, status2);
     container.append(element);
     const started = performance.now();
     const update = () => {
-      status.textContent = message(Math.floor((performance.now() - started) / 1e3));
+      status2.textContent = message(Math.floor((performance.now() - started) / 1e3));
     };
     update();
     const timer = window.setInterval(update, 1e3);
@@ -383,7 +383,7 @@ var TracePulseDeviceDetail = (() => {
     let loading = false;
     const individual = devices.length === 1 && Boolean(devices[0].ip);
     const japanese2 = document.documentElement.lang === "ja";
-    const status = element.querySelector("[role=status]");
+    const status2 = element.querySelector("[role=status]");
     const failure = element.querySelector("[role=alert]");
     const controls = element.querySelectorAll("input,select,button");
     const setBusy = (value) => {
@@ -443,7 +443,7 @@ var TracePulseDeviceDetail = (() => {
       loading = true;
       setBusy(true);
       element.querySelector("[data-cancel]").disabled = false;
-      status.textContent = japanese2 ? "\u8A2D\u5B9A\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059\u2026" : "Loading settings...";
+      status2.textContent = japanese2 ? "\u8A2D\u5B9A\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059\u2026" : "Loading settings...";
       const hint = element.querySelector("#device-snmp-hint");
       hint.removeAttribute("data-i18n");
       hint.textContent = japanese2 ? "\u4FDD\u5B58\u6E08\u307F\u306E\u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\u3068\u30D1\u30B9\u30EF\u30FC\u30C9\u306F\u8868\u793A\u3057\u307E\u305B\u3093\u3002\u7A7A\u6B04\u306E\u307E\u307E\u4FDD\u5B58\u3059\u308B\u3068\u65E2\u5B58\u5024\u3092\u7DAD\u6301\u3057\u307E\u3059\u3002" : "Stored communities and passwords are not displayed. Leave them blank to keep existing values.";
@@ -466,12 +466,12 @@ var TracePulseDeviceDetail = (() => {
             input.removeAttribute("data-i18n-placeholder");
             input.placeholder = view.secret_configured[key] ? japanese2 ? "\u8A2D\u5B9A\u6E08\u307F\uFF08\u5909\u66F4\u3059\u308B\u5834\u5408\u306E\u307F\u5165\u529B\uFF09" : "Configured (enter only to replace)" : japanese2 ? "\u7A7A\u6B04\u306E\u5834\u5408\u306F\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Blank: use global defaults";
           }
-          status.textContent = view.individual_configured ? japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u30C7\u30D0\u30A4\u30B9\u500B\u5225\u8A2D\u5B9A" : "Current settings: device overrides" : japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Current settings: global defaults";
+          status2.textContent = view.individual_configured ? japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u30C7\u30D0\u30A4\u30B9\u500B\u5225\u8A2D\u5B9A" : "Current settings: device overrides" : japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Current settings: global defaults";
           loading = false;
           setBusy(false);
         } catch (reason) {
           if (controller.signal.aborted) return;
-          status.textContent = "";
+          status2.textContent = "";
           failure.textContent = String(reason);
           element.querySelector("[data-cancel]").disabled = false;
         }
@@ -480,8 +480,8 @@ var TracePulseDeviceDetail = (() => {
   }
 
   // frontend/src/shared/status.ts
-  function interfaceStatusClass(status) {
-    switch (status?.trim().toLowerCase()) {
+  function interfaceStatusClass(status2) {
+    switch (status2?.trim().toLowerCase()) {
       case "up":
         return "link-up";
       case "down":
@@ -492,6 +492,89 @@ var TracePulseDeviceDetail = (() => {
       default:
         return "status-unknown";
     }
+  }
+
+  // frontend/src/shared/refresh-indicator.ts
+  var active = 0;
+  var bar = null;
+  var finishTimer;
+  var removeTimer;
+  var status = null;
+  function initializeRefreshIndicator(anchor) {
+    if (!anchor) return null;
+    if (!document.getElementById("refresh-indicator-styles")) {
+      const style = document.createElement("style");
+      style.id = "refresh-indicator-styles";
+      style.textContent = `
+            .refresh-anchor{position:relative;display:inline-block;padding-left:7em}
+            .refresh-status{position:absolute;left:0;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:.35em;white-space:nowrap;color:#5eead4;visibility:hidden}
+            .refresh-status.active{visibility:visible}
+            html[data-theme='light'] .refresh-status{color:#087d70}
+            .refresh-spinner{box-sizing:border-box;width:12px;height:12px;border:1.5px solid currentColor;border-right-color:transparent;border-radius:50%;animation:refresh-spin .8s linear infinite}
+            .refresh-top{position:fixed;top:0;left:0;right:0;height:2.5px;z-index:1200;pointer-events:none;overflow:hidden;opacity:1;transition:opacity 200ms ease}
+            .refresh-top::before{content:"";display:block;width:100%;height:100%;background:linear-gradient(90deg,#00D2FF,#10B981);transform:scaleX(.3);transform-origin:left;animation:refresh-slide 1.5s ease-in-out infinite alternate}
+            .refresh-top.complete::before{animation:none;transform:scaleX(1);transition:transform 150ms ease}
+            .refresh-top.fade{opacity:0}
+            @keyframes refresh-spin{to{transform:rotate(360deg)}}
+            @keyframes refresh-slide{from{transform:translateX(-20%) scaleX(.3)}to{transform:translateX(60%) scaleX(.4)}}
+            @media(prefers-reduced-motion:reduce){.refresh-spinner,.refresh-top::before{animation:none}.refresh-top,.refresh-top.complete::before{transition:none}}
+        `;
+      document.head.append(style);
+    }
+    const text2 = document.createElement("span");
+    text2.textContent = anchor.textContent;
+    status = document.createElement("span");
+    status.className = "refresh-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    anchor.classList.add("refresh-anchor");
+    anchor.replaceChildren(status, text2);
+    const updateLanguage = () => {
+      if (active && status) status.lastChild.textContent = document.documentElement.lang === "ja" ? "\u66F4\u65B0\u4E2D\u2026" : "Updating\u2026";
+    };
+    window.addEventListener("tracepulse-language-change", updateLanguage);
+    return text2;
+  }
+  function showRefreshIndicator() {
+    if (active++ === 0) {
+      window.clearTimeout(finishTimer);
+      window.clearTimeout(removeTimer);
+      bar?.remove();
+      bar = document.createElement("div");
+      bar.className = "refresh-top";
+      bar.setAttribute("aria-hidden", "true");
+      document.body.append(bar);
+      if (status) {
+        const spinner = document.createElement("span");
+        spinner.className = "refresh-spinner";
+        spinner.setAttribute("aria-hidden", "true");
+        status.replaceChildren(spinner, document.createTextNode(document.documentElement.lang === "ja" ? "\u66F4\u65B0\u4E2D\u2026" : "Updating\u2026"));
+        status.classList.add("active");
+      }
+    }
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      if (--active !== 0) return;
+      status?.classList.remove("active");
+      if (status) status.textContent = "";
+      const completedBar = bar;
+      if (!completedBar) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        completedBar.remove();
+        bar = null;
+        return;
+      }
+      completedBar.classList.add("complete");
+      finishTimer = window.setTimeout(() => {
+        completedBar.classList.add("fade");
+        removeTimer = window.setTimeout(() => {
+          completedBar.remove();
+          if (bar === completedBar) bar = null;
+        }, 200);
+      }, 150);
+    };
   }
 
   // frontend/src/shared/format.ts
@@ -566,6 +649,7 @@ var TracePulseDeviceDetail = (() => {
   var deviceRefreshTimer = null;
   var ifaceSelected = /* @__PURE__ */ new Set();
   var lastDeviceDetail = null;
+  var refreshText = initializeRefreshIndicator(document.getElementById("device-refresh"));
   var ifaceSelectionReady = false;
   var resizeTimer = null;
   var monitoringHistory = null;
@@ -651,7 +735,7 @@ var TracePulseDeviceDetail = (() => {
     historyLoading = true;
     const error = document.getElementById("monitoring-history-error");
     error.textContent = "";
-    const stop = showOperationProgress(host, historyText().title, (seconds) => `${historyText().loading}... ${document.documentElement.lang === "ja" ? `\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `(${seconds}s elapsed)`}`);
+    const stop = showRefreshIndicator();
     stopHistoryProgress = stop;
     const params = new URLSearchParams({ range: monitoringRange });
     if (monitoringRange === "custom") {
@@ -670,7 +754,10 @@ var TracePulseDeviceDetail = (() => {
       if (!controller.signal.aborted && generation === historyGeneration) error.textContent = `${historyText().failed}: ${String(reason)}`;
     } finally {
       stop();
-      if (generation === historyGeneration) historyLoading = false;
+      if (generation === historyGeneration) {
+        historyLoading = false;
+        if (lastDeviceDetail) document.querySelectorAll(".chart-wrap.is-loading").forEach((element) => element.classList.remove("is-loading"));
+      }
     }
   }
   function loadAnalyticsPollingMs() {
@@ -981,7 +1068,7 @@ var TracePulseDeviceDetail = (() => {
   function formatCounterWithBreakdown(total, delta, errorBreakdown, metrics) {
     return `<span class='err-cell' tabindex='0' role='button' aria-expanded='false' aria-label='${esc(t("error_breakdown_hover_title"))}'>${formatCounter(total, delta)}${errorBreakdownPopoverHtml(errorBreakdown, metrics)}</span>`;
   }
-  function diagnosticBadge(status) {
+  function diagnosticBadge(status2) {
     const diagnostics = {
       healthy: { className: "healthy", translation: "diagnostic_healthy" },
       l1_error: { className: "l1_error", translation: "diagnostic_l1_error" },
@@ -989,7 +1076,7 @@ var TracePulseDeviceDetail = (() => {
       congestion: { className: "congestion", translation: "diagnostic_congestion" },
       down: { className: "down", translation: "diagnostic_down" }
     };
-    const diagnostic = status === void 0 ? diagnostics.healthy : Object.prototype.hasOwnProperty.call(diagnostics, status) ? diagnostics[status] : diagnostics.down;
+    const diagnostic = status2 === void 0 ? diagnostics.healthy : Object.prototype.hasOwnProperty.call(diagnostics, status2) ? diagnostics[status2] : diagnostics.down;
     return `<span class='diagnostic-badge ${diagnostic.className}'>${esc(t(diagnostic.translation))}</span>`;
   }
   function renderInterfaces(ifaces = []) {
@@ -1042,8 +1129,12 @@ var TracePulseDeviceDetail = (() => {
       };
     });
   }
-  window.addEventListener("tracepulse-role-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
-  window.addEventListener("tracepulse-language-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
+  window.addEventListener("tracepulse-role-change", () => {
+    if (lastDeviceDetail) renderInterfaces(lastDeviceDetail.interfaces || []);
+  });
+  window.addEventListener("tracepulse-language-change", () => {
+    if (lastDeviceDetail) renderInterfaces(lastDeviceDetail.interfaces || []);
+  });
   function opticalPowerHtml(value) {
     if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
     return `<span class="${value <= -20 ? "status-warning" : ""}">${value.toFixed(1)} dBm</span>`;
@@ -1108,10 +1199,10 @@ var TracePulseDeviceDetail = (() => {
     const macrx = eb.internal_mac_receive_errors_delta || 0;
     const total = fcs + align + toolong + macrx;
     const pct = (value) => total > 0 ? value / total * 100 : 0;
-    const bar = `<div class='breakdown-bar'><div class='breakdown-bar-seg fcs' style='width:${pct(fcs)}%'></div><div class='breakdown-bar-seg alignment' style='width:${pct(align)}%'></div><div class='breakdown-bar-seg frametoolong' style='width:${pct(toolong)}%'></div><div class='breakdown-bar-seg macreceive' style='width:${pct(macrx)}%'></div></div>`;
+    const bar2 = `<div class='breakdown-bar'><div class='breakdown-bar-seg fcs' style='width:${pct(fcs)}%'></div><div class='breakdown-bar-seg alignment' style='width:${pct(align)}%'></div><div class='breakdown-bar-seg frametoolong' style='width:${pct(toolong)}%'></div><div class='breakdown-bar-seg macreceive' style='width:${pct(macrx)}%'></div></div>`;
     const legend = `<div class='breakdown-legend'><span><span class='swatch' style='background:#f87171'></span>${t("error_breakdown_fcs_errors")}</span><span><span class='swatch' style='background:#fbbf24'></span>${t("error_breakdown_alignment_errors")}</span><span><span class='swatch' style='background:#a78bfa'></span>${t("error_breakdown_frame_too_longs")}</span><span><span class='swatch' style='background:#38bdf8'></span>${t("error_breakdown_internal_mac_receive_errors")}</span></div>`;
     const table = `<table class='breakdown-table'><thead><tr><th>${t("error_breakdown_fcs_errors")}</th><th>${t("error_breakdown_alignment_errors")}</th><th>${t("error_breakdown_frame_too_longs")}</th><th>${t("error_breakdown_internal_mac_receive_errors")}</th></tr></thead><tbody><tr><td>${fmtNum(eb.fcs_errors)} <span class='counter-delta warn'>(+${fmtNum(fcs)})</span></td><td>${fmtNum(eb.alignment_errors)} <span class='counter-delta warn'>(+${fmtNum(align)})</span></td><td>${fmtNum(eb.frame_too_longs)} <span class='counter-delta warn'>(+${fmtNum(toolong)})</span></td><td>${fmtNum(eb.internal_mac_receive_errors)} <span class='counter-delta warn'>(+${fmtNum(macrx)})</span></td></tr></tbody></table>`;
-    box.innerHTML = `<div class='error-breakdown-select'><label for='error-breakdown-if'>${t("error_breakdown_select_hint")}</label><select id='error-breakdown-if' onchange='onErrorBreakdownIfaceChange(this.value)'>${options}</select></div>` + bar + legend + table;
+    box.innerHTML = `<div class='error-breakdown-select'><label for='error-breakdown-if'>${t("error_breakdown_select_hint")}</label><select id='error-breakdown-if' onchange='onErrorBreakdownIfaceChange(this.value)'>${options}</select></div>` + bar2 + legend + table;
   }
   function onErrorBreakdownIfaceChange(value) {
     errorBreakdownSelectedIf = parseInt(value, 10);
@@ -1287,6 +1378,7 @@ var TracePulseDeviceDetail = (() => {
     const title = document.getElementById("dev-title");
     if (title) {
       title.textContent = `${deviceLabel(device)} (${device.ip || ""})`;
+      title.title = title.textContent;
       let metadata = document.getElementById("device-identity");
       if (!metadata) {
         metadata = document.createElement("div");
@@ -1308,18 +1400,17 @@ var TracePulseDeviceDetail = (() => {
         });
       };
     }
-    const status = document.getElementById("dev-status");
-    if (status) {
+    const status2 = document.getElementById("dev-status");
+    if (status2) {
       const classMap = { online: "status-online", offline: "status-offline", warning: "status-warning", critical: "status-critical" };
-      status.className = classMap[device.status || ""] || "status-unknown";
-      status.textContent = device.status || "unknown";
+      status2.className = classMap[device.status || ""] || "status-unknown";
+      status2.textContent = device.status || "unknown";
     }
     document.title = `TracePulse - ${deviceLabel(device) || "Device"}`;
   }
   function updateLastRefreshed() {
-    const element = document.getElementById("device-refresh");
-    if (element) {
-      element.textContent = `${t("device_auto_refresh").replace("{seconds}", String(deviceRefreshSeconds))} \u2022 ${t("updated")}: ${formatTracePulseClock(/* @__PURE__ */ new Date())}`;
+    if (refreshText) {
+      refreshText.textContent = `${t("device_auto_refresh").replace("{seconds}", String(deviceRefreshSeconds))} \u2022 ${t("updated")}: ${formatTracePulseClock(/* @__PURE__ */ new Date())}`;
     }
   }
   function scheduleDeviceRefresh() {
@@ -1352,12 +1443,7 @@ var TracePulseDeviceDetail = (() => {
     if (deviceDetailLoading) return;
     const refreshing = lastDeviceDetail !== null;
     deviceDetailLoading = true;
-    const header = document.getElementById("device-refresh")?.parentElement;
-    const stopProgress = header ? showOperationProgress(header, "Device details", (seconds) => {
-      const japanese2 = document.documentElement.lang === "ja";
-      return japanese2 ? `${lastDeviceDetail ? "\u30C7\u30D0\u30A4\u30B9\u60C5\u5831\u3092\u66F4\u65B0\u3057\u3066\u3044\u307E\u3059" : "\u30C7\u30D0\u30A4\u30B9\u60C5\u5831\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059"}...\uFF08\u7D4C\u904E ${seconds}\u79D2\uFF09` : `${lastDeviceDetail ? "Updating device details" : "Loading device details"}... (${seconds}s elapsed)`;
-    }) : () => {
-    };
+    const stopProgress = showRefreshIndicator();
     Promise.all([
       fetch("/api/settings", { cache: "no-store" }).then((response) => response.json()).catch(() => null),
       fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => {
@@ -1390,6 +1476,11 @@ var TracePulseDeviceDetail = (() => {
       const title = document.getElementById("dev-title");
       if (title) title.textContent = `Error: ${String(error)}`;
     }).finally(() => {
+      if (!lastDeviceDetail) {
+        const tbody = document.getElementById("if-tbody");
+        if (tbody) tbody.innerHTML = `<tr><td colspan="14">${t("no_interface_data")}</td></tr>`;
+      }
+      if (!historyLoading) document.querySelectorAll(".chart-wrap.is-loading").forEach((element) => element.classList.remove("is-loading"));
       stopProgress();
       deviceDetailLoading = false;
     });

@@ -218,7 +218,7 @@ test.describe("interface error breakdown overlay", () => {
 });
 
 for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja"]] as const) {
-    test(`device detail loading and refresh show elapsed progress at ${width} ${theme} ${language}`, async ({ page, request }) => {
+    test(`device detail refresh indicators do not shift content at ${width} ${theme} ${language}`, async ({ page, request }) => {
         const ip = "192.0.2.245";
         await request.post("/api/discovery/register", { data: [{ ip, name: "detail-progress", community: "public" }] });
         try {
@@ -230,40 +230,92 @@ for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja
             }, { language, theme });
             await page.route("**/api/settings", route => route.fulfill({ json: { polling: { interval_seconds: 600 } } }));
             let finish: ((success: boolean) => void) | undefined;
+            let finishHistory: (() => void) | undefined;
             let requests = 0;
+            let historyRequests = 0;
+            await page.route(`**/api/device/${ip}/history?*`, async route => {
+                if (++historyRequests === 1) await new Promise<void>(resolve => { finishHistory = resolve; });
+                await route.fulfill({ json: { start: "2026-01-01T00:00:00Z", end: "2026-01-02T00:00:00Z", if_series: [], metrics: [] } });
+            });
             await page.route(`**/api/device/${ip}`, async route => {
                 requests++;
                 const success = await new Promise<boolean>(resolve => { finish = resolve; });
-                await route.fulfill(success ? { json: { ip, name: "detail-progress", status: "online", interfaces: [], metrics: [], hardware_sensors: [], alerts: [], spikes: [] } } : { status: 500, json: { error: "Detail failed" } });
+                await route.fulfill(success ? { json: { ip, name: "detail-progress", status: "online", interfaces: Array.from({ length: 8 }, (_, index) => ({ if_index: index + 1, if_name: `port-${index + 1}` })), metrics: [], hardware_sensors: [], alerts: [], spikes: [] } } : { status: 500, json: { error: "Detail failed" } });
             });
             await page.goto(`/device/${ip}`);
             await page.locator("#theme-select").selectOption(theme);
-            const progress = page.locator("#device-refresh").locator("..").locator(".operation-progress");
-            await expect(progress).toBeInViewport();
-            await expect(progress.getByRole("status")).toContainText(language === "ja" ? "デバイス情報を読み込んでいます" : "Loading device details");
-            await expect(progress.getByRole("status")).toHaveText(language === "ja" ? /経過 [1-9]\d*秒/ : /[1-9]\d*s elapsed/);
+            const progress = page.locator("#device-refresh .refresh-status");
+            const section = page.locator("#if-table").locator("xpath=ancestor::section");
+            await expect(progress).toBeVisible();
+            await expect(progress).toHaveText(language === "ja" ? "更新中…" : "Updating…");
+            await expect(page.locator(".refresh-top")).toBeVisible();
+            expect(await page.locator(".refresh-top").evaluate(element => {
+                const style = getComputedStyle(element);
+                return [style.position, style.top, style.height, style.zIndex, style.pointerEvents];
+            })).toEqual(["fixed", "0px", "2.5px", "1200", "none"]);
+            expect(await progress.locator(".refresh-spinner").evaluate(element => {
+                const style = getComputedStyle(element);
+                return [style.width, style.height];
+            })).toEqual(["12px", "12px"]);
+            await expect(page.locator("#if-tbody .loading-skeleton")).toBeVisible();
+            await expect(page.locator(".chart-wrap.is-loading")).toHaveCount(4);
+            const initialTop = await section.evaluate(element => element.getBoundingClientRect().top);
+            const tableHeight = await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height);
+            const chartHeight = await page.locator("#bw-chart").evaluate(element => element.getBoundingClientRect().height);
             await page.evaluate(() => { window.loadDeviceDetail?.(); window.loadDeviceDetail?.(); });
             expect(requests).toBe(1);
-            await page.locator("#device-refresh").locator("..").screenshot({ path: `test-results/device-loading-progress-${width}-${theme}.png` });
             finish!(true);
-            await expect(progress).toHaveCount(0);
             await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            await expect(progress).toBeVisible();
+            await expect(page.locator(".chart-wrap.is-loading")).toHaveCount(4);
+            await expect.poll(() => typeof finishHistory).toBe("function");
+            finishHistory!();
+            await expect(progress).toBeHidden();
+            await expect(page.locator(".chart-wrap.is-loading")).toHaveCount(0);
+            await expect(page.locator("#if-tbody .loading-skeleton")).toHaveCount(0);
+            const before = await section.evaluate(element => element.getBoundingClientRect().top);
+            expect(before).toBe(initialTop);
+            expect(await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height)).toBe(tableHeight);
+            expect(await page.locator("#bw-chart").evaluate(element => element.getBoundingClientRect().height)).toBe(chartHeight);
             await page.evaluate(() => window.loadDeviceDetail?.());
             await expect(progress).toBeVisible();
-            await expect(progress.getByRole("status")).toContainText(language === "ja" ? "デバイス情報を更新しています" : "Updating device details");
+            expect(await section.evaluate(element => element.getBoundingClientRect().top)).toBe(before);
             await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
             await expect.poll(() => requests).toBe(2);
             finish!(false);
-            await expect(progress).toHaveCount(0);
+            await expect(progress).toBeHidden();
             await expect(page.locator("#dev-title")).toContainText("HTTP 500");
             await page.evaluate(() => window.loadDeviceDetail?.());
             await expect.poll(() => requests).toBe(3);
             finish!(true);
-            await expect(progress).toHaveCount(0);
+            await expect(progress).toBeHidden();
             await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            expect(await section.evaluate(element => element.getBoundingClientRect().top)).toBe(before);
         } finally { await request.delete(`/api/device/${ip}`); }
     });
 }
+
+test("dashboard refresh uses an inline indicator without moving the table", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.addInitScript(() => localStorage.setItem("tracepulse-onboarding-v1", "done"));
+    let finish: (() => void) | undefined;
+    await page.route("**/api/devices", async route => {
+        await new Promise<void>(resolve => { finish = resolve; });
+        await route.fulfill({ json: [] });
+    });
+    await page.goto("/");
+    const table = page.locator("#dash-table");
+    const before = await table.evaluate(element => element.getBoundingClientRect().top);
+    await page.evaluate(() => window.refreshDashboard?.());
+    await expect(page.locator("#last-refreshed .refresh-status")).toBeVisible();
+    await expect.poll(() => typeof finish).toBe("function");
+    expect(await table.evaluate(element => element.getBoundingClientRect().top)).toBe(before);
+    expect(await page.locator(".refresh-spinner").evaluate(element => getComputedStyle(element).animationName)).toBe("none");
+    finish!();
+    await expect(page.locator("#last-refreshed .refresh-status")).toBeHidden();
+    await expect(page.locator(".refresh-top")).toHaveCount(0);
+    expect(await table.evaluate(element => element.getBoundingClientRect().top)).toBe(before);
+});
 
 for (const [width, language, theme] of [[1280, "en", "light"], [375, "ja", "dark"]] as const) {
     test(`remaining discovery registration progress at ${width} ${language}`, async ({ page }) => {

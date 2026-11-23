@@ -263,7 +263,7 @@ var TracePulseDashboard = (() => {
       } else previousFocus?.focus();
       window.refreshDashboard?.();
     };
-    const status = (message, error = false) => {
+    const status2 = (message, error = false) => {
       const node = dialog2.querySelector("#setup-status");
       if (node) {
         node.textContent = message;
@@ -320,7 +320,7 @@ var TracePulseDashboard = (() => {
       const community = dialog2.querySelector("#setup-community").value;
       const match = cidr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
       if (!match || match[1].split(".").some((part) => Number(part) > 255) || Number(match[2]) < 24 || Number(match[2]) > 32) {
-        status(text3("rangeError"), true);
+        status2(text3("rangeError"), true);
         return;
       }
       stop();
@@ -330,7 +330,7 @@ var TracePulseDashboard = (() => {
       dialog2.querySelector("[data-action=register]").hidden = true;
       const signal = controller.signal;
       setBusy(true);
-      status(text3("scanning"));
+      status2(text3("scanning"));
       const progress = dialog2.querySelector("#setup-progress");
       progress.hidden = false;
       progress.removeAttribute("value");
@@ -339,7 +339,7 @@ var TracePulseDashboard = (() => {
         stop();
         setBusy(false);
         progress.hidden = true;
-        status(error instanceof Error ? error.message : text3("failure"), true);
+        status2(error instanceof Error ? error.message : text3("failure"), true);
       };
       deadline = window.setTimeout(() => fail(new Error(text3("timeout"))), 3e5);
       try {
@@ -354,7 +354,7 @@ var TracePulseDashboard = (() => {
             if (signal.aborted) return;
             progress.max = result.total || hosts;
             progress.value = result.scanned || 0;
-            status(`${text3("scanning")} ${result.scanned || 0} / ${result.total || hosts}`);
+            status2(`${text3("scanning")} ${result.scanned || 0} / ${result.total || hosts}`);
             if (result.status === "error") throw new Error(text3("failure"));
             if (result.status !== "done") {
               timer = window.setTimeout(() => void poll(), 1500);
@@ -367,7 +367,7 @@ var TracePulseDashboard = (() => {
             devices = (result.devices || []).filter((device) => !known.has(device.ip)).map((device) => ({ ...device, community }));
             setBusy(false);
             progress.hidden = true;
-            status(devices.length ? text3("selected") : text3("empty"));
+            status2(devices.length ? text3("selected") : text3("empty"));
             dialog2.querySelector("#setup-results").innerHTML = devices.map((device, index) => `<label class="setup-device"><input type="checkbox" value="${index}" checked><span>${esc(device.ip)} ${esc(device.name || "")}</span></label>`).join("");
             dialog2.querySelector("[data-action=register]").hidden = devices.length === 0;
           } catch (error) {
@@ -383,7 +383,7 @@ var TracePulseDashboard = (() => {
       if (busy) return;
       const selected = Array.from(dialog2.querySelectorAll("#setup-results input:checked")).map((input) => devices[Number(input.value)]);
       if (!selected.length) {
-        status(text3("selected"), true);
+        status2(text3("selected"), true);
         return;
       }
       const signal = controller.signal;
@@ -396,12 +396,12 @@ var TracePulseDashboard = (() => {
           if (accepted.has(devices[Number(input.value)].ip)) input.closest("label")?.remove();
         });
         registered = result.registered.length > 0 || result.skipped.length > 0;
-        status(result.errors.length ? result.errors.join("\n") : registered ? text3("registered") : text3("failure"), result.errors.length > 0 || !registered);
+        status2(result.errors.length ? result.errors.join("\n") : registered ? text3("registered") : text3("failure"), result.errors.length > 0 || !registered);
         window.refreshDashboard?.();
         dialog2.querySelector("[data-action=next]").textContent = text3(registered ? "next" : "continue");
         dialog2.querySelector("[data-action=register]").hidden = dialog2.querySelectorAll("#setup-results input").length === 0;
       } catch (error) {
-        if (!signal.aborted) status(error instanceof Error ? error.message : text3("failure"), true);
+        if (!signal.aborted) status2(error instanceof Error ? error.message : text3("failure"), true);
       } finally {
         if (!signal.aborted) setBusy(false);
       }
@@ -517,16 +517,16 @@ var TracePulseDashboard = (() => {
     }
     const element = document.createElement("div");
     element.className = "operation-progress";
-    const bar = document.createElement("progress");
-    bar.setAttribute("aria-label", label);
-    const status = document.createElement("p");
-    status.setAttribute("role", "status");
-    status.setAttribute("aria-live", "polite");
-    element.append(bar, status);
+    const bar2 = document.createElement("progress");
+    bar2.setAttribute("aria-label", label);
+    const status2 = document.createElement("p");
+    status2.setAttribute("role", "status");
+    status2.setAttribute("aria-live", "polite");
+    element.append(bar2, status2);
     container.append(element);
     const started = performance.now();
     const update = () => {
-      status.textContent = message(Math.floor((performance.now() - started) / 1e3));
+      status2.textContent = message(Math.floor((performance.now() - started) / 1e3));
     };
     update();
     const timer = window.setInterval(update, 1e3);
@@ -781,7 +781,7 @@ var TracePulseDashboard = (() => {
     let loading = false;
     const individual = devices.length === 1 && Boolean(devices[0].ip);
     const japanese2 = document.documentElement.lang === "ja";
-    const status = element.querySelector("[role=status]");
+    const status2 = element.querySelector("[role=status]");
     const failure = element.querySelector("[role=alert]");
     const controls = element.querySelectorAll("input,select,button");
     const setBusy = (value) => {
@@ -841,7 +841,7 @@ var TracePulseDashboard = (() => {
       loading = true;
       setBusy(true);
       element.querySelector("[data-cancel]").disabled = false;
-      status.textContent = japanese2 ? "\u8A2D\u5B9A\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059\u2026" : "Loading settings...";
+      status2.textContent = japanese2 ? "\u8A2D\u5B9A\u3092\u8AAD\u307F\u8FBC\u3093\u3067\u3044\u307E\u3059\u2026" : "Loading settings...";
       const hint = element.querySelector("#device-snmp-hint");
       hint.removeAttribute("data-i18n");
       hint.textContent = japanese2 ? "\u4FDD\u5B58\u6E08\u307F\u306E\u30B3\u30DF\u30E5\u30CB\u30C6\u30A3\u3068\u30D1\u30B9\u30EF\u30FC\u30C9\u306F\u8868\u793A\u3057\u307E\u305B\u3093\u3002\u7A7A\u6B04\u306E\u307E\u307E\u4FDD\u5B58\u3059\u308B\u3068\u65E2\u5B58\u5024\u3092\u7DAD\u6301\u3057\u307E\u3059\u3002" : "Stored communities and passwords are not displayed. Leave them blank to keep existing values.";
@@ -864,12 +864,12 @@ var TracePulseDashboard = (() => {
             input.removeAttribute("data-i18n-placeholder");
             input.placeholder = view.secret_configured[key] ? japanese2 ? "\u8A2D\u5B9A\u6E08\u307F\uFF08\u5909\u66F4\u3059\u308B\u5834\u5408\u306E\u307F\u5165\u529B\uFF09" : "Configured (enter only to replace)" : japanese2 ? "\u7A7A\u6B04\u306E\u5834\u5408\u306F\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Blank: use global defaults";
           }
-          status.textContent = view.individual_configured ? japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u30C7\u30D0\u30A4\u30B9\u500B\u5225\u8A2D\u5B9A" : "Current settings: device overrides" : japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Current settings: global defaults";
+          status2.textContent = view.individual_configured ? japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u30C7\u30D0\u30A4\u30B9\u500B\u5225\u8A2D\u5B9A" : "Current settings: device overrides" : japanese2 ? "\u73FE\u5728\u306E\u8A2D\u5B9A\uFF1A\u5171\u901A\u8A2D\u5B9A\u3092\u4F7F\u7528" : "Current settings: global defaults";
           loading = false;
           setBusy(false);
         } catch (reason) {
           if (controller.signal.aborted) return;
-          status.textContent = "";
+          status2.textContent = "";
           failure.textContent = String(reason);
           element.querySelector("[data-cancel]").disabled = false;
         }
@@ -1306,8 +1306,8 @@ var TracePulseDashboard = (() => {
   }
 
   // frontend/src/shared/status.ts
-  function deviceStatusClass(status) {
-    switch (status?.trim().toLowerCase()) {
+  function deviceStatusClass(status2) {
+    switch (status2?.trim().toLowerCase()) {
       case "online":
         return "status-online";
       case "offline":
@@ -1321,7 +1321,91 @@ var TracePulseDashboard = (() => {
     }
   }
 
+  // frontend/src/shared/refresh-indicator.ts
+  var active = 0;
+  var bar = null;
+  var finishTimer;
+  var removeTimer;
+  var status = null;
+  function initializeRefreshIndicator(anchor) {
+    if (!anchor) return null;
+    if (!document.getElementById("refresh-indicator-styles")) {
+      const style = document.createElement("style");
+      style.id = "refresh-indicator-styles";
+      style.textContent = `
+            .refresh-anchor{position:relative;display:inline-block;padding-left:7em}
+            .refresh-status{position:absolute;left:0;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;gap:.35em;white-space:nowrap;color:#5eead4;visibility:hidden}
+            .refresh-status.active{visibility:visible}
+            html[data-theme='light'] .refresh-status{color:#087d70}
+            .refresh-spinner{box-sizing:border-box;width:12px;height:12px;border:1.5px solid currentColor;border-right-color:transparent;border-radius:50%;animation:refresh-spin .8s linear infinite}
+            .refresh-top{position:fixed;top:0;left:0;right:0;height:2.5px;z-index:1200;pointer-events:none;overflow:hidden;opacity:1;transition:opacity 200ms ease}
+            .refresh-top::before{content:"";display:block;width:100%;height:100%;background:linear-gradient(90deg,#00D2FF,#10B981);transform:scaleX(.3);transform-origin:left;animation:refresh-slide 1.5s ease-in-out infinite alternate}
+            .refresh-top.complete::before{animation:none;transform:scaleX(1);transition:transform 150ms ease}
+            .refresh-top.fade{opacity:0}
+            @keyframes refresh-spin{to{transform:rotate(360deg)}}
+            @keyframes refresh-slide{from{transform:translateX(-20%) scaleX(.3)}to{transform:translateX(60%) scaleX(.4)}}
+            @media(prefers-reduced-motion:reduce){.refresh-spinner,.refresh-top::before{animation:none}.refresh-top,.refresh-top.complete::before{transition:none}}
+        `;
+      document.head.append(style);
+    }
+    const text3 = document.createElement("span");
+    text3.textContent = anchor.textContent;
+    status = document.createElement("span");
+    status.className = "refresh-status";
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    anchor.classList.add("refresh-anchor");
+    anchor.replaceChildren(status, text3);
+    const updateLanguage = () => {
+      if (active && status) status.lastChild.textContent = document.documentElement.lang === "ja" ? "\u66F4\u65B0\u4E2D\u2026" : "Updating\u2026";
+    };
+    window.addEventListener("tracepulse-language-change", updateLanguage);
+    return text3;
+  }
+  function showRefreshIndicator() {
+    if (active++ === 0) {
+      window.clearTimeout(finishTimer);
+      window.clearTimeout(removeTimer);
+      bar?.remove();
+      bar = document.createElement("div");
+      bar.className = "refresh-top";
+      bar.setAttribute("aria-hidden", "true");
+      document.body.append(bar);
+      if (status) {
+        const spinner = document.createElement("span");
+        spinner.className = "refresh-spinner";
+        spinner.setAttribute("aria-hidden", "true");
+        status.replaceChildren(spinner, document.createTextNode(document.documentElement.lang === "ja" ? "\u66F4\u65B0\u4E2D\u2026" : "Updating\u2026"));
+        status.classList.add("active");
+      }
+    }
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      if (--active !== 0) return;
+      status?.classList.remove("active");
+      if (status) status.textContent = "";
+      const completedBar = bar;
+      if (!completedBar) return;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        completedBar.remove();
+        bar = null;
+        return;
+      }
+      completedBar.classList.add("complete");
+      finishTimer = window.setTimeout(() => {
+        completedBar.classList.add("fade");
+        removeTimer = window.setTimeout(() => {
+          completedBar.remove();
+          if (bar === completedBar) bar = null;
+        }, 200);
+      }, 150);
+    };
+  }
+
   // frontend/src/pages/dashboard.ts
+  var refreshText = initializeRefreshIndicator(document.getElementById("last-refreshed"));
   var columns = ["ip", "display_name", "name", "tags", "status", "health_score", "last_seen"];
   var sortColumn = "ip";
   var sortAscending = true;
@@ -1362,9 +1446,9 @@ var TracePulseDashboard = (() => {
     if (parts.length !== 4) return 0;
     return parts.reduce((value, part) => value * 256 + (parseInt(part, 10) || 0), 0);
   }
-  function statusOrder(status) {
+  function statusOrder(status2) {
     const order = { critical: 0, offline: 1, warning: 2, unknown: 3, online: 4 };
-    return order[status || ""] ?? 5;
+    return order[status2 || ""] ?? 5;
   }
   function compareValue(a, b, column) {
     if (column === "ip") return ipToNumber(a.ip) - ipToNumber(b.ip);
@@ -1503,8 +1587,7 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
     });
   }
   function updateLastRefreshed() {
-    const element = document.getElementById("last-refreshed");
-    if (element) element.textContent = `${t("updated")}: ${formatTracePulseClock(/* @__PURE__ */ new Date())}`;
+    if (refreshText) refreshText.textContent = `${t("updated")}: ${formatTracePulseClock(/* @__PURE__ */ new Date())}`;
   }
   function initializeManagement() {
     const table = document.getElementById("dash-table");
@@ -1550,6 +1633,7 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
     table.querySelector("thead tr").prepend(header);
   }
   function refresh() {
+    const stopProgress = showRefreshIndicator();
     fetch("/api/devices").then(async (response) => {
       const data = await response.json();
       if (!response.ok || !Array.isArray(data)) throw new Error(!Array.isArray(data) ? data.error || "Device request failed" : "Device request failed");
@@ -1566,7 +1650,7 @@ ${ip}${name ? ` (${name})` : ""}`)) return;
       const message = document.getElementById("device-load-error");
       if (message) message.textContent = String(error);
       console.warn("refresh failed", error);
-    });
+    }).finally(stopProgress);
   }
   window.renderTable = renderTable;
   window.renderSummary = renderSummary;

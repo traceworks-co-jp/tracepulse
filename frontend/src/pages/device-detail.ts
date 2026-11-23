@@ -1,7 +1,7 @@
 import { esc as escapeHtml } from "../shared/escape";
 import { deviceLabel, editDeviceMetadata, metadataText } from "../shared/device-metadata";
 import { interfaceStatusClass } from "../shared/status";
-import { showOperationProgress } from "../shared/operation-progress";
+import { initializeRefreshIndicator, showRefreshIndicator } from "../shared/refresh-indicator";
 import {
     fmtNum,
     fmtTime,
@@ -24,6 +24,7 @@ let analyticsTimer: number | null = null;
 let deviceRefreshTimer: number | null = null;
 let ifaceSelected = new Set<string>();
 let lastDeviceDetail: DeviceDetail | null = null;
+const refreshText = initializeRefreshIndicator(document.getElementById("device-refresh"));
 let ifaceSelectionReady = false;
 let resizeTimer: number | null = null;
 interface MonitoringHistory { if_series?: InterfaceSeries[]; metrics?: SystemMetric[]; start: string; end: string; error?: string; }
@@ -104,7 +105,7 @@ async function loadMonitoringHistory(force = false): Promise<void> {
     historyLoading = true;
     const error = document.getElementById("monitoring-history-error")!;
     error.textContent = "";
-    const stop = showOperationProgress(host, historyText().title, seconds => `${historyText().loading}... ${document.documentElement.lang === "ja" ? `（経過 ${seconds}秒）` : `(${seconds}s elapsed)`}`);
+    const stop = showRefreshIndicator();
     stopHistoryProgress = stop;
     const params = new URLSearchParams({ range: monitoringRange });
     if (monitoringRange === "custom") { params.set("start", customHistoryStart); params.set("end", customHistoryEnd); }
@@ -120,7 +121,10 @@ async function loadMonitoringHistory(force = false): Promise<void> {
         if (!controller.signal.aborted && generation === historyGeneration) error.textContent = `${historyText().failed}: ${String(reason)}`;
     } finally {
         stop();
-        if (generation === historyGeneration) historyLoading = false;
+        if (generation === historyGeneration) {
+            historyLoading = false;
+            if (lastDeviceDetail) document.querySelectorAll(".chart-wrap.is-loading").forEach(element => element.classList.remove("is-loading"));
+        }
     }
 }
 
@@ -720,8 +724,8 @@ export function renderInterfaces(ifaces: DeviceInterface[] = []): void {
     });
 }
 
-window.addEventListener("tracepulse-role-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
-window.addEventListener("tracepulse-language-change", () => renderInterfaces(lastDeviceDetail?.interfaces || []));
+window.addEventListener("tracepulse-role-change", () => { if (lastDeviceDetail) renderInterfaces(lastDeviceDetail.interfaces || []); });
+window.addEventListener("tracepulse-language-change", () => { if (lastDeviceDetail) renderInterfaces(lastDeviceDetail.interfaces || []); });
 
 function opticalPowerHtml(value?: number | null): string {
     if (typeof value !== "number" || !Number.isFinite(value)) return "N/A";
@@ -1049,6 +1053,7 @@ function renderHeader(device: DeviceDetail): void {
     const title = document.getElementById("dev-title");
     if (title) {
         title.textContent = `${deviceLabel(device)} (${device.ip || ""})`;
+        title.title = title.textContent;
         let metadata = document.getElementById("device-identity");
         if (!metadata) {
             metadata = document.createElement("div");
@@ -1080,9 +1085,8 @@ function renderHeader(device: DeviceDetail): void {
 }
 
 function updateLastRefreshed(): void {
-    const element = document.getElementById("device-refresh");
-    if (element) {
-        element.textContent = `${t("device_auto_refresh").replace("{seconds}", String(deviceRefreshSeconds))} • ${t("updated")}: ${formatTracePulseClock(new Date())}`;
+    if (refreshText) {
+        refreshText.textContent = `${t("device_auto_refresh").replace("{seconds}", String(deviceRefreshSeconds))} • ${t("updated")}: ${formatTracePulseClock(new Date())}`;
     }
 }
 
@@ -1119,13 +1123,7 @@ export function loadDeviceDetail(): void {
     if (deviceDetailLoading) return;
     const refreshing = lastDeviceDetail !== null;
     deviceDetailLoading = true;
-    const header = document.getElementById("device-refresh")?.parentElement;
-    const stopProgress = header ? showOperationProgress(header, "Device details", seconds => {
-        const japanese = document.documentElement.lang === "ja";
-        return japanese
-            ? `${lastDeviceDetail ? "デバイス情報を更新しています" : "デバイス情報を読み込んでいます"}...（経過 ${seconds}秒）`
-            : `${lastDeviceDetail ? "Updating device details" : "Loading device details"}... (${seconds}s elapsed)`;
-    }) : () => { };
+    const stopProgress = showRefreshIndicator();
     Promise.all([
         fetch("/api/settings", { cache: "no-store" }).then((response) => response.json() as Promise<SettingsResponse>).catch(() => null),
         fetch(`/api/device/${encodeURIComponent(window.DEVICE_IP || "")}`, { cache: "no-store" }).then((response) => {
@@ -1161,7 +1159,15 @@ export function loadDeviceDetail(): void {
             const title = document.getElementById("dev-title");
             if (title) title.textContent = `Error: ${String(error)}`;
         })
-        .finally(() => { stopProgress(); deviceDetailLoading = false; });
+        .finally(() => {
+            if (!lastDeviceDetail) {
+                const tbody = document.getElementById("if-tbody");
+                if (tbody) tbody.innerHTML = `<tr><td colspan="14">${t("no_interface_data")}</td></tr>`;
+            }
+            if (!historyLoading) document.querySelectorAll(".chart-wrap.is-loading").forEach(element => element.classList.remove("is-loading"));
+            stopProgress();
+            deviceDetailLoading = false;
+        });
 }
 
 window.esc = escapeHtml;

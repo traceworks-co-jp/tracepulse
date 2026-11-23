@@ -4,6 +4,9 @@ import { initializeOnboarding } from "../shared/onboarding";
 import { bulkActions, deviceLabel, metadataText } from "../shared/device-metadata";
 import { initializeDeviceFilters } from "../shared/device-filters";
 import { deviceStatusClass as statusClass } from "../shared/status";
+import { initializeRefreshIndicator, showRefreshIndicator } from "../shared/refresh-indicator";
+
+const refreshText = initializeRefreshIndicator(document.getElementById("last-refreshed"));
 
 interface DashboardDevice {
     id?: number | null;
@@ -219,8 +222,7 @@ export function unregisterDevice(encodedIp: string, encodedName: string): void {
 }
 
 function updateLastRefreshed(): void {
-    const element = document.getElementById("last-refreshed");
-    if (element) element.textContent = `${t("updated")}: ${formatTracePulseClock(new Date())}`;
+    if (refreshText) refreshText.textContent = `${t("updated")}: ${formatTracePulseClock(new Date())}`;
 }
 
 function initializeManagement(): void {
@@ -264,6 +266,7 @@ function initializeManagement(): void {
 }
 
 export function refresh(): void {
+    const stopProgress = showRefreshIndicator();
     fetch("/api/devices")
         .then(async (response) => {
             const data: DashboardDevice[] | { error?: string } = await response.json();
@@ -283,7 +286,8 @@ export function refresh(): void {
             const message = document.getElementById("device-load-error");
             if (message) message.textContent = String(error);
             console.warn("refresh failed", error);
-        });
+        })
+        .finally(stopProgress);
 }
 
 window.renderTable = renderTable;

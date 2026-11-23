@@ -3994,7 +3994,7 @@ fn page_dashboard(
     html.push_str(&format!("<div class='card'><div class='card-num'>{total}</div><div class='card-label' data-i18n='total'>Total</div></div>"));
     html.push_str(&format!("<div class='{spike_card_cls}'><div class='card-num'>{spikes_count}</div><div class='card-label' data-i18n='error_spikes'>Error Spikes</div></div>"));
     html.push_str("</div>");
-    html.push_str("<p id='last-refreshed' style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'></p>");
+    html.push_str("<p style='font-size:.8rem;color:#64748b;margin-bottom:.75rem;text-align:right'><span id='last-refreshed'></span></p>");
     if let Some(extension) = extension
         && let Some(markup) = extension.dashboard_html()
     {
@@ -4217,8 +4217,8 @@ fn page_device_detail(
          <a href='/' style='color:#94a3b8;font-size:.85rem;text-decoration:none' data-i18n='nav_dashboard'>&#8592; Dashboard</a>\
          <h1 id='dev-title' style='margin:0'>Loading...</h1>\
          <span id='dev-status' class='status-unknown'>unknown</span>\
-         <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Device data auto-refresh: 30s</span>\
-         </div>");
+         <span id='device-refresh' style='font-size:.8rem;color:#64748b;margin-left:auto'>Device data auto-refresh: 30s • Updated: --:--:--</span>\
+         </div><div id='device-identity'></div>");
     let marker = "<button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'ping')\">Ping</button><button class='btn btn-secondary' onclick=\"openActiveDiagnostic(DEVICE_IP,'traceroute')\">Traceroute</button><button class='btn btn-secondary' onclick=\"openActiveDiagnosticWithPortPrompt(DEVICE_IP,'port',80)\">Port Check</button>";
     let extra_buttons = extension.map_or_else(String::new, |provider| {
         provider.device_diagnostics_buttons()
@@ -4232,8 +4232,8 @@ fn page_device_detail(
 
     // セクション: インターフェース一覧
     html.push_str("<section class='detail-section'>");
-    html.push_str("<h2 data-i18n='interface_status'>Interface Status</h2>");
-    html.push_str("<div class='table-scroll interface-table-scroll'><table id='if-table'><thead><tr>\
+    html.push_str("<h2 id='interface-status-heading' data-i18n='interface_status'>Interface Status</h2>");
+    html.push_str("<div class='table-scroll interface-table-scroll' role='region' aria-labelledby='interface-status-heading' tabindex='0'><table id='if-table'><thead><tr>\
         <th>#</th><th data-i18n='interface'>Interface</th><th data-i18n='status'>Link</th>\
         <th data-i18n='diagnostic_status'>Diagnostic Status</th>\
         <th data-i18n='in_errors'>In Errors</th><th data-i18n='out_errors'>Out Errors</th>\
@@ -4241,7 +4241,7 @@ fn page_device_detail(
         <th data-i18n='late_collisions'>Late Collisions</th>\
         <th><span data-i18n='bandwidth_line1'>Bandwidth</span><br><span data-i18n='bandwidth_line2'>Utilization (%)</span></th>\
         <th>Tx Power</th><th>Rx Power</th><th data-i18n='time'>Sampled At</th><th data-port-alert-heading>Important port alerts</th>\
-        </tr></thead><tbody id='if-tbody'><tr><td colspan=14>Loading...</td></tr></tbody></table></div><p id='port-alert-error' role='alert'></p>");
+        </tr></thead><tbody id='if-tbody'><tr aria-hidden='true'><td colspan=14><span class='loading-skeleton table-skeleton'></span></td></tr></tbody></table></div><p id='port-alert-error' role='alert'></p>");
     html.push_str("</section>");
 
     // セクション: 破損パケット内訳（EtherLike-MIB Error Breakdown）
@@ -4272,24 +4272,24 @@ fn page_device_detail(
     html.push_str("<section class='detail-section' id='monitoring-history-section'><div id='monitoring-history-controls'></div><div id='monitoring-history-progress'></div><p id='monitoring-history-error' role='alert'></p><p id='monitoring-history-period' class='chart-history-period'></p></section>");
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2><span data-i18n='bandwidth_title'>Bandwidth Utilization (%)</span> <span class='chart-legend' id='bw-legend'></span></h2>");
-    html.push_str("<div class='chart-wrap'><svg id='bw-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
+    html.push_str("<div class='chart-wrap is-loading'><svg id='bw-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
     html.push_str("</section>");
 
     // セクション: エラーカウンタグラフ
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2><span data-i18n='error_discard_title'>Error &amp; Discard Counters</span> <span class='chart-legend' id='err-legend'></span></h2>");
-    html.push_str("<div class='chart-wrap'><svg id='err-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
+    html.push_str("<div class='chart-wrap is-loading'><svg id='err-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
     html.push_str("</section>");
 
     // セクション: CPUグラフ
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='cpu_usage_title'>CPU Usage (%)</h2>");
-    html.push_str("<div class='chart-wrap'><svg id='cpu-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
+    html.push_str("<div class='chart-wrap is-loading'><svg id='cpu-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
     html.push_str("</section>");
 
     html.push_str("<section class='detail-section'>");
     html.push_str("<h2 data-i18n='memory_usage_title'>Memory Usage (%)</h2>");
-    html.push_str("<div class='chart-wrap'><svg id='memory-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
+    html.push_str("<div class='chart-wrap is-loading'><svg id='memory-chart' class='chart-svg' viewBox='0 0 800 160' preserveAspectRatio='none'></svg></div>");
     html.push_str("</section>");
 
     html.push_str("<section class='detail-section'>");
@@ -5111,6 +5111,13 @@ const DIAGNOSTICS_CSS: &str = "<style>
 const DEVICE_DETAIL_CSS: &str = "<style>
   /* このページはテーブル・グラフの情報量が多いため、共通レイアウトより幅広く画面幅に追従させる */
   body[data-title-key='device_title_prefix'] main { max-width: min(1800px, 96vw); width: 100%; }
+  #device-identity { height:6rem; overflow-y:auto; }
+  .loading-skeleton { display:block; height:.85rem; border-radius:.3rem; background:var(--tp-border,#334155); animation:skeleton-pulse 1.6s ease-in-out infinite; }
+  .table-skeleton { width:80%; }
+  .chart-wrap.is-loading { position:relative; }
+  .chart-wrap.is-loading::after { content:''; position:absolute; left:10%; right:10%; top:45%; height:.85rem; border-radius:.3rem; background:var(--tp-border,#334155); animation:skeleton-pulse 1.6s ease-in-out infinite; pointer-events:none; }
+  @keyframes skeleton-pulse { 50% { opacity:.45; } }
+  @media(prefers-reduced-motion:reduce) { .loading-skeleton,.chart-wrap.is-loading::after { animation:none; } }
   .detail-section { background:#1e293b; border:1px solid #334155; border-radius:.5rem; padding:1.25rem 1.5rem; margin-bottom:1.5rem; }
   .detail-section h2 { font-size:.95rem; color:#38bdf8; margin-bottom:.85rem; border-bottom:1px solid #334155; padding-bottom:.4rem; }
   .hardware-status { display:flex; flex-wrap:wrap; gap:.75rem; }
@@ -5143,7 +5150,8 @@ const DEVICE_DETAIL_CSS: &str = "<style>
     html[data-theme='light'] #monitoring-history-error { color:#b91c1c; }
     @media(max-width:600px) { .chart-history-controls, .chart-history-custom { align-items:stretch; flex-direction:column; } .chart-history-controls label { width:100%; } }
   .table-scroll { width:100%; overflow-x:auto; }
-    .interface-table-scroll { overflow:visible; }
+    .interface-table-scroll { height:14rem; overflow:auto; }
+    .interface-table-scroll th { position:sticky; top:0; z-index:1; }
   .chart-svg { width:100%; height:160px; background:#0f172a; border-radius:.375rem; display:block; }
   .chart-svg.chart-empty { opacity:.5; }
   .chart-legend { font-size:.75rem; font-weight:400; color:#64748b; margin-left:.5rem; }
@@ -5186,7 +5194,10 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .sev-critical { color:#f87171; }
   .sev-info { color:#64748b; }
   .no-data { color:#475569; font-style:italic; padding:.5rem 0; }
-  #dev-title { font-size:1.4rem; }
+  #dev-title { font-size:1.4rem; width:min(16rem,70vw); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #dev-status { min-width:4.5rem; }
+  #device-refresh { box-sizing:border-box; width:26rem; }
+  @media(max-width:600px) { #device-refresh { width:100%; min-height:3em; } }
   #spike-table th { white-space:nowrap; }
   /* 破損パケット内訳（EtherLike-MIB Error Breakdown）: ホバーポップオーバー */
   .err-cell { position:relative; cursor:help; border-bottom:1px dotted #64748b; }
