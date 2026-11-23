@@ -4232,7 +4232,9 @@ fn page_device_detail(
 
     // セクション: インターフェース一覧
     html.push_str("<section class='detail-section'>");
-    html.push_str("<h2 id='interface-status-heading' data-i18n='interface_status'>Interface Status</h2>");
+    html.push_str(
+        "<h2 id='interface-status-heading' data-i18n='interface_status'>Interface Status</h2>",
+    );
     html.push_str("<div class='table-scroll interface-table-scroll' role='region' aria-labelledby='interface-status-heading' tabindex='0'><table id='if-table'><thead><tr>\
         <th>#</th><th data-i18n='interface'>Interface</th><th data-i18n='status'>Link</th>\
         <th data-i18n='diagnostic_status'>Diagnostic Status</th>\
