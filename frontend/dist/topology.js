@@ -361,6 +361,7 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
   var topologyBusy = false;
   var topologyCooldownTimer = null;
   var topologyProgressView = null;
+  var topologyPending = null;
   var topologyState = { data: null };
   var map = null;
   function t(key) {
@@ -481,7 +482,54 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     return box;
   }
   function renderCollectionProgress() {
-    if (!topologyProgressView) return;
+    if (!topologyProgressView) {
+      if (!topologyBusy || !topologyPending) return;
+      const box2 = collectionBox();
+      if (!box2) return;
+      const elapsed = tf("topology_progress_elapsed", { seconds: Math.floor((Date.now() - topologyPending.started) / 1e3) });
+      if (!box2.querySelector(".topo-loading-label")) {
+        box2.replaceChildren();
+        const label2 = document.createElement("div");
+        label2.className = "topo-loading-label";
+        label2.setAttribute("role", "status");
+        label2.setAttribute("aria-live", "polite");
+        const spinner = document.createElement("span");
+        spinner.className = "topo-spinner";
+        spinner.setAttribute("aria-hidden", "true");
+        const text2 = document.createElement("span");
+        text2.className = "topo-loading-text";
+        label2.append(spinner, text2);
+        const track = document.createElement("div");
+        track.className = "topo-indeterminate-track";
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-label", t("topology_progress_label"));
+        const bar2 = document.createElement("div");
+        bar2.className = "topo-indeterminate-bar";
+        track.append(bar2);
+        box2.append(label2, track);
+      }
+      const text = box2.querySelector(".topo-loading-text");
+      if (text) text.textContent = `${t("topology_progress_starting")} \xB7 ${elapsed}`;
+      box2.querySelector(".topo-indeterminate-track")?.setAttribute("aria-label", t("topology_progress_label"));
+      const empty = document.getElementById("topology-empty");
+      if (empty && !topologyState.data?.nodes?.length) {
+        if (!empty.querySelector(".topo-loading-label")) {
+          const label2 = document.createElement("div");
+          label2.className = "topo-loading-label";
+          const spinner = document.createElement("span");
+          spinner.className = "topo-spinner";
+          spinner.setAttribute("aria-hidden", "true");
+          const text2 = document.createElement("span");
+          text2.className = "topo-loading-text";
+          label2.append(spinner, text2);
+          empty.replaceChildren(label2);
+        }
+        const placeholderText = empty.querySelector(".topo-loading-text");
+        if (placeholderText) placeholderText.textContent = `${tf("topology_running", { ip: topologyPending.seedIp })} \xB7 ${elapsed}`;
+        empty.style.display = "flex";
+      }
+      return;
+    }
     const box = collectionBox();
     if (!box) return;
     const { progress, started, changed, retryAt } = topologyProgressView;
@@ -563,15 +611,12 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     section.style.display = "block";
     const button = topologyButton();
     if (button) button.disabled = true;
-    const box = collectionBox();
-    if (box) {
-      box.textContent = t("topology_progress_starting");
-      box.setAttribute("role", "status");
-    }
-    if (!topologyState.data?.nodes?.length) setPlaceholder("topology_running", { ip: seedIp });
     const started = Date.now();
     let changed = started;
     let signature = "";
+    topologyPending = { started, seedIp };
+    const box = collectionBox();
+    renderCollectionProgress();
     const timeout = window.setTimeout(() => controller.abort(), 3e5);
     const ticker = window.setInterval(renderCollectionProgress, 1e3);
     try {
@@ -613,6 +658,7 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
       window.clearInterval(ticker);
       if (generation === topologyGeneration) {
         topologyBusy = false;
+        topologyPending = null;
         topologyController = null;
         if (button) button.disabled = false;
         renderCollectionProgress();

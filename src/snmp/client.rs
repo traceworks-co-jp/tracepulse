@@ -2570,7 +2570,7 @@ pub struct SnmpDiagnostics {
 }
 
 #[cfg(test)]
-mod template_collection_tests {
+pub(crate) mod template_collection_tests {
     use super::*;
     use std::net::UdpSocket;
     use std::sync::atomic::Ordering;
@@ -2598,21 +2598,21 @@ mod template_collection_tests {
         }
     }
 
-    struct TemplateAgent {
-        port: u16,
+    pub(crate) struct TemplateAgent {
+        pub(crate) port: u16,
         session: SyncSession,
         requests: std::sync::Arc<std::sync::Mutex<Vec<Vec<u32>>>>,
-        request_pdus: std::sync::Arc<std::sync::Mutex<Vec<(u8, Vec<u32>, u32)>>>,
+        pub(crate) request_pdus: std::sync::Arc<std::sync::Mutex<Vec<(u8, Vec<u32>, u32)>>>,
         stop: std::sync::Arc<AtomicBool>,
         _server: MockWorker,
     }
 
     impl TemplateAgent {
-        fn new(rows: Vec<(&str, Vec<u8>)>) -> Self {
+        pub(crate) fn new(rows: Vec<(&str, Vec<u8>)>) -> Self {
             Self::with_bulk_error(rows, 0)
         }
 
-        fn with_bulk_error(rows: Vec<(&str, Vec<u8>)>, bulk_error_status: u8) -> Self {
+        pub(crate) fn with_bulk_error(rows: Vec<(&str, Vec<u8>)>, bulk_error_status: u8) -> Self {
             let rows: std::collections::BTreeMap<_, _> = rows
                 .into_iter()
                 .map(|(oid, value)| (parse_oid_string(oid).unwrap(), value))
@@ -2655,8 +2655,7 @@ mod template_collection_tests {
                     let (bindings, _) = take_tlv(rest);
                     let (binding, _) = take_tlv(&bindings[2..]);
                     let (oid, _) = take_tlv(&binding[2..]);
-                    assert_eq!(oid[2], 43);
-                    let mut requested = vec![1, 3];
+                    let mut requested = vec![u32::from(oid[2] / 40), u32::from(oid[2] % 40)];
                     let mut arc = 0u32;
                     for byte in &oid[3..] {
                         arc = (arc << 7) | u32::from(byte & 0x7f);
@@ -3147,7 +3146,7 @@ oid = "1.3.6.1.4.1.65000.4.0"
         tlv(tag, &body)
     }
 
-    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    pub(crate) fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
         let length = body.len();
         let mut header = vec![tag];
         if length < 128 {

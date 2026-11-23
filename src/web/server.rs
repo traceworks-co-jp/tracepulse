@@ -5,12 +5,13 @@ use crate::db::repository::{Repository, counter32_delta};
 use crate::device::types::DeviceConfig;
 use crate::error::AppError;
 use crate::notifications::{NotificationRuntime, NotificationSettingsProvider};
-use crate::snmp::SnmpClient;
 use crate::snmp::topology::{self, NormalizedNeighbor, NormalizedTopologyProtocol};
+use crate::snmp::{ReliableWalkStatus, SnmpClient, WalkOptions};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -3267,50 +3268,42 @@ fn merge_duplicate_edges(edges: Vec<WebTopologyEdge>) -> Vec<WebTopologyEdge> {
 
 fn discover_topology_once(seed_ip: &str, community: &str) -> Result<WebTopologyReport, AppError> {
     let client = SnmpClient::new(community);
+    discover_topology_with_client(seed_ip, community, &client)
+}
+
+fn discover_topology_with_client(
+    seed_ip: &str,
+    community: &str,
+    client: &SnmpClient,
+) -> Result<WebTopologyReport, AppError> {
     let device = DeviceConfig::new(seed_ip.to_string(), community.to_string());
     let mut warnings = Vec::new();
     let mut edges = Vec::new();
 
-    let mut interfaces = match client.walk_oid(&device, &topology::IF_NAME) {
-        Ok(varbinds) => varbinds,
-        Err(err) => {
-            warnings.push(format!("ifName walk failed: {err}"));
-            Vec::new()
+    let options = WalkOptions::default();
+    let cancellation = AtomicBool::new(false);
+    let mut walk = |oid: &[u32], name: &str| {
+        let outcome = client.walk_oid_reliable(&device, oid, &options, &cancellation);
+        if outcome.status != ReliableWalkStatus::Complete {
+            warnings.push(format!(
+                "{name} walk failed: {:?} ({:?})",
+                outcome.status, outcome.reason
+            ));
         }
+        outcome.varbinds
     };
+    let mut interfaces = walk(&topology::IF_NAME, "ifName");
     let local_if_names = parse_if_names(&interfaces);
     for (oid, name) in [
         (topology::IF_DESCR.as_slice(), "ifDescr"),
         (topology::IF_ALIAS.as_slice(), "ifAlias"),
         (topology::IF_PHYS_ADDRESS.as_slice(), "ifPhysAddress"),
     ] {
-        match client.walk_oid(&device, oid) {
-            Ok(varbinds) => interfaces.extend(varbinds),
-            Err(err) => warnings.push(format!("{name} walk failed: {err}")),
-        }
+        interfaces.extend(walk(oid, name));
     }
-    let local_ports = match client.walk_oid(&device, &topology::LLDP_LOC_PORT_TABLE) {
-        Ok(varbinds) => varbinds,
-        Err(err) => {
-            warnings.push(format!("LLDP local port walk failed: {err}"));
-            Vec::new()
-        }
-    };
-
-    let remote_rows = match client.walk_oid(&device, &topology::LLDP_REM_TABLE) {
-        Ok(varbinds) => varbinds,
-        Err(err) => {
-            warnings.push(format!("LLDP walk failed: {err}"));
-            Vec::new()
-        }
-    };
-    let management_addresses = match client.walk_oid(&device, &topology::LLDP_REM_MAN_ADDR) {
-        Ok(varbinds) => varbinds,
-        Err(err) => {
-            warnings.push(format!("LLDP management address walk failed: {err}"));
-            Vec::new()
-        }
-    };
+    let local_ports = walk(&topology::LLDP_LOC_PORT_TABLE, "LLDP local port");
+    let remote_rows = walk(&topology::LLDP_REM_TABLE, "LLDP");
+    let management_addresses = walk(&topology::LLDP_REM_MAN_ADDR, "LLDP management address");
     edges.extend(parse_lldp_edges(
         seed_ip,
         &remote_rows,
@@ -3318,10 +3311,8 @@ fn discover_topology_once(seed_ip: &str, community: &str) -> Result<WebTopologyR
         &local_ports,
         &interfaces,
     ));
-    match client.walk_oid(&device, &topology::CDP_CACHE_TABLE) {
-        Ok(varbinds) => edges.extend(parse_cdp_edges(seed_ip, &varbinds, &interfaces)),
-        Err(err) => warnings.push(format!("CDP walk failed: {err}")),
-    }
+    let cdp_rows = walk(&topology::CDP_CACHE_TABLE, "CDP");
+    edges.extend(parse_cdp_edges(seed_ip, &cdp_rows, &interfaces));
 
     for (position, edge) in edges.iter_mut().enumerate() {
         edge.id = format!("e{}", position);
@@ -5500,6 +5491,17 @@ const DISCOVERY_CSS: &str = "<style>
   html[data-theme='light'] .topo-edge-label { fill:#475569; }
   .topology-hidden-indicator { position:absolute; right:.75rem; bottom:.75rem; background:rgba(251,191,36,.14); border:1px solid #b45309; color:#fbbf24; font-size:.78rem; padding:.35rem .7rem; border-radius:.375rem; }
   .topology-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:.9rem; text-align:center; padding:1rem; }
+  .topo-loading-label { display:flex; align-items:center; gap:.6rem; }
+  .topology-empty .topo-loading-label { justify-content:center; flex-wrap:wrap; }
+  .topo-spinner { display:inline-block; flex:none; width:1rem; height:1rem; border:2px solid #475569; border-top-color:#2dd4bf; border-radius:50%; animation:topo-spin .8s linear infinite; }
+  .topo-indeterminate-track { height:8px; overflow:hidden; border-radius:9999px; background:#0f172a; margin:8px 0; }
+  .topo-indeterminate-bar { width:35%; height:100%; border-radius:inherit; background:#2dd4bf; animation:topo-indeterminate 1.5s ease-in-out infinite; }
+  html[data-theme='light'] .topo-spinner { border-color:#cbd5e1; border-top-color:#0f766e; }
+  html[data-theme='light'] .topo-indeterminate-track { background:#e2e8f0; }
+  html[data-theme='light'] .topo-indeterminate-bar { background:#0f766e; }
+  @keyframes topo-spin { to { transform:rotate(360deg); } }
+  @keyframes topo-indeterminate { from { transform:translateX(-100%); } to { transform:translateX(286%); } }
+  @media (prefers-reduced-motion:reduce) { .topo-spinner, .topo-indeterminate-bar { animation:none; } .topo-indeterminate-bar { width:100%; } }
   .topology-inspector { position:absolute; top:0; right:0; width:min(320px,80%); height:100%; background:#111c30; border-left:1px solid #334155; transform:translateX(100%); transition:transform .25s ease; overflow-y:auto; }
   html[data-theme='light'] .topology-inspector { background:#ffffff; border-left-color:#cbd5e1; }
   .topology-inspector.open { transform:translateX(0); }
@@ -7825,6 +7827,119 @@ mod tests {
         crate::snmp::SnmpVarBind {
             oid: [column, index].concat(),
             value,
+        }
+    }
+
+    #[test]
+    fn topology_discovery_collects_lldp_and_cdp_with_getbulk() {
+        use super::topology::*;
+        use crate::snmp::client::template_collection_tests::{TemplateAgent, tlv};
+
+        let mut rows: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut add = |column: &[u32], index: &[u32], value: Vec<u8>| {
+            let oid = [column, index]
+                .concat()
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(".");
+            rows.push((oid, value));
+        };
+        add(&IF_NAME, &[101], tlv(4, b"Gi1/0/1"));
+        add(&IF_ALIAS, &[101], tlv(4, b"uplink"));
+        add(&LLDP_LOC_PORT_SUBTYPE, &[7], tlv(2, &[1]));
+        add(&LLDP_LOC_PORT_ID, &[7], tlv(4, b"uplink"));
+        for index in 1..=19 {
+            let key = [0, 7, index];
+            add(
+                &LLDP_REM_SYS_NAME,
+                &key,
+                tlv(4, format!("lldp-{index}").as_bytes()),
+            );
+            add(&LLDP_REM_PORT_ID, &key, tlv(4, b"remote"));
+            add(
+                &LLDP_REM_MAN_ADDR,
+                &[0, 7, index, 1, 4, 192, 0, 2, index],
+                tlv(2, &[1]),
+            );
+        }
+        add(&CDP_CACHE_DEVICE_ID, &[101, 1], tlv(4, b"cdp-peer"));
+        add(&CDP_CACHE_DEVICE_PORT, &[101, 1], tlv(4, b"cdp-port"));
+        add(&CDP_CACHE_ADDRESS, &[101, 1], tlv(4, &[192, 0, 2, 20]));
+        let agent = TemplateAgent::new(
+            rows.iter()
+                .map(|(oid, value)| (oid.as_str(), value.clone()))
+                .collect(),
+        );
+        let client = crate::snmp::SnmpClient::new("public").with_destination_port(agent.port);
+        let report = super::discover_topology_with_client("127.0.0.1", "public", &client).unwrap();
+
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.nodes.len(), 21);
+        assert_eq!(report.edges.len(), 20);
+        for index in 1..=19 {
+            let edge = report
+                .edges
+                .iter()
+                .find(|edge| edge.remote_ip.as_deref() == Some(&format!("192.0.2.{index}")))
+                .unwrap();
+            assert_eq!(edge.protocol, "LLDP");
+            assert_eq!(edge.local_if_index, Some(101));
+            assert_eq!(edge.local_port.as_deref(), Some("Gi1/0/1"));
+            assert_eq!(
+                edge.remote_hostname.as_deref(),
+                Some(format!("lldp-{index}").as_str())
+            );
+        }
+        let cdp = report
+            .edges
+            .iter()
+            .find(|edge| edge.protocol == "CDP")
+            .unwrap();
+        assert_eq!(cdp.remote_ip.as_deref(), Some("192.0.2.20"));
+        assert_eq!(cdp.remote_hostname.as_deref(), Some("cdp-peer"));
+        assert_eq!(cdp.local_port.as_deref(), Some("Gi1/0/1"));
+        let requests = agent.request_pdus.lock().unwrap();
+        assert!(requests.iter().all(|(pdu, _, _)| *pdu == 0xa5));
+        for oid in [
+            IF_NAME.as_slice(),
+            IF_DESCR.as_slice(),
+            IF_ALIAS.as_slice(),
+            IF_PHYS_ADDRESS.as_slice(),
+            LLDP_LOC_PORT_TABLE.as_slice(),
+            LLDP_REM_TABLE.as_slice(),
+            LLDP_REM_MAN_ADDR.as_slice(),
+            CDP_CACHE_TABLE.as_slice(),
+        ] {
+            assert!(
+                requests.iter().any(|(_, requested, _)| requested == oid),
+                "missing walk {oid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn topology_discovery_warns_on_failed_and_unsupported_walks() {
+        use crate::snmp::client::template_collection_tests::{TemplateAgent, tlv};
+
+        for (agent, status) in [
+            (TemplateAgent::with_bulk_error(vec![], 5), "Failed"),
+            (
+                TemplateAgent::new(vec![("2.0.1", tlv(0x80, &[]))]),
+                "Unsupported",
+            ),
+        ] {
+            let client = crate::snmp::SnmpClient::new("public").with_destination_port(agent.port);
+            let report =
+                super::discover_topology_with_client("127.0.0.1", "public", &client).unwrap();
+            assert_eq!(report.warnings.len(), 8);
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .all(|warning| warning.contains(status))
+            );
+            assert!(report.edges.is_empty());
         }
     }
 

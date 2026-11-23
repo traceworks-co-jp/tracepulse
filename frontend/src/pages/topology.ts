@@ -73,6 +73,7 @@ let topologyController: AbortController | null = null;
 let topologyBusy = false;
 let topologyCooldownTimer: number | null = null;
 let topologyProgressView: { progress: TopologyProgress; started: number; changed: number; retryAt: number } | null = null;
+let topologyPending: { started: number; seedIp: string } | null = null;
 const topologyState: { data: TopologyData | null } = { data: null };
 let map: TopologyMap<TopologyNode, TopologyEdge> | null = null;
 
@@ -147,7 +148,39 @@ function collectionBox(): HTMLElement | null {
     return box;
 }
 function renderCollectionProgress(): void {
-    if (!topologyProgressView) return;
+    if (!topologyProgressView) {
+        if (!topologyBusy || !topologyPending) return;
+        const box = collectionBox(); if (!box) return;
+        const elapsed = tf("topology_progress_elapsed", { seconds: Math.floor((Date.now() - topologyPending.started) / 1000) });
+        if (!box.querySelector(".topo-loading-label")) {
+            box.replaceChildren();
+            const label = document.createElement("div"); label.className = "topo-loading-label";
+            label.setAttribute("role", "status"); label.setAttribute("aria-live", "polite");
+            const spinner = document.createElement("span"); spinner.className = "topo-spinner"; spinner.setAttribute("aria-hidden", "true");
+            const text = document.createElement("span"); text.className = "topo-loading-text";
+            label.append(spinner, text);
+            const track = document.createElement("div"); track.className = "topo-indeterminate-track";
+            track.setAttribute("role", "progressbar"); track.setAttribute("aria-label", t("topology_progress_label"));
+            const bar = document.createElement("div"); bar.className = "topo-indeterminate-bar"; track.append(bar);
+            box.append(label, track);
+        }
+        const text = box.querySelector(".topo-loading-text");
+        if (text) text.textContent = `${t("topology_progress_starting")} · ${elapsed}`;
+        box.querySelector(".topo-indeterminate-track")?.setAttribute("aria-label", t("topology_progress_label"));
+        const empty = document.getElementById("topology-empty");
+        if (empty && !topologyState.data?.nodes?.length) {
+            if (!empty.querySelector(".topo-loading-label")) {
+                const label = document.createElement("div"); label.className = "topo-loading-label";
+                const spinner = document.createElement("span"); spinner.className = "topo-spinner"; spinner.setAttribute("aria-hidden", "true");
+                const text = document.createElement("span"); text.className = "topo-loading-text";
+                label.append(spinner, text); empty.replaceChildren(label);
+            }
+            const placeholderText = empty.querySelector(".topo-loading-text");
+            if (placeholderText) placeholderText.textContent = `${tf("topology_running", { ip: topologyPending.seedIp })} · ${elapsed}`;
+            empty.style.display = "flex";
+        }
+        return;
+    }
     const box = collectionBox(); if (!box) return;
     const { progress, started, changed, retryAt } = topologyProgressView;
     const expanded = box.querySelector("details")?.open ?? false;
@@ -200,9 +233,10 @@ export async function startTopologyDiscovery(seedIp: string, community: string):
     if (topologyCooldownTimer !== null) window.clearInterval(topologyCooldownTimer);
     topologyProgressView = null; topologyBusy = true; section.style.display = "block";
     const button = topologyButton(); if (button) button.disabled = true;
-    const box = collectionBox(); if (box) { box.textContent = t("topology_progress_starting"); box.setAttribute("role", "status"); }
-    if (!topologyState.data?.nodes?.length) setPlaceholder("topology_running", { ip: seedIp });
     const started = Date.now(); let changed = started; let signature = "";
+    topologyPending = { started, seedIp };
+    const box = collectionBox();
+    renderCollectionProgress();
     const timeout = window.setTimeout(() => controller.abort(), 300000);
     const ticker = window.setInterval(renderCollectionProgress, 1000);
     try {
@@ -238,7 +272,7 @@ export async function startTopologyDiscovery(seedIp: string, community: string):
         window.clearTimeout(timeout);
         window.clearInterval(ticker);
         if (generation === topologyGeneration) {
-            topologyBusy = false; topologyController = null;
+            topologyBusy = false; topologyPending = null; topologyController = null;
             if (button) button.disabled = false;
             renderCollectionProgress();
             if (topologyProgressView) topologyCooldownTimer = window.setInterval(() => {

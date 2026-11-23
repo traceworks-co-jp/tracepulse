@@ -1388,6 +1388,53 @@ test("discovery loads TypeScript discovery and topology bundles", async ({ page 
     expect(consoleErrors).toEqual([]);
 });
 
+test("community topology shows animated elapsed progress until the request finishes", async ({ page }) => {
+    await page.addInitScript(() => { localStorage.setItem("tracepulse-onboarding-v1", "done"); localStorage.setItem("tracepulse-lang", "en"); });
+    let reply: ((success: boolean) => void) | undefined;
+    let requests = 0;
+    await page.route("**/api/discovery/topology", async route => {
+        requests++;
+        const success = await new Promise<boolean>(resolve => { reply = resolve; });
+        if (success) await route.fulfill({ json: { seed_ip: "192.0.2.1", nodes: [{ id: "seed", ip: "192.0.2.1" }], edges: [] } });
+        else await route.fulfill({ status: 500, json: { error: "failed" } });
+    });
+    await page.goto("/discovery");
+    await page.clock.install();
+    await page.locator("#seed-ip").fill("192.0.2.1");
+    await page.locator("#topology-btn").click();
+    await expect.poll(() => requests).toBe(1);
+    const progress = page.locator("#topology-progress");
+    const empty = page.locator("#topology-empty");
+    await expect(progress).toContainText("Elapsed: 0s");
+    await expect(empty).toContainText("Elapsed: 0s");
+    await expect(progress.locator(".topo-spinner")).toHaveCSS("animation-name", "topo-spin");
+    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("animation-name", "topo-indeterminate");
+    await expect(empty.locator(".topo-spinner")).toBeVisible();
+    await page.clock.fastForward(2100);
+    await expect(progress).toContainText("Elapsed: 2s");
+    await expect(empty).toContainText("Elapsed: 2s");
+    await page.locator("#lang-select").selectOption("ja");
+    await expect(progress).toContainText("経過 2秒");
+    await expect(empty).toContainText("経過 2秒");
+    await page.locator("#theme-select").selectOption("light");
+    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("background-color", "rgb(15, 118, 110)");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(progress.locator(".topo-spinner")).toHaveCSS("animation-name", "none");
+    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("animation-name", "none");
+    reply!(true);
+    await expect(progress.locator(".topo-spinner")).toHaveCount(0);
+    await expect(empty).toBeHidden();
+    await expect(page.locator("#topology-btn")).toBeEnabled();
+
+    await page.locator("#topology-btn").click();
+    await expect.poll(() => requests).toBe(2);
+    await expect(progress.locator(".topo-spinner")).toBeVisible();
+    await expect(empty).toBeHidden();
+    reply!(false);
+    await expect(progress.locator(".topo-spinner")).toHaveCount(0);
+    await expect(page.locator("#topology-btn")).toBeEnabled();
+});
+
 test("topology inspector colors device and interface states across themes and viewports", async ({ page }) => {
     await page.route("**/api/discovery/topology", route => route.fulfill({
         json: {
