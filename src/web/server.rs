@@ -5111,7 +5111,19 @@ const DIAGNOSTICS_CSS: &str = "<style>
 const DEVICE_DETAIL_CSS: &str = "<style>
   /* このページはテーブル・グラフの情報量が多いため、共通レイアウトより幅広く画面幅に追従させる */
   body[data-title-key='device_title_prefix'] main { max-width: min(1800px, 96vw); width: 100%; }
-  #device-identity { height:6rem; overflow-y:auto; }
+  #device-identity { min-height:7rem; }
+  #device-identity-meta { display:flex; flex-wrap:wrap; gap:.5rem; }
+  .device-meta-item { box-sizing:border-box; display:flex; flex:1 1 9rem; min-width:0; flex-direction:column; gap:.15rem; padding:.35rem .65rem; border:1px solid var(--tp-border); border-radius:.5rem; background:var(--tp-raised); }
+  .device-meta-label { color:var(--tp-muted); font-size:.78rem; }
+  .device-meta-value { color:var(--tp-text); font-weight:600; overflow-wrap:anywhere; }
+  .device-meta-value.is-unset { color:var(--tp-muted); }
+  .device-meta-ip { flex:0 1 auto; max-width:100%; }
+  .device-meta-ip-scroll { max-width:100%; overflow-x:auto; }
+  .device-meta-ip-value { display:inline-block; flex-shrink:0; white-space:nowrap; font-family:monospace; font-weight:600; color:var(--tp-text); }
+  .device-identity-actions { display:flex; flex-wrap:wrap; align-items:center; gap:.5rem; margin-top:.4rem; }
+  .device-identity-actions .device-tags { margin-top:0; }
+  .device-identity-actions .device-tags:empty { display:none; }
+  @media(max-width:600px) { #device-identity { min-height:11rem; } }
   .loading-skeleton { display:block; height:.85rem; border-radius:.3rem; background:var(--tp-border,#334155); animation:skeleton-pulse 1.6s ease-in-out infinite; }
   .table-skeleton { width:80%; }
   .chart-wrap.is-loading { position:relative; }
@@ -5150,8 +5162,9 @@ const DEVICE_DETAIL_CSS: &str = "<style>
     html[data-theme='light'] #monitoring-history-error { color:#b91c1c; }
     @media(max-width:600px) { .chart-history-controls, .chart-history-custom { align-items:stretch; flex-direction:column; } .chart-history-controls label { width:100%; } }
   .table-scroll { width:100%; overflow-x:auto; }
-    .interface-table-scroll { height:14rem; overflow:auto; }
-    .interface-table-scroll th { position:sticky; top:0; z-index:1; }
+    .interface-table-scroll { max-height:clamp(380px,52vh,620px); overflow-y:auto; overflow-x:auto; }
+    body main #if-table thead th { position:sticky; top:0; z-index:2; background:#0f172a; }
+    html[data-theme='light'] body main #if-table thead th { background:#f1f5f9; }
   .chart-svg { width:100%; height:160px; background:#0f172a; border-radius:.375rem; display:block; }
   .chart-svg.chart-empty { opacity:.5; }
   .chart-legend { font-size:.75rem; font-weight:400; color:#64748b; margin-left:.5rem; }
@@ -5164,10 +5177,11 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .iface-filter-actions { display:flex; gap:.5rem; align-items:center; margin:0 0 1rem; flex-wrap:wrap; }
   .iface-filter-note { font-size:.78rem; color:#64748b; }
   #if-table th, #alert-table th { cursor:default; white-space:nowrap; }
-  #if-table { min-width: 980px; table-layout: auto; }
-  #if-table th, #if-table td { white-space: normal; word-break: break-word; }
-  #if-table th { line-height: 1.15; font-size: .78rem; }
-  #if-table td { vertical-align: top; }
+  #if-table { min-width:980px; table-layout:auto; overflow:visible; }
+  #if-table th { min-width:6rem; white-space:nowrap; word-break:normal; line-height:1.15; font-size:.78rem; }
+  #if-table th:first-child { min-width:2rem; }
+  #if-table th:nth-child(2) { min-width:9rem; }
+  #if-table td { vertical-align:top; white-space:normal; word-break:break-word; padding:.3rem .75rem; }
   .counter-cell { font-variant-numeric: tabular-nums; }
   .counter-total { color:#f1f5f9; }
   .counter-delta { margin-left:.35rem; font-size:.82rem; font-weight:700; }
@@ -5194,7 +5208,7 @@ const DEVICE_DETAIL_CSS: &str = "<style>
   .sev-critical { color:#f87171; }
   .sev-info { color:#64748b; }
   .no-data { color:#475569; font-style:italic; padding:.5rem 0; }
-  #dev-title { font-size:1.4rem; width:min(16rem,70vw); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #dev-title { font-size:1.4rem; width:min(24rem,70vw); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #dev-status { min-width:4.5rem; }
   #device-refresh { box-sizing:border-box; width:26rem; }
   @media(max-width:600px) { #device-refresh { width:100%; min-height:3em; } }
@@ -5504,15 +5518,6 @@ const DISCOVERY_CSS: &str = "<style>
   .topology-empty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#64748b; font-size:.9rem; text-align:center; padding:1rem; }
   .topo-loading-label { display:flex; align-items:center; gap:.6rem; }
   .topology-empty .topo-loading-label { justify-content:center; flex-wrap:wrap; }
-  .topo-spinner { display:inline-block; flex:none; width:1rem; height:1rem; border:2px solid #475569; border-top-color:#2dd4bf; border-radius:50%; animation:topo-spin .8s linear infinite; }
-  .topo-indeterminate-track { height:8px; overflow:hidden; border-radius:9999px; background:#0f172a; margin:8px 0; }
-  .topo-indeterminate-bar { width:35%; height:100%; border-radius:inherit; background:#2dd4bf; animation:topo-indeterminate 1.5s ease-in-out infinite; }
-  html[data-theme='light'] .topo-spinner { border-color:#cbd5e1; border-top-color:#0f766e; }
-  html[data-theme='light'] .topo-indeterminate-track { background:#e2e8f0; }
-  html[data-theme='light'] .topo-indeterminate-bar { background:#0f766e; }
-  @keyframes topo-spin { to { transform:rotate(360deg); } }
-  @keyframes topo-indeterminate { from { transform:translateX(-100%); } to { transform:translateX(286%); } }
-  @media (prefers-reduced-motion:reduce) { .topo-spinner, .topo-indeterminate-bar { animation:none; } .topo-indeterminate-bar { width:100%; } }
   .topology-inspector { position:absolute; top:0; right:0; width:min(320px,80%); height:100%; background:#111c30; border-left:1px solid #334155; transform:translateX(100%); transition:transform .25s ease; overflow-y:auto; }
   html[data-theme='light'] .topology-inspector { background:#ffffff; border-left-color:#cbd5e1; }
   .topology-inspector.open { transform:translateX(0); }

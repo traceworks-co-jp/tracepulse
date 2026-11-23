@@ -360,10 +360,25 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
   var topologyController = null;
   var topologyBusy = false;
   var topologyCooldownTimer = null;
+  var stopTopologyMotion = () => {
+  };
   var topologyProgressView = null;
   var topologyPending = null;
   var topologyState = { data: null };
   var map = null;
+  if (!document.getElementById("topology-progress-styles")) {
+    const style = document.createElement("style");
+    style.id = "topology-progress-styles";
+    style.textContent = `
+        .topo-spinner { display:inline-block; flex:none; width:14px; height:14px; animation:topo-spin .75s linear infinite; }
+        .topo-indeterminate-track { height:6px; overflow:hidden; border-radius:999px; background:rgba(148,163,184,.2); margin:8px 0; }
+        .topo-indeterminate-bar { width:35%; height:100%; border-radius:inherit; background:#2dd4bf; animation:topo-bar-slide 1.5s ease-in-out infinite alternate; }
+        html[data-theme='light'] .topo-indeterminate-bar { background:#0f766e; }
+        @keyframes topo-spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+        @keyframes topo-bar-slide { from { transform:translateX(0); } to { transform:translateX(185.714%); } }
+    `;
+    document.head.append(style);
+  }
   function t(key) {
     return typeof window.t === "function" ? window.t(key) : key;
   }
@@ -376,6 +391,12 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
   function setPlaceholder(key, params = {}, text = null) {
     const box = document.getElementById("topology-empty");
     if (!box) return;
+    const loadingText = box.querySelector(".topo-loading-text");
+    if (key === "topology_progress_queued" && topologyBusy && loadingText) {
+      loadingText.textContent = tf(key, params);
+      box.style.display = "flex";
+      return;
+    }
     box.textContent = text || (key ? tf(key, params) : "");
     box.style.display = key || text ? "flex" : "none";
   }
@@ -481,24 +502,111 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     }
     return box;
   }
+  function createTopologySpinner() {
+    const namespace = "http://www.w3.org/2000/svg";
+    const spinner = document.createElementNS(namespace, "svg");
+    spinner.setAttribute("class", "topo-spinner");
+    spinner.setAttribute("viewBox", "0 0 24 24");
+    spinner.setAttribute("aria-hidden", "true");
+    const ring = document.createElementNS(namespace, "circle");
+    ring.setAttribute("cx", "12");
+    ring.setAttribute("cy", "12");
+    ring.setAttribute("r", "10");
+    ring.setAttribute("fill", "none");
+    ring.setAttribute("stroke", "rgba(148,163,184,.25)");
+    ring.setAttribute("stroke-width", "4");
+    const arc = document.createElementNS(namespace, "path");
+    arc.setAttribute("d", "M12 2 A10 10 0 0 1 22 12");
+    arc.setAttribute("fill", "none");
+    arc.setAttribute("stroke", "#2dd4bf");
+    arc.setAttribute("stroke-width", "4");
+    arc.setAttribute("stroke-linecap", "round");
+    spinner.append(ring, arc);
+    return spinner;
+  }
+  function createElapsed() {
+    const elapsed = document.createElement("span");
+    elapsed.dataset.topoElapsed = "";
+    return elapsed;
+  }
+  function updateProgressTick() {
+    const started = topologyProgressView?.started ?? topologyPending?.started;
+    if (started === void 0) return;
+    const elapsed = tf("topology_progress_elapsed", { seconds: Math.floor((Date.now() - started) / 1e3) });
+    document.querySelectorAll("#topology-progress [data-topo-elapsed], #topology-empty [data-topo-elapsed]").forEach((element) => {
+      element.textContent = elapsed;
+    });
+    if (!topologyProgressView) return;
+    const { changed, retryAt } = topologyProgressView;
+    const warning = document.querySelector("#topology-progress [data-topo-warning]");
+    if (warning) warning.hidden = !topologyBusy || Date.now() - changed < 3e4;
+    const remaining = Math.max(0, Math.ceil((retryAt - Date.now()) / 1e3));
+    const cooldown = document.querySelector("#topology-progress [data-topo-cooldown]");
+    if (cooldown) {
+      cooldown.hidden = remaining === 0;
+      if (remaining > 0) cooldown.textContent = tf("topology_progress_cooldown", { seconds: remaining });
+    }
+    const button = topologyButton();
+    if (button) button.disabled = topologyBusy || remaining > 0;
+  }
+  function startTopologyMotionFallback() {
+    let lastSpinner = null;
+    let lastBar = null;
+    let nextSample = 0;
+    let unchangedSpinner = 0;
+    let unchangedBar = 0;
+    let spinnerFallback = false;
+    let barFallback = false;
+    const timer = window.setInterval(() => {
+      const spinner = document.querySelector("#topology-progress .topo-spinner");
+      const bar = document.querySelector("#topology-progress .topo-indeterminate-bar");
+      if (!spinner || !bar || document.hidden) {
+        lastSpinner = null;
+        lastBar = null;
+        unchangedSpinner = 0;
+        unchangedBar = 0;
+        return;
+      }
+      const now = performance.now();
+      if ((!spinnerFallback || !barFallback) && now >= nextSample) {
+        const spinnerTransform = getComputedStyle(spinner).transform;
+        const barTransform = getComputedStyle(bar).transform;
+        unchangedSpinner = lastSpinner === spinnerTransform ? unchangedSpinner + 1 : 0;
+        unchangedBar = lastBar === barTransform ? unchangedBar + 1 : 0;
+        lastSpinner = spinnerTransform;
+        lastBar = barTransform;
+        nextSample = now + 200;
+        spinnerFallback || (spinnerFallback = unchangedSpinner >= 2);
+        barFallback || (barFallback = unchangedBar >= 2);
+      }
+      if (spinnerFallback) {
+        const angle = now % 750 / 750 * 360;
+        document.querySelectorAll("#topology-progress .topo-spinner, #topology-empty .topo-spinner").forEach((element) => element.style.setProperty("transform", `rotate(${angle}deg)`, "important"));
+      }
+      if (barFallback) {
+        const position = (1 - Math.cos(now * Math.PI / 1500)) / 2 * 185.714;
+        bar.style.setProperty("transform", `translateX(${position}%)`, "important");
+      }
+    }, 50);
+    return () => {
+      window.clearInterval(timer);
+      if (spinnerFallback || barFallback) document.querySelectorAll("#topology-progress .topo-spinner, #topology-empty .topo-spinner, #topology-progress .topo-indeterminate-bar").forEach((element) => element.style.removeProperty("transform"));
+    };
+  }
   function renderCollectionProgress() {
     if (!topologyProgressView) {
       if (!topologyBusy || !topologyPending) return;
       const box2 = collectionBox();
       if (!box2) return;
-      const elapsed = tf("topology_progress_elapsed", { seconds: Math.floor((Date.now() - topologyPending.started) / 1e3) });
       if (!box2.querySelector(".topo-loading-label")) {
         box2.replaceChildren();
-        const label2 = document.createElement("div");
-        label2.className = "topo-loading-label";
-        label2.setAttribute("role", "status");
-        label2.setAttribute("aria-live", "polite");
-        const spinner = document.createElement("span");
-        spinner.className = "topo-spinner";
-        spinner.setAttribute("aria-hidden", "true");
+        const label = document.createElement("div");
+        label.className = "topo-loading-label";
+        label.setAttribute("role", "status");
+        label.setAttribute("aria-live", "polite");
         const text2 = document.createElement("span");
         text2.className = "topo-loading-text";
-        label2.append(spinner, text2);
+        label.append(createTopologySpinner(), text2, document.createTextNode(" \xB7 "), createElapsed());
         const track = document.createElement("div");
         track.className = "topo-indeterminate-track";
         track.setAttribute("role", "progressbar");
@@ -506,68 +614,77 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
         const bar2 = document.createElement("div");
         bar2.className = "topo-indeterminate-bar";
         track.append(bar2);
-        box2.append(label2, track);
+        box2.append(label, track);
       }
       const text = box2.querySelector(".topo-loading-text");
-      if (text) text.textContent = `${t("topology_progress_starting")} \xB7 ${elapsed}`;
+      if (text) text.textContent = t("topology_progress_starting");
       box2.querySelector(".topo-indeterminate-track")?.setAttribute("aria-label", t("topology_progress_label"));
       const empty = document.getElementById("topology-empty");
       if (empty && !topologyState.data?.nodes?.length) {
         if (!empty.querySelector(".topo-loading-label")) {
-          const label2 = document.createElement("div");
-          label2.className = "topo-loading-label";
-          const spinner = document.createElement("span");
-          spinner.className = "topo-spinner";
-          spinner.setAttribute("aria-hidden", "true");
+          const label = document.createElement("div");
+          label.className = "topo-loading-label";
           const text2 = document.createElement("span");
           text2.className = "topo-loading-text";
-          label2.append(spinner, text2);
-          empty.replaceChildren(label2);
+          label.append(createTopologySpinner(), text2, document.createTextNode(" \xB7 "), createElapsed());
+          empty.replaceChildren(label);
         }
-        const placeholderText = empty.querySelector(".topo-loading-text");
-        if (placeholderText) placeholderText.textContent = `${tf("topology_running", { ip: topologyPending.seedIp })} \xB7 ${elapsed}`;
+        const placeholderText2 = empty.querySelector(".topo-loading-text");
+        if (placeholderText2) placeholderText2.textContent = tf("topology_running", { ip: topologyPending.seedIp });
         empty.style.display = "flex";
       }
+      updateProgressTick();
       return;
     }
     const box = collectionBox();
     if (!box) return;
-    const { progress, started, changed, retryAt } = topologyProgressView;
-    const expanded = box.querySelector("details")?.open ?? false;
-    box.replaceChildren();
-    const label = document.createElement("p");
-    label.setAttribute("role", "status");
-    label.setAttribute("aria-live", "polite");
-    label.textContent = `${t(`topology_progress_${progress.state}`)} \xB7 ${tf("topology_progress_counts", { completed: progress.completed, total: progress.total, running: progress.running, queued: progress.queued })} \xB7 ${tf("topology_progress_elapsed", { seconds: Math.floor((Date.now() - started) / 1e3) })}`;
-    const bar = document.createElement("progress");
+    const { progress } = topologyProgressView;
+    const loadingText = box.querySelector(".topo-loading-text");
+    if (loadingText) loadingText.textContent = t("topology_progress_starting");
+    box.querySelector(".topo-indeterminate-track")?.setAttribute("aria-label", t("topology_progress_label"));
+    const placeholderText = document.querySelector("#topology-empty .topo-loading-text");
+    if (placeholderText && topologyPending) placeholderText.textContent = tf("topology_progress_queued", { ip: topologyPending.seedIp });
+    let detailsBox = box.querySelector(".topo-collection-details");
+    if (!detailsBox) {
+      detailsBox = document.createElement("div");
+      detailsBox.className = "topo-collection-details";
+      const label = document.createElement("p");
+      label.className = "topo-collection-label";
+      label.setAttribute("role", "status");
+      label.setAttribute("aria-live", "polite");
+      label.append(document.createElement("span"), document.createTextNode(" \xB7 "), createElapsed());
+      const bar2 = document.createElement("progress");
+      bar2.style.cssText = "display:block;width:100%;height:12px;accent-color:#2dd4bf;margin:8px 0";
+      const warning2 = document.createElement("p");
+      warning2.setAttribute("role", "status");
+      warning2.dataset.topoWarning = "";
+      const updated2 = document.createElement("p");
+      updated2.dataset.topoUpdated = "";
+      const cooldown = document.createElement("p");
+      cooldown.dataset.topoCooldown = "";
+      const details2 = document.createElement("details");
+      details2.append(document.createElement("summary"), document.createElement("ul"));
+      detailsBox.append(label, bar2, warning2, updated2, cooldown, details2);
+      box.append(detailsBox);
+    }
+    const labelText = detailsBox.querySelector(".topo-collection-label span");
+    labelText.textContent = `${t(`topology_progress_${progress.state}`)} \xB7 ${tf("topology_progress_counts", { completed: progress.completed, total: progress.total, running: progress.running, queued: progress.queued })}`;
+    const bar = detailsBox.querySelector("progress");
     bar.max = Math.max(1, progress.total);
     bar.value = progress.completed;
     bar.setAttribute("aria-label", t("topology_progress_label"));
-    bar.style.cssText = "display:block;width:100%;height:12px;accent-color:#2dd4bf;margin:8px 0";
-    box.append(label, bar);
-    if (topologyBusy && Date.now() - changed >= 3e4) {
-      const warning = document.createElement("p");
-      warning.setAttribute("role", "status");
-      warning.textContent = t("topology_progress_waiting");
-      box.append(warning);
-    }
+    const warning = detailsBox.querySelector("[data-topo-warning]");
+    warning.textContent = t("topology_progress_waiting");
+    const updated = detailsBox.querySelector("[data-topo-updated]");
+    updated.hidden = !progress.last_activity_at;
     if (progress.last_activity_at) {
-      const updated = document.createElement("p");
       updated.textContent = `${t("topology_progress_updated")}: ${new Date(progress.last_activity_at).toLocaleString()}`;
-      box.append(updated);
     }
-    const remaining = Math.max(0, Math.ceil((retryAt - Date.now()) / 1e3));
-    if (remaining > 0) {
-      const cooldown = document.createElement("p");
-      cooldown.textContent = tf("topology_progress_cooldown", { seconds: remaining });
-      box.append(cooldown);
-    }
-    const details = document.createElement("details");
-    details.open = expanded;
-    const summary = document.createElement("summary");
+    const details = detailsBox.querySelector("details");
+    const summary = details.querySelector("summary");
     summary.textContent = t("topology_progress_devices");
-    details.append(summary);
-    const list = document.createElement("ul");
+    const list = details.querySelector("ul");
+    list.replaceChildren();
     list.style.cssText = "padding-left:20px;max-height:180px;overflow:auto";
     for (const device of progress.devices) {
       const item = document.createElement("li");
@@ -584,10 +701,7 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
       }
       list.append(item);
     }
-    details.append(list);
-    box.append(details);
-    const button = topologyButton();
-    if (button) button.disabled = topologyBusy || remaining > 0;
+    updateProgressTick();
   }
   function displayTopology(data) {
     if (!data.nodes?.length && topologyState.data?.nodes?.length) return;
@@ -603,6 +717,7 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     if (!section || !result) return;
     const generation = ++topologyGeneration;
     topologyController?.abort();
+    stopTopologyMotion();
     const controller = new AbortController();
     topologyController = controller;
     if (topologyCooldownTimer !== null) window.clearInterval(topologyCooldownTimer);
@@ -616,9 +731,11 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
     let signature = "";
     topologyPending = { started, seedIp };
     const box = collectionBox();
+    box?.replaceChildren();
     renderCollectionProgress();
+    stopTopologyMotion = startTopologyMotionFallback();
     const timeout = window.setTimeout(() => controller.abort(), 3e5);
-    const ticker = window.setInterval(renderCollectionProgress, 1e3);
+    const ticker = window.setInterval(updateProgressTick, 1e3);
     try {
       let response = await fetch("/api/discovery/topology", {
         method: "POST",
@@ -657,13 +774,18 @@ html[data-theme=light] .topology-map .topo-node-state{fill:var(--map-text)}
       window.clearTimeout(timeout);
       window.clearInterval(ticker);
       if (generation === topologyGeneration) {
+        stopTopologyMotion();
         topologyBusy = false;
         topologyPending = null;
         topologyController = null;
+        if (topologyProgressView) {
+          box?.querySelector(".topo-loading-label")?.remove();
+          box?.querySelector(".topo-indeterminate-track")?.remove();
+        }
         if (button) button.disabled = false;
-        renderCollectionProgress();
+        updateProgressTick();
         if (topologyProgressView) topologyCooldownTimer = window.setInterval(() => {
-          renderCollectionProgress();
+          updateProgressTick();
           if (topologyProgressView && Date.now() >= topologyProgressView.retryAt && topologyCooldownTimer !== null) {
             window.clearInterval(topologyCooldownTimer);
             topologyCooldownTimer = null;

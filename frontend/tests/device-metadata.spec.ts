@@ -530,6 +530,72 @@ test("encoded IPv6 device paths support metadata edits, detail pages and removal
     }
 });
 
+test("device identity separates long names and IPv6 addresses across themes and languages", async ({ page, request }) => {
+    const ip = "2001:db8:1234:5678:9abc:def0:1234:5678";
+    const alias = "東京本社ネットワーク機器".repeat(5);
+    const hostname = "long-hostname-".repeat(8);
+    const device = { ip, name: hostname, display_name: alias, tags: ["Core"], status: "online" };
+    try {
+        expect((await request.post("/api/discovery/register", { data: [{ ip, name: hostname, community: "public" }] })).ok()).toBeTruthy();
+        await page.route("**/api/device/*", route => route.fulfill({ json: device }));
+        await page.goto(`/device/${encodeURIComponent(ip)}`);
+        const title = page.locator("#dev-title");
+        const meta = page.locator("#device-identity-meta");
+        const ipScroll = meta.locator(".device-meta-ip-scroll");
+        const ipValue = meta.locator(".device-meta-ip-value");
+        await expect(title).toHaveText(alias);
+        await expect(title).toHaveAttribute("title", alias);
+        await expect(meta.locator("#device-meta-name")).toHaveText(alias);
+        await expect(meta.locator("#device-meta-host")).toHaveText(hostname);
+        await expect(ipValue).toHaveText(ip);
+        await expect(page.locator("#device-identity .device-tag")).toHaveText("Core");
+        await expect(meta.locator(".device-meta-label")).toHaveText(["IP Address", "Device Name", "Host Name"]);
+        for (const width of [1280, 390, 320, 240]) {
+            await page.setViewportSize({ width, height: 900 });
+            for (const theme of ["dark", "light"]) {
+                await page.locator("#theme-select").selectOption(theme);
+                await expect(meta.locator(".device-meta-item").first()).toHaveCSS("background-color",
+                    theme === "dark" ? "rgb(26, 43, 64)" : "rgb(247, 250, 252)");
+                await expect(ipValue).toHaveCSS("color", theme === "dark" ? "rgb(238, 245, 251)" : "rgb(21, 35, 55)");
+                const geometry = await ipScroll.evaluate(element => {
+                    element.scrollLeft = 0;
+                    const box = element.getBoundingClientRect();
+                    const value = element.firstElementChild!.getBoundingClientRect();
+                    const style = getComputedStyle(element.firstElementChild!);
+                    return { boxLeft: box.left, boxRight: box.right, valueLeft: value.left, width: box.width, scrollWidth: element.scrollWidth, whiteSpace: style.whiteSpace, shrink: style.flexShrink, font: style.fontFamily };
+                });
+                expect(geometry.boxLeft).toBeGreaterThanOrEqual(0);
+                expect(geometry.boxRight).toBeLessThanOrEqual(width);
+                expect(geometry.valueLeft).toBeGreaterThanOrEqual(geometry.boxLeft - 1);
+                expect(geometry.scrollWidth).toBeGreaterThanOrEqual(geometry.width - 1);
+                expect(geometry.whiteSpace).toBe("nowrap");
+                expect(geometry.shrink).toBe("0");
+                expect(geometry.font).toContain("monospace");
+                const right = await ipScroll.evaluate(element => {
+                    element.scrollLeft = element.scrollWidth;
+                    return element.firstElementChild!.getBoundingClientRect().right - element.getBoundingClientRect().right;
+                });
+                expect(right).toBeLessThanOrEqual(1);
+                await expect(title).toHaveCSS("text-overflow", "ellipsis");
+            }
+        }
+        await page.locator("#lang-select").selectOption("ja");
+        await expect(meta.locator(".device-meta-label")).toHaveText(["IPアドレス", "機器名", "ホスト名"]);
+        await page.evaluate(value => window.renderDetail?.({ ...value, display_name: null }), device);
+        await expect(title).toHaveText(hostname);
+        await expect(title).toHaveAttribute("title", hostname);
+        await expect(meta.locator("#device-meta-name")).toHaveText("未設定");
+        await expect(meta.locator("#device-meta-name")).toHaveClass(/is-unset/);
+        await page.locator("#lang-select").selectOption("en");
+        await expect(meta.locator("#device-meta-name")).toHaveText("Not set");
+        await expect(meta.locator("#device-meta-host")).toHaveText(hostname);
+        await page.evaluate(value => window.renderDetail?.({ ...value, display_name: "  ", name: "" }), device);
+        await expect(title).toHaveText("-");
+        await expect(meta.locator("#device-meta-name")).toHaveText("Not set");
+        await expect(meta.locator("#device-meta-host")).toHaveText("-");
+    } finally { await request.delete(`/api/device/${encodeURIComponent(ip)}`); }
+});
+
 test("alias and tag chips edit Japanese safely, retaining edits after API failure", async ({ page }) => {
     await page.route("**/api/devices", (route) => route.fulfill({ json: [] }));
     await page.route("**/api/device/*", (route) => route.fulfill({
@@ -568,11 +634,16 @@ test("alias and tag chips edit Japanese safely, retaining edits after API failur
     fail = false;
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).not.toBeVisible();
-    await expect(page.locator("#dev-title")).toHaveText("大阪支店SW-01 (192.0.2.1)");
+    await expect(page.locator("#dev-title")).toHaveText("大阪支店SW-01");
+    await expect(page.locator("#device-meta-name")).toHaveText("大阪支店SW-01");
+    await expect(page.locator("#device-meta-host")).toHaveText("original-sysName");
+    await expect(page.locator("#device-identity img")).toHaveCount(0);
+    await expect(page.locator("#device-identity .device-tag")).toHaveText(["東京HQ", "<img src=x onerror=alert(1)>"]);
     await page.locator("#edit-device-metadata").click();
     await dialog.getByLabel("Display name", { exact: true }).fill("");
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).not.toBeVisible();
     expect(payload?.display_name).toBeNull();
-    await expect(page.locator("#dev-title")).toHaveText("original-sysName (192.0.2.1)");
+    await expect(page.locator("#dev-title")).toHaveText("original-sysName");
+    await expect(page.locator("#device-meta-name")).toHaveText("Not set");
 });

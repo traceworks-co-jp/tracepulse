@@ -1052,7 +1052,7 @@ export function renderSysChart(metrics: SystemMetric[] = []): void {
 function renderHeader(device: DeviceDetail): void {
     const title = document.getElementById("dev-title");
     if (title) {
-        title.textContent = `${deviceLabel(device)} (${device.ip || ""})`;
+        title.textContent = device.display_name?.trim() || device.name?.trim() || "-";
         title.title = title.textContent;
         let metadata = document.getElementById("device-identity");
         if (!metadata) {
@@ -1060,9 +1060,14 @@ function renderHeader(device: DeviceDetail): void {
             metadata.id = "device-identity";
             title.parentElement!.after(metadata);
         }
-        metadata.innerHTML = `<div class="device-original">sysName: ${escapeHtml(device.name || "-")}</div>
-            <div class="device-tags">${(device.tags || []).map((tag) => `<span class="device-tag">${escapeHtml(tag)}</span>`).join("")}</div>
-            <button type="button" id="edit-device-metadata">${escapeHtml(metadataText("edit"))}</button>`;
+        const alias = device.display_name?.trim() || "";
+        metadata.innerHTML = `<div id="device-identity-meta">
+            <div class="device-meta-item device-meta-ip"><span class="device-meta-label">${escapeHtml(t("ip_address"))}</span><div class="device-meta-ip-scroll" role="region" aria-label="${escapeHtml(t("ip_address"))}" tabindex="0"><span class="device-meta-ip-value">${escapeHtml(device.ip || "-")}</span></div></div>
+            <div class="device-meta-item"><span class="device-meta-label">${escapeHtml(t("device_name_label"))}</span><span id="device-meta-name" class="device-meta-value${alias ? "" : " is-unset"}">${escapeHtml(alias || t("not_set"))}</span></div>
+            <div class="device-meta-item"><span class="device-meta-label">${escapeHtml(t("host_name_label"))}</span><span id="device-meta-host" class="device-meta-value">${escapeHtml(device.name || "-")}</span></div>
+            </div><div class="device-identity-actions">
+            <button type="button" id="edit-device-metadata">${escapeHtml(metadataText("edit"))}</button>
+            <div class="device-tags">${(device.tags || []).map((tag) => `<span class="device-tag">${escapeHtml(tag)}</span>`).join("")}</div></div>`;
         metadata.querySelector<HTMLButtonElement>("button")!.onclick = () => {
             if (lastDeviceDetail) editDeviceMetadata(lastDeviceDetail, updated => {
                 if (updated && lastDeviceDetail) {

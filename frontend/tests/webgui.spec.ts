@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 type DiscoveryReply = { status?: number; json?: unknown; abort?: boolean };
 async function registrationFixture(page: Page) {
@@ -178,14 +180,17 @@ test.describe("interface error breakdown overlay", () => {
                     const trigger = page.locator("#if-tbody tr").nth(row).locator(".err-cell").first();
                     await trigger.scrollIntoViewIfNeeded();
                     await trigger.hover();
+                    if (row === 3 && height === 900) {
+                        await trigger.evaluate(element => window.scrollBy(0, element.getBoundingClientRect().top - 360));
+                    }
                     const popup = page.locator("body > .err-pop.is-open");
                     await expect(popup).toBeVisible();
                     await expect(popup.locator(".err-pop-row")).toHaveCount(9);
-                    const bounds = (await popup.boundingBox())!;
                     if (row === 3 && height === 900) {
                         await expect(trigger).toHaveClass(/flip/);
-                        expect(bounds.y + bounds.height).toBeLessThan((await trigger.boundingBox())!.y);
                     }
+                    const bounds = (await popup.boundingBox())!;
+                    if (row === 3 && height === 900) expect(bounds.y + bounds.height).toBeLessThan((await trigger.boundingBox())!.y);
                     expect(bounds.x).toBeGreaterThanOrEqual(7);
                     expect(bounds.y).toBeGreaterThanOrEqual(7);
                     expect(bounds.x + bounds.width).toBeLessThanOrEqual(width - 7);
@@ -215,6 +220,75 @@ test.describe("interface error breakdown overlay", () => {
             }
         });
     }
+});
+
+test("interface table fits its rows and keeps unbroken headers visible while scrolling", async ({ page, request }) => {
+    const ip = "192.0.2.247";
+    await request.post("/api/discovery/register", { data: [{ ip, name: "interface-layout", community: "public" }] });
+    try {
+        await page.addInitScript(() => {
+            localStorage.setItem("tracepulse-onboarding-v1", "done");
+            localStorage.setItem("tracepulse-lang", "en");
+        });
+        const interfaces = Array.from({ length: 24 }, (_, index) => ({
+            if_index: index + 1, if_name: `Gi0/${index + 1}`, link_status: "up", metrics: {},
+        }));
+        await page.route(`**/api/device/${ip}`, route => route.fulfill({
+            json: { ip, name: "interface-layout", status: "online", interfaces, metrics: [], alerts: [], spikes: [] },
+        }));
+        await page.goto(`/device/${ip}`);
+        const wrapper = page.locator(".interface-table-scroll");
+        const headers = page.locator("#if-table thead th");
+        await expect(page.locator("#if-tbody tr")).toHaveCount(24);
+        for (const [width, height] of [[1280, 900], [390, 844]]) {
+            await page.setViewportSize({ width, height });
+            for (const theme of ["dark", "light"]) {
+                await page.locator("#theme-select").selectOption(theme);
+                await wrapper.evaluate(element => { element.scrollTop = 0; element.scrollLeft = 0; });
+                const layout = await wrapper.evaluate(element => {
+                    const box = element.getBoundingClientRect();
+                    const style = getComputedStyle(element);
+                    const rows = [...element.querySelectorAll("tbody tr")];
+                    return {
+                        maxHeight: style.maxHeight,
+                        overflowX: style.overflowX,
+                        overflowY: style.overflowY,
+                        height: box.height,
+                        visibleRows: rows.filter(row => row.getBoundingClientRect().bottom <= box.bottom).length,
+                        scrollWidth: element.scrollWidth,
+                        clientWidth: element.clientWidth,
+                    };
+                });
+                expect(layout.height).toBeCloseTo(Math.max(380, Math.min(height * .52, 620)), 0);
+                expect(layout.overflowX).toBe("auto");
+                expect(layout.overflowY).toBe("auto");
+                expect(layout.visibleRows, `${width}x${height} ${theme}: ${JSON.stringify(layout)}`).toBeGreaterThanOrEqual(8);
+                if (width === 390) expect(layout.scrollWidth).toBeGreaterThan(layout.clientWidth);
+                const headerStyles = await headers.evaluateAll(elements => elements.map(element => {
+                    const style = getComputedStyle(element);
+                    return { whiteSpace: style.whiteSpace, wordBreak: style.wordBreak, background: style.backgroundColor, position: style.position, zIndex: style.zIndex, fits: element.scrollWidth <= element.clientWidth };
+                }));
+                for (const header of headerStyles) {
+                    expect(header).toEqual({ whiteSpace: "nowrap", wordBreak: "normal", background: theme === "light" ? "rgb(241, 245, 249)" : "rgb(15, 23, 42)", position: "sticky", zIndex: "2", fits: true });
+                }
+                await wrapper.evaluate(element => { element.scrollTop = 300; element.scrollLeft = element.scrollWidth; });
+                const sticky = await wrapper.evaluate(element => ({
+                    scrolled: element.scrollTop,
+                    top: element.querySelector("th")!.getBoundingClientRect().top - element.getBoundingClientRect().top,
+                }));
+                expect(sticky.scrolled).toBeGreaterThan(0);
+                expect(Math.abs(sticky.top)).toBeLessThanOrEqual(1);
+                await page.evaluate(items => window.renderInterfaces?.(items), interfaces.slice(0, 1));
+                const shortTable = await wrapper.evaluate(element => ({
+                    wrapper: element.getBoundingClientRect().height,
+                    table: element.querySelector("table")!.getBoundingClientRect().height,
+                }));
+                expect(Math.abs(shortTable.wrapper - shortTable.table)).toBeLessThanOrEqual(1);
+                expect(shortTable.wrapper).toBeLessThan(layout.height);
+                await page.evaluate(items => window.renderInterfaces?.(items), interfaces);
+            }
+        }
+    } finally { await request.delete(`/api/device/${ip}`); }
 });
 
 for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja"]] as const) {
@@ -260,12 +334,11 @@ for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja
             await expect(page.locator("#if-tbody .loading-skeleton")).toBeVisible();
             await expect(page.locator(".chart-wrap.is-loading")).toHaveCount(4);
             const initialTop = await section.evaluate(element => element.getBoundingClientRect().top);
-            const tableHeight = await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height);
             const chartHeight = await page.locator("#bw-chart").evaluate(element => element.getBoundingClientRect().height);
             await page.evaluate(() => { window.loadDeviceDetail?.(); window.loadDeviceDetail?.(); });
             expect(requests).toBe(1);
             finish!(true);
-            await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            await expect(page.locator("#dev-title")).toHaveText("detail-progress");
             await expect(progress).toBeVisible();
             await expect(page.locator(".chart-wrap.is-loading")).toHaveCount(4);
             await expect.poll(() => typeof finishHistory).toBe("function");
@@ -275,12 +348,13 @@ for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja
             await expect(page.locator("#if-tbody .loading-skeleton")).toHaveCount(0);
             const before = await section.evaluate(element => element.getBoundingClientRect().top);
             expect(before).toBe(initialTop);
-            expect(await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height)).toBe(tableHeight);
+            const tableHeight = await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height);
             expect(await page.locator("#bw-chart").evaluate(element => element.getBoundingClientRect().height)).toBe(chartHeight);
             await page.evaluate(() => window.loadDeviceDetail?.());
             await expect(progress).toBeVisible();
             expect(await section.evaluate(element => element.getBoundingClientRect().top)).toBe(before);
-            await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            expect(await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height)).toBe(tableHeight);
+            await expect(page.locator("#dev-title")).toHaveText("detail-progress");
             await expect.poll(() => requests).toBe(2);
             finish!(false);
             await expect(progress).toBeHidden();
@@ -289,8 +363,9 @@ for (const [width, theme, language] of [[1280, "light", "en"], [375, "dark", "ja
             await expect.poll(() => requests).toBe(3);
             finish!(true);
             await expect(progress).toBeHidden();
-            await expect(page.locator("#dev-title")).toHaveText(`detail-progress (${ip})`);
+            await expect(page.locator("#dev-title")).toHaveText("detail-progress");
             expect(await section.evaluate(element => element.getBoundingClientRect().top)).toBe(before);
+            expect(await page.locator(".interface-table-scroll").evaluate(element => element.getBoundingClientRect().height)).toBe(tableHeight);
         } finally { await request.delete(`/api/device/${ip}`); }
     });
 }
@@ -1425,7 +1500,7 @@ test("Port Check and Traceroute return result cards from the server", async ({ p
     expect(tracerouteRequests[0].count).toBe(30);
 });
 
-test("discovery loads TypeScript discovery and topology bundles", async ({ page }) => {
+test("discovery loads TypeScript discovery and topology bundles", async ({ page, request }) => {
     const consoleErrors: string[] = [];
     page.on("console", (message) => {
         if (message.type() === "error") consoleErrors.push(message.text());
@@ -1437,6 +1512,10 @@ test("discovery loads TypeScript discovery and topology bundles", async ({ page 
     await expect(page.locator("#topology-canvas")).toHaveCount(1);
     await expect(page.locator("script[src='/static/js/discovery.js']")).toHaveCount(1);
     await expect(page.locator("script[src='/static/js/topology.js']")).toHaveCount(1);
+    const topologyBundle = await request.get("/static/js/topology.js");
+    expect(topologyBundle.headers()["cache-control"]).toContain("no-cache");
+    expect(topologyBundle.headers()["cache-control"]).toContain("must-revalidate");
+    expect(await topologyBundle.text()).toBe(readFileSync(join("frontend", "dist", "topology.js"), "utf8"));
     expect(consoleErrors).toEqual([]);
 });
 
@@ -1460,19 +1539,82 @@ test("community topology shows animated elapsed progress until the request finis
     await expect(progress).toContainText("Elapsed: 0s");
     await expect(empty).toContainText("Elapsed: 0s");
     await expect(progress.locator(".topo-spinner")).toHaveCSS("animation-name", "topo-spin");
-    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("animation-name", "topo-indeterminate");
+    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("animation-name", "topo-bar-slide");
     await expect(empty.locator(".topo-spinner")).toBeVisible();
+    const spinnerRule = await page.evaluate(() => {
+        for (const sheet of document.styleSheets) {
+            for (const rule of sheet.cssRules) {
+                if (rule instanceof CSSStyleRule && rule.selectorText === ".topo-spinner") {
+                    return { display: rule.style.display, flex: rule.style.flex };
+                }
+            }
+        }
+        return null;
+    });
+    expect(spinnerRule).toEqual({ display: "inline-block", flex: "0 0 auto" });
+    for (const spinner of [progress.locator(".topo-spinner"), empty.locator(".topo-spinner")]) {
+        await expect(spinner).toHaveCSS("width", "14px");
+        await expect(spinner).toHaveCSS("height", "14px");
+        await expect(spinner).toHaveCSS("flex-shrink", "0");
+        await expect(spinner).toHaveAttribute("viewBox", "0 0 24 24");
+        await expect(spinner.locator("path")).toHaveAttribute("stroke", "#2dd4bf");
+        await expect(spinner.locator("circle")).toHaveAttribute("stroke", "rgba(148,163,184,.25)");
+        await expect(spinner).toHaveCSS("animation-duration", "0.75s");
+        const rotations = await spinner.evaluate(element => {
+            const animation = element.getAnimations()[0];
+            animation.pause();
+            animation.currentTime = 0;
+            const start = getComputedStyle(element).transform;
+            animation.currentTime = 200;
+            const moved = getComputedStyle(element).transform;
+            animation.play();
+            return [start, moved];
+        });
+        expect(rotations[0]).not.toBe(rotations[1]);
+    }
+    const track = progress.locator(".topo-indeterminate-track");
+    const bar = progress.locator(".topo-indeterminate-bar");
+    await expect(track).toHaveCSS("height", "6px");
+    const movement = await bar.evaluate(element => {
+        const animation = element.getAnimations()[0];
+        animation.pause();
+        animation.currentTime = 0;
+        const start = getComputedStyle(element).transform;
+        animation.currentTime = 750;
+        const moved = getComputedStyle(element).transform;
+        const halfway = new DOMMatrix(moved).m41;
+        animation.currentTime = 1500;
+        const end = new DOMMatrix(getComputedStyle(element).transform).m41;
+        animation.currentTime = 2250;
+        const returning = new DOMMatrix(getComputedStyle(element).transform).m41;
+        const widthRatio = element.getBoundingClientRect().width / element.parentElement!.getBoundingClientRect().width;
+        animation.play();
+        return { start, moved, halfway, end, returning, widthRatio };
+    });
+    expect(movement.start).not.toBe(movement.moved);
+    expect(movement.end).toBeGreaterThan(movement.halfway);
+    expect(movement.returning).toBeCloseTo(movement.halfway, 1);
+    expect(movement.widthRatio).toBeCloseTo(.35, 2);
+    const spinnerElement = (await progress.locator(".topo-spinner").elementHandle())!;
+    const emptySpinnerElement = (await empty.locator(".topo-spinner").elementHandle())!;
+    const barElement = (await bar.elementHandle())!;
     await page.clock.fastForward(2100);
     await expect(progress).toContainText("Elapsed: 2s");
     await expect(empty).toContainText("Elapsed: 2s");
+    await expect(progress.locator("[data-topo-elapsed]")).toHaveText("Elapsed: 2s");
+    expect(await spinnerElement.evaluate(element => element.isConnected)).toBeTruthy();
+    expect(await emptySpinnerElement.evaluate(element => element.isConnected)).toBeTruthy();
+    expect(await barElement.evaluate(element => element.isConnected)).toBeTruthy();
     await page.locator("#lang-select").selectOption("ja");
     await expect(progress).toContainText("経過 2秒");
     await expect(empty).toContainText("経過 2秒");
     await page.locator("#theme-select").selectOption("light");
     await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("background-color", "rgb(15, 118, 110)");
+    expect(await spinnerElement.evaluate(element => element.isConnected)).toBeTruthy();
+    expect(await barElement.evaluate(element => element.isConnected)).toBeTruthy();
     await page.emulateMedia({ reducedMotion: "reduce" });
-    await expect(progress.locator(".topo-spinner")).toHaveCSS("animation-name", "none");
-    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("animation-name", "none");
+    await expect(progress.locator(".topo-spinner")).toHaveCSS("animation-name", "topo-spin");
+    await expect(progress.locator(".topo-indeterminate-bar")).toHaveCSS("animation-name", "topo-bar-slide");
     reply!(true);
     await expect(progress.locator(".topo-spinner")).toHaveCount(0);
     await expect(empty).toBeHidden();
@@ -1485,6 +1627,72 @@ test("community topology shows animated elapsed progress until the request finis
     reply!(false);
     await expect(progress.locator(".topo-spinner")).toHaveCount(0);
     await expect(page.locator("#topology-btn")).toBeEnabled();
+});
+
+for (const paused of ["both", "bar"] as const) test(`topology motion falls back when ${paused} CSS animations are paused`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.addInitScript(() => localStorage.setItem("tracepulse-onboarding-v1", "done"));
+    let finish: (() => void) | undefined;
+    await page.route("**/api/discovery/topology", async route => {
+        await new Promise<void>(resolve => { finish = resolve; });
+        await route.fulfill({ json: { seed_ip: "192.0.2.1", nodes: [{ id: "seed", ip: "192.0.2.1" }], edges: [] } });
+    });
+    await page.goto("/discovery");
+    const selector = paused === "both" ? ".topo-spinner, .topo-indeterminate-bar" : ".topo-indeterminate-bar";
+    await page.addStyleTag({ content: `${selector} { animation-play-state: paused !important; }` });
+    await page.locator("#seed-ip").fill("192.0.2.1");
+    await page.locator("#topology-btn").click();
+    const spinner = page.locator("#topology-progress .topo-spinner");
+    const bar = page.locator("#topology-progress .topo-indeterminate-bar");
+    await expect(spinner).toBeVisible();
+    if (paused === "both") await expect.poll(() => spinner.evaluate(element => element.style.getPropertyPriority("transform"))).toBe("important");
+    await expect.poll(() => bar.evaluate(element => element.style.getPropertyPriority("transform"))).toBe("important");
+    const firstSpinner = await spinner.evaluate(element => getComputedStyle(element).transform);
+    const firstBar = await bar.evaluate(element => getComputedStyle(element).transform);
+    await expect.poll(() => spinner.evaluate(element => getComputedStyle(element).transform)).not.toBe(firstSpinner);
+    await expect.poll(() => bar.evaluate(element => getComputedStyle(element).transform)).not.toBe(firstBar);
+    await expect.poll(() => typeof finish).toBe("function");
+    finish!();
+    await expect(spinner).toHaveCount(0);
+    await expect(page.locator("#topology-btn")).toBeEnabled();
+});
+
+test("topology polling updates elapsed time without replacing the progress bar", async ({ page }) => {
+    await page.addInitScript(() => { localStorage.setItem("tracepulse-onboarding-v1", "done"); localStorage.setItem("tracepulse-lang", "en"); });
+    const progress = { state: "running", total: 2, completed: 0, running: 1, queued: 1, partial: 0, retry_after_seconds: 40, last_activity_at: null, devices: [] };
+    await page.route("**/api/discovery/topology", route => route.fulfill({ json: { seed_ip: "192.0.2.1", nodes: [], edges: [], progress } }));
+    let finish: (() => void) | undefined;
+    let polls = 0;
+    await page.route("**/api/topology", async route => {
+        if (++polls === 1) {
+            await route.fulfill({ json: { seed_ip: "192.0.2.1", nodes: [], edges: [], progress: { ...progress, completed: 1, queued: 0 } } });
+            return;
+        }
+        await new Promise<void>(resolve => { finish = resolve; });
+        await route.fulfill({ json: { seed_ip: "192.0.2.1", nodes: [], edges: [], progress: { ...progress, state: "complete", completed: 2, running: 0, queued: 0, retry_after_seconds: 0 } } });
+    });
+    await page.goto("/discovery");
+    await page.clock.install();
+    await page.locator("#seed-ip").fill("192.0.2.1");
+    await page.locator("#topology-btn").click();
+    const box = page.locator("#topology-progress");
+    const bar = box.locator("progress");
+    await expect(bar).toBeVisible();
+    const spinnerElement = (await box.locator(".topo-spinner").elementHandle())!;
+    const movingBarElement = (await box.locator(".topo-indeterminate-bar").elementHandle())!;
+    const barElement = (await bar.elementHandle())!;
+    await page.clock.fastForward(1500);
+    await expect(bar).toHaveAttribute("value", "1");
+    await page.clock.fastForward(30000);
+    await expect(box.locator(".topo-loading-label [data-topo-elapsed]")).toHaveText("Elapsed: 31s");
+    await expect(box.locator("[data-topo-warning]")).toBeVisible();
+    await expect(box.locator("[data-topo-cooldown]")).toBeVisible();
+    expect(await barElement.evaluate(element => element.isConnected)).toBeTruthy();
+    expect(await spinnerElement.evaluate(element => element.isConnected)).toBeTruthy();
+    expect(await movingBarElement.evaluate(element => element.isConnected)).toBeTruthy();
+    await expect.poll(() => typeof finish).toBe("function");
+    finish!();
+    await expect(bar).toHaveAttribute("value", "2");
 });
 
 test("topology inspector colors device and interface states across themes and viewports", async ({ page }) => {
